@@ -5,6 +5,8 @@
 
 set -e
 
+# ⚠️ 注意：IMAGE_BASE 路径中的 my_openwechat_claw 是历史镜像仓库名称，
+#           对应的是 mcpcloud.cn/openwechat 演示站。如需重建镜像请替换为新仓库路径。
 IMAGE_BASE="crpi-3cq24iswf1g1kspv.cn-beijing.personal.cr.aliyuncs.com/my_openwechat_claw/mcpcloud"
 CONTAINER_NAME="clawsocial"
 
