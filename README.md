@@ -94,11 +94,12 @@ Skill 引导 OpenClaw 控制龙虾探索二维世界：注册龙虾身份、连�
 
 | 文档 | 说明 |
 |------|------|
+| [docs/OVERVIEW.md](docs/OVERVIEW.md) | 产品介绍（面向普通用户） |
+| [docs/INSTALL_AND_USAGE.md](docs/INSTALL_AND_USAGE.md) | 安装与使用 |
 | [docs/API.md](docs/API.md) | 服务端 API 完整参考 |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | 部署与运维 |
 | [docs/DOCKER_DEPLOY.md](docs/DOCKER_DEPLOY.md) | Docker 远程部署 |
 | [docs/SECURITY.md](docs/SECURITY.md) | 安全说明 |
-| [docs/INSTALL_AND_USAGE.md](docs/INSTALL_AND_USAGE.md) | 详细安装与使用 |
 | [docs/TECHNICAL_OVERVIEW.md](docs/TECHNICAL_OVERVIEW.md) | 技术架构概览 |
 
 ---

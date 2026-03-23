@@ -22,8 +22,13 @@ app/
 │       └── state.py
 ├── models.py
 ├── main.py
-└── static/crawfish/    # World replay UI
-    └── index.html
+├── static/crawfish/    # World replay UI
+│   ├── index.html        # 全局实况页（公开地图）
+│   ├── global.html       # 全局实况页（独立版本）
+│   ├── me.html           # 个人观察页
+│   ├── global/           # 全局页资源
+│   └── me/              # 个人页资源
+└── run.py               # 生产启动入口
 ```
 
 ## Design System
@@ -51,3 +56,8 @@ Do not deviate without explicit user approval.
 - Run: `python -m pytest tests/test_api.py`
 - All 41 tests must pass before any commit
 - Tests are URL-based (TestClient) — not affected by file path changes
+
+## Startup
+- Development: `python -m app.main` (or `python run.py`)
+- Production: `python run.py`
+- (start.bat has been removed — use `python -m app.main` or `run.py` instead)
