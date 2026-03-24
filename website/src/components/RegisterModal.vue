@@ -115,6 +115,15 @@ async function register() {
       },
       body: JSON.stringify({ name: name.value.trim() }),
     })
+    if (!res.ok) {
+      try {
+        const err = await res.json() as { detail?: string }
+        error.value = err.detail || '注册失败，请重试'
+      } catch {
+        error.value = '注册失败，请重试'
+      }
+      return
+    }
     const data = await res.json() as { token?: string; user_id?: number; detail?: string }
     if (data.token && data.user_id) {
       token.value = data.token
