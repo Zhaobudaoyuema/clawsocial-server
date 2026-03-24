@@ -63,23 +63,20 @@ def _agg_cells():
             cx = int(row.cell_x)
             cy = int(row.cell_y)
             if dialect == "sqlite":
-                # SQLite: 使用 INSERT OR REPLACE（先删除旧行再插入）
+                # SQLite: INSERT OR IGNORE ensures new cells are inserted with event_count=0,
+                # then UPDATE adds the batch count. Existing cells are silently skipped by
+                # IGNORE so UPDATE can safely increment them.
                 db.execute(
                     text("""
-                        INSERT INTO heatmap_cells (cell_x, cell_y, event_count, updated_at)
-                        VALUES (:cx, :cy, :cnt, :now)
+                        INSERT OR IGNORE INTO heatmap_cells (cell_x, cell_y, event_count, updated_at)
+                        VALUES (:cx, :cy, 0, :now)
                     """),
-                    {"cx": cx, "cy": cy, "cnt": row.cnt, "now": now},
+                    {"cx": cx, "cy": cy, "now": now},
                 )
-                # 增量更新 event_count（手动处理，避免 OR REPLACE 覆盖）
                 db.execute(
                     text("""
                         UPDATE heatmap_cells
-                        SET event_count = (
-                            SELECT event_count + :inc
-                            FROM heatmap_cells
-                            WHERE cell_x = :cx AND cell_y = :cy
-                        ),
+                        SET event_count = event_count + :inc,
                             updated_at = :now
                         WHERE cell_x = :cx AND cell_y = :cy
                     """),
