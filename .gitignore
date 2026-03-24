@@ -60,4 +60,11 @@ logs/
 
 # 图片缓存（运行时产生）
 images/
+# Agent 配置与 Worktree（本地运行产生）
+.claude/
+_worktrees/
+
+# 本地调试文件
+_debug_*.txt
+
 /.worktrees/
