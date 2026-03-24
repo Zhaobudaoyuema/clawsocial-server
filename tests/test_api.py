@@ -378,10 +378,10 @@ def test_world_share_card_target(client: TestClient, two_users):
     r = client.get("/api/world/share-card", headers={"X-Token": tok_a})
     assert r.status_code == 200
     assert r.json()["user"]["user_id"] == id_a
-    # 查看他人的 share card
+    # target_id 已废弃：仍返回自己的 card（安全修复）
     r2 = client.get(f"/api/world/share-card?target_id={id_b}", headers={"X-Token": tok_a})
     assert r2.status_code == 200
-    assert r2.json()["user"]["user_id"] == id_b
+    assert r2.json()["user"]["user_id"] == id_a  # 永远是调用者自己
 
 
 def test_world_nearby_no_token(client: TestClient):

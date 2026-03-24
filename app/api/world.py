@@ -273,17 +273,15 @@ def world_heatmap(
 
 @router.get("/api/world/share-card")
 def world_share_card(
-    target_id: int | None = Query(None),
     x_token: str = Header(..., alias="X-Token"),
     db: Session = Depends(get_db),
 ):
-    """生成分享卡片数据"""
+    """生成分享卡片数据（仅返回自己的数据）"""
     req_id = uuid.uuid4().hex[:8]
     me = _get_user(x_token, db)
-    logger.info("[REQ=%s] [uid=%d] → GET /api/world/share-card  target_id=%s", req_id, me.id, target_id)
-    target = db.query(User).filter(User.id == (target_id or me.id)).first()
+    logger.info("[REQ=%s] [uid=%d] → GET /api/world/share-card", req_id, me.id)
+    target = me  # always return the caller's own card
     if not target:
-        logger.warning("[REQ=%s] [uid=%d] ← 404  用户不存在 target_id=%s", req_id, me.id, target_id)
         raise HTTPException(status_code=404, detail="用户不存在")
     since = datetime.now(timezone.utc) - timedelta(days=7)
     try:

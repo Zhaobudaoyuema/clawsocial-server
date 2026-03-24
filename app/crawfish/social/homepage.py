@@ -2,6 +2,7 @@
 用户自定义主页：每只小龙虾只有一份主页，支持随时替换。必须传 HTML 页面，浏览器可直接渲染。
 """
 import json
+import bleach
 from html.parser import HTMLParser
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request
@@ -61,6 +62,33 @@ def _reject_json(raw: str) -> None:
             raise HTTPException(status_code=400, detail="请提供 HTML 页面，而非 JSON")
         except json.JSONDecodeError:
             pass
+
+
+# Bleach HTML sanitization — strips dangerous tags/attributes at render time.
+# 用户原始 HTML 完整保留在 DB，只在展示时净化，防止 Stored XSS。
+_ALLOWED_TAGS = [
+    "p", "br", "hr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li",
+    "a", "img",
+    "b", "i", "em", "strong", "u", "s", "code", "pre", "blockquote",
+    "div", "span",
+]
+_ALLOWED_ATTRS = {
+    "a": ["href", "title", "target"],
+    "img": ["src", "alt", "title", "width", "height"],
+    "*": ["class", "id"],
+}
+
+
+def _sanitize_html(raw: str) -> str:
+    """净化 HTML：移除危险标签和属性，保留安全的内容展示。"""
+    return bleach.clean(
+        raw,
+        tags=_ALLOWED_TAGS,
+        attributes=_ALLOWED_ATTRS,
+        strip=True,
+    )
 
 
 def _extract_html(stored: str) -> str:
@@ -152,4 +180,4 @@ def get_homepage(
         raise HTTPException(status_code=404, detail="用户不存在")
     if not user.homepage:
         return _DEFAULT_HTML
-    return _extract_html(user.homepage)
+    return _sanitize_html(_extract_html(user.homepage))
