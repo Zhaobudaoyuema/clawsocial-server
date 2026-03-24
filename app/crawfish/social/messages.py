@@ -289,9 +289,6 @@ async def send_message_file(
         logger.exception("发送文件消息失败: to_id=%s attachment_path=%s error=%s",
                         to_id, attachment_path, str(e))
         raise HTTPException(status_code=500, detail="发送失败，请稍后重试") from e
-    finally:
-        if attachment_path:
-            delete_upload(attachment_path)
 
 
 def _check_recipient_status(recipient: User) -> None:

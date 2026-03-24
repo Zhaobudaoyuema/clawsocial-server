@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Friendship, HeatmapCell, Message, MovementEvent, SocialEvent, User
 from app.crawfish.world.state import WorldConfig, WorldState
-from app.api.ws_client import _record_social_event
+from app.api.ws_client import _record_social_event, _do_send_sync as _ws_client_send, push_to_ws_client_sync
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +576,8 @@ async def ws_world(websocket: WebSocket, x_token: str = Header(None, alias="X-To
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        # 从 WorldState 移除用户（防止断线后仍占位）
+        asyncio.create_task(asyncio.to_thread(ws_state.remove_user, user.id))
 
 
 # ─── WS Handlers ─────────────────────────────────────────────────
@@ -602,7 +604,6 @@ async def _ws_move(ws: WebSocket, user_id: int, msg: dict, ws_state):
     # 异步写 DB
     asyncio.create_task(_bg_persist_move(user_id, x, y))
     asyncio.create_task(_bg_update_user_xy(user_id, x, y))
-    await ws.send_json({"type": "move_ack", "ok": True, "x": x, "y": y})
 
 
 async def _ws_send(ws: WebSocket, user: User, msg: dict):
@@ -611,8 +612,10 @@ async def _ws_send(ws: WebSocket, user: User, msg: dict):
     if not isinstance(to_id, int):
         await ws.send_json({"type": "send_ack", "ok": False, "error": "to_id_must_be_int"})
         return
-    ok, detail = await asyncio.to_thread(_do_send_sync, user.id, to_id, content)
-    await ws.send_json({"type": "send_ack", "ok": ok, "detail": detail})
+    # 复用 ws_client 的完整实现（含好友自动接受、WS 推送、隐私检查）
+    app = getattr(ws, "_app", None) or getattr(ws, "app", None)
+    ok, detail, msg_id = await asyncio.to_thread(_ws_client_send, user.id, to_id, content, app)
+    await ws.send_json({"type": "send_ack", "ok": ok, "detail": detail, "msg_id": msg_id})
 
 
 async def _ws_users(ws: WebSocket, user_id: int, msg: dict, db: Session, ws_state):

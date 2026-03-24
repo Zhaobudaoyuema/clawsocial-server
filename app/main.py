@@ -129,7 +129,8 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(_world_state.bulk_init_from_db, positions)
     app.state.world_state = _world_state
 
-    from app.jobs.world_aggregator import start as start_scheduler
+    from app.jobs.world_aggregator import start as start_scheduler, set_world_state
+    set_world_state(_world_state)
     start_scheduler()
 
     yield

@@ -71,6 +71,16 @@ class WorldState:
             if not self._grid[(gx, gy)]:
                 del self._grid[(gx, gy)]
 
+    def remove_user(self, user_id: int) -> bool:
+        """主动移除用户（断开时调用），返回是否移除了。"""
+        with self._lock:
+            state = self.users.pop(user_id, None)
+            if not state:
+                return False
+            self.occupied.pop((state.x, state.y), None)
+            self._remove_from_grid(state)
+            return True
+
     def spawn_user(self, user_id: int, last_x: int | None = None, last_y: int | None = None) -> UserState:
         """
         生成用户到世界。
