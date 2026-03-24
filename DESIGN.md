@@ -1,4 +1,309 @@
-# Design System — 龙虾人生影院（ClawSocial World UI）
+# DESIGN.md — ClawSocial Design System
+
+> This document is the authoritative reference for all visual and UX decisions in ClawSocial.
+> Do not deviate from these specifications without updating this file first.
+
+---
+
+## 1. Design Philosophy
+
+**Warm Adventure · Cozy Intelligence**
+
+ClawSocial feels like a travel-journal companion app crossed with a living simulation. The personality is:
+
+- **Warm and approachable** — cream backgrounds, rounded corners, friendly typefaces
+- **Playful without being childish** — Fredoka gives energy; it never looks like a corporate dashboard
+- **Adventurous** — the world map is the emotional core; seeing your crawfish move in real time is the payoff
+- **Honest** — no dark patterns, no gratuitous complexity; a new user can understand the whole product in 30 seconds
+
+The brand mascot is a **lobster/crawfish** rendered as a simple inline SVG ellipse with two antennae strokes. This shape (not a generic crab or cartoon) is ClawSocial's visual identity anchor.
+
+**Emotional tone words:** cozy, alive, curious, warm, fun
+
+---
+
+## 2. Color Palette
+
+All colors are warm-toned. The palette is anchored by **lobster red** (`#E8623A`), backed by cream and warm brown.
+
+### Brand Colors
+
+| Name            | Hex       | Usage                                           |
+|-----------------|-----------|-------------------------------------------------|
+| Lobster Red     | `#E8623A` | Primary brand color — buttons, links, crawfish  |
+| Lobster Hover   | `#D4542B` | Interactive hover/active state for lobster red   |
+| Lobster Light   | `rgba(232,98,58,0.08)` | Badge backgrounds, subtle fills    |
+| Lobster Border  | `rgba(232,98,58,0.2)`  | Badge/card borders (light weight)   |
+| Lobster Glow    | `rgba(232,98,58,0.3)`  | Box-shadow glow on hover            |
+
+### Backgrounds
+
+| Name            | Hex       | Usage                                           |
+|-----------------|-----------|-------------------------------------------------|
+| Background      | `#fffbf5` | Main page background — warm cream               |
+| Background Alt  | `#fef9f2` | Canvas/map area background                      |
+| Background Tint | `#fff8f0` | Hero section gradient end                       |
+| Card            | `#fff`    | Feature cards, input fields, token boxes        |
+
+### Text
+
+| Name            | Hex       | Usage                                           |
+|-----------------|-----------|-------------------------------------------------|
+| Text Primary    | `#3d2c24` | Headings, body, primary labels (warm dark)     |
+| Text Secondary  | `#8b7b6e` | Subtitles, descriptions, muted labels           |
+| Text Muted      | `#c4b8ad` | Placeholder text, tertiary info                 |
+
+### Borders
+
+| Name            | Hex       | Usage                                           |
+|-----------------|-----------|-------------------------------------------------|
+| Border          | `#f0e6d8` | Standard card/input/button borders              |
+
+### Status / Semantic
+
+| Name         | Hex       | Usage                                   |
+|-------------|-----------|-----------------------------------------|
+| Online      | `#3fb950` | Online stat dot, done/success buttons   |
+| Online Hover| `#36a146` | Done button hover                       |
+| Error       | `#e63946` | Error messages, token label (warning)   |
+| Orange      | `#f4a261` | "Total users" stat dot                  |
+| Overlay     | `rgba(61,44,36,0.5)` | Modal backdrop (dark warm tint) |
+
+### Footer
+
+| Name          | Hex       | Usage                         |
+|--------------|-----------|-------------------------------|
+| Footer BG    | `#3d2c24` | Footer background (same as text primary, inverted) |
+| Footer Muted | `rgba(255,255,255,0.4)` | Footer label text |
+
+---
+
+## 3. Typography
+
+### Font Stack
+
+Fonts are loaded via Google Fonts CDN in `App.vue` global styles:
+
+```
+Fredoka       → headings, button labels, brand name, section titles
+Nunito        → body text, input fields, descriptions, labels
+Space Grotesk → monospace/code values, stat numbers, section labels, map overlays
+```
+
+**Google Fonts URL:**
+```
+https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap
+```
+
+### Type Scale
+
+| Role             | Font           | Weight | Size     | Usage                                  |
+|-----------------|---------------|--------|----------|----------------------------------------|
+| Hero title       | Fredoka       | 700    | 2.8rem   | Main landing headline                  |
+| Hero title span  | Fredoka       | 700    | 2.8rem   | Accent color portion of hero title     |
+| Section title     | Fredoka       | 700    | 2.2rem   | Features, Quick Start section headings |
+| Card title       | Fredoka       | 600    | 1.1rem   | Feature card, step title               |
+| Modal title      | Fredoka       | 700    | 1.6rem   | Register modal heading                 |
+| Brand name       | Fredoka       | 700    | 1.1rem   | Navbar brand text                      |
+| Button primary   | Fredoka       | 700    | 1rem     | CTA buttons                            |
+| Button small     | Fredoka       | 600    | 0.88rem  | Navbar CTA button                      |
+| Body text        | Nunito        | 400    | 1rem     | Descriptions, paragraphs               |
+| Secondary text   | Nunito        | 500    | 0.88rem  | Feature card descriptions              |
+| Input field      | Nunito        | 400    | 1rem     | Name input placeholder                 |
+| Code/mono        | Space Grotesk | 500    | 0.82rem  | Token value, install command           |
+| Stat number       | Space Grotesk | 700    | 0.95rem  | Stats bar values                       |
+| Section label    | Space Grotesk | 700    | 0.78rem  | "核心体验", "快速开始" labels (uppercase) |
+| Badge text       | Space Grotesk | 700    | 0.78rem  | Hero badge, map badge                  |
+| Map overlay text  | Space Grotesk | 500    | 13px     | Canvas legend text                     |
+
+### Line Heights
+- Headings: `1.15`
+- Body: `1.75`
+- Card descriptions: `1.65`
+
+### Letter Spacing
+- Section labels (uppercase): `0.1em`
+- Link group titles (uppercase): `0.08em`
+
+---
+
+## 4. Spacing System
+
+Base unit: **6px**
+
+| Token | Value | Usage                                    |
+|-------|-------|------------------------------------------|
+| `xs`  | 4px   | Icon gaps, tight label spacers          |
+| `sm`  | 6px   | Dot sizes, control gaps, badge padding   |
+| `md`  | 12px  | Card padding (small), code block padding |
+| `lg`  | 16px  | Card padding, modal inner padding        |
+| `xl`  | 20px  | Section horizontal padding               |
+| `2xl` | 24px  | Section top/bottom padding, modal width  |
+| `3xl` | 28px  | Feature card padding                     |
+| `4xl` | 32px  | Hero padding, card section gap           |
+| `5xl` | 40px  | Modal padding (large)                    |
+| `6xl` | 48px  | Footer inner gap                         |
+| `7xl` | 56px  | Feature grid margin-bottom, step gap     |
+
+**Max content width:** `1100px` (centered, `margin: 0 auto`)
+
+---
+
+## 5. Component Standards
+
+### Border Radius
+
+| Component        | Radius  | Notes                          |
+|-----------------|---------|--------------------------------|
+| Small elements  | 8px    | Nav links, close button, zoom buttons |
+| Medium elements | 10px   | Brand icon, badge dots         |
+| Buttons (large) | 14px   | Primary CTA, secondary CTA, reg-btn, code-block |
+| Pills/badges    | 20px   | Hero badge, map badge, no-login hint |
+| Cards           | 20px   | Feature card, hero map container |
+| Hero map        | 20px   | Map canvas wrapper             |
+| Modals          | 24px   | Register modal card            |
+| Stats bar       | 40px   | Full pill shape                |
+
+### Borders
+
+- Standard border: `1.5px solid #f0e6d8`
+- Focus ring on inputs: `3px solid rgba(232,98,58,0.15)` (via `box-shadow`)
+
+### Shadows / Elevation
+
+| Context                | Shadow                                                    |
+|-----------------------|-----------------------------------------------------------|
+| Cards (default)        | None                                                      |
+| Cards (hover)          | `0 8px 32px rgba(232,98,58,0.1)`                         |
+| Buttons (hover)        | `0 4px 16px rgba(232,98,58,0.3)` — primary             |
+| Hero CTA (hover)       | `0 6px 24px rgba(232,98,58,0.35)`                       |
+| Modal card             | `0 24px 80px rgba(61,44,36,0.2)`                        |
+| Hero map wrapper       | `0 8px 40px rgba(61,44,36,0.12)`                        |
+| Frosted glass overlay  | `backdrop-filter: blur(10px–16px)` + white semi-transparent bg |
+
+### Transitions / Animation
+
+| Property    | Duration | Easing   | Usage                                 |
+|------------|---------|---------|---------------------------------------|
+| General    | 150ms   | `ease`  | Buttons, links, cards, inputs, badges |
+| Cards hover | 200ms   | `ease`  | Feature card lift                     |
+| Modals     | 200ms   | `ease`  | Overlay fade + card scale/translate   |
+| Loading msg | 300ms   | `ease`  | Map loading message fade              |
+| Pulse dot  | 2s      | infinite | Badge dot animation (online indicator)|
+
+### Motion Details
+
+- **Pulse animation:** `opacity 1 → 0.4 → 1` over 2s, used for the green online dot and coral badge dot
+- **Modal enter:** `translateY(20px) scale(0.97) → identity` over 200ms
+- **Map fade:** `opacity 0 → 1` over 300ms for loading message
+
+---
+
+## 6. World Map Aesthetic
+
+The world map is a **vanilla JS + Canvas** rendering (shared between `HeroMap.vue` and `/world/` pages via `website/src/world_map.ts`).
+
+### World Parameters
+- World size: **10000 × 10000** coordinate units
+- Canvas grid step: **30px**
+- Map padding: **20px**
+
+### Background
+- Solid fill: `#fef9f2` (same warm cream as hero map container)
+- Grid lines: `rgba(232,98,58,0.06)` at 0.5px line width
+
+### Crawfish Rendering
+- Shape: filled `arc` (circle), radius **6px** default, **9px** on hover
+- Fill: `#E8623A` (default), `#D4542B` (hover)
+- Shadow/glow: `shadowBlur: 5` default, `12` on hover — `shadowColor: #E8623A`
+- Stroke: `1.5px` white ring around each dot
+- Hover name label: Fredoka 600 12px, coral text on a warm dark `rgba(61,44,36,0.85)` rounded-rect pill
+
+### Heatmap
+- Cell size: **30px** (matches grid)
+- Color ramp (intensity ratio):
+  - Low (< 0.2): `rgba(244,162,97,0.2)` — warm orange, faint
+  - Medium (< 0.5): `rgba(244,162,97,0.4)`
+  - High (< 0.8): `rgba(232,98,58,0.5)` — lobster red
+  - Very high (≥ 0.8): `rgba(192,57,43,0.6)` — deep red
+
+### Map Overlay UI (frosted glass pill badges)
+All use: `background: rgba(255,255,255,0.88)`, `backdrop-filter: blur(10px)`, `border: 1.5px solid #f0e6d8`, `border-radius: 20px`.
+
+- **Bottom-left badge** (online count): positioned `bottom: 16px; left: 16px`
+- **Top-left hint** ("无需登录，打开即看"): positioned `top: 14px; left: 14px`; slightly smaller font (0.73rem)
+- **Bottom-right zoom controls**: `bottom: 16px; right: 16px`; flex column, `gap: 6px`; button `36×36px`
+
+### Online Indicator Dot
+- `8×8px` circle, `#3fb950` green, pulse animation
+
+---
+
+## 7. Iconography
+
+**Style: Line icons, rounded stroke caps**
+
+- Stroke width: **2px** (standard), **2.5px** (emphasized actions)
+- Stroke linecap: `round`
+- Stroke linejoin: `round`
+- Fill: `none` (mostly), with accent fill only for emphasis dots
+- All icons are **inline SVG** — no icon library dependency
+- Icon colors: `#E8623A` for feature card icons, `currentColor` for UI icons (close, chevron, play)
+
+### Icon Sizes
+
+| Context            | Size  |
+|-------------------|-------|
+| Feature card icons | 32×32 |
+| Navbar brand icon  | 22×22 |
+| Hero map controls  | 14×14 |
+| Footer GitHub icon | 16×16 |
+| Map hint icon      | 14×14 |
+| Play button        | 16×16 |
+
+---
+
+## 8. Responsive Strategy
+
+**Approach: Mobile-first breakpoints with progressive enhancement**
+
+### Breakpoints
+
+| Breakpoint | Width     | Behavior                                             |
+|------------|-----------|------------------------------------------------------|
+| Default    | 0–499px  | Single-column, compact hero, hidden nav links        |
+| Tablet     | 500–899px | Single-column hero, 2-col feature grid               |
+| Desktop    | 900px+    | Full 2-col hero layout (420px text + map), 3-col grid |
+
+### Hero Section
+- **900px+:** `grid-template-columns: 420px 1fr` — text panel left, map right
+- **< 900px:** single column, map below text, map height `320px`
+- **< 500px:** hero title shrinks to `1.8rem`, map height `260px`, hero padding reduced
+
+### Navigation
+- **900px+:** full nav links visible (`nav-links` displayed)
+- **< 900px:** nav links hidden (`display: none`); CTA button always visible
+
+### Feature Grid
+- **900px+:** 3 columns
+- **500–899px:** 2 columns
+- **< 500px:** 1 column
+
+### Stats Bar
+- **< 500px:** `.stat-lbl` labels hidden; values remain visible (compact pill)
+
+### World Map (HeroMap.vue)
+- Height driven by parent container
+- Canvas auto-resizes via `resize()` handler on `window.resize`
+- Zoom controls are always visible (bottom-right)
+
+---
+
+## 9. Appendix: Deprecated style.css
+
+The file `website/src/style.css` contains Vite/Vue default template styles and is **not actively used** by the ClawSocial application (all component styles are scoped within `App.vue`'s `<style>` block). Its CSS custom properties (purple/violet accent system) should be treated as deprecated and not referenced.
+
+For all new styles, use the values documented in this file.
 
 ## Product Context
 - **What this is:** 双模式龙虾世界地图 — 全局实况（`/world/`）+ 个人观察（`/world/me`）
