@@ -93,6 +93,13 @@ def _ensure_aware(dt: datetime) -> datetime:
     return dt
 
 
+def _ensure_aware(dt: datetime) -> datetime:
+    """将 naive datetime 强制转为 UTC aware（防止 naive/aware 混合比较崩溃）。"""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _is_new(created_at: datetime) -> bool:
     """判断用户是否为新虾（注册7天内）。"""
     now = datetime.now(timezone.utc)
@@ -136,8 +143,6 @@ def _record_social_event(
 
 # ─── Step Context 聚合（Reactive 上下文封装）─────────────────────
 
-from datetime import timedelta
-
 _CELL_SIZE = 30          # 与 WorldState.CELL_SIZE 保持一致
 _HOTSPOT_QUERY_HOURS = 24  # 查询热点的窗口（小时）
 
@@ -165,7 +170,6 @@ def _build_message_feedback(db, user_id: int, now: datetime) -> list[dict]:
     - 对方有回复（对方发给自己的消息）→ 有回复
     - 时间窗口：5 分钟内没回复算"未回复"
     """
-    from datetime import timedelta
     from sqlalchemy import or_ as sql_or
     from app.models import Message
 
@@ -1320,8 +1324,10 @@ def _query_open_users(user_id: int, keyword: str | None, _db=None) -> tuple[list
                 User.name.ilike(k) | User.description.ilike(k)
             )
         total = base_q.count()
+        # ORDER BY User.id DESC: newer users tend to be more active;
+        # stable sort avoids the O(n log n) cost of RAND() on large tables.
         users = (
-            base_q.order_by(func.random())
+            base_q.order_by(User.id.desc())
             .limit(10)
             .all()
         )
@@ -1735,6 +1741,10 @@ async def _bg_persist_move(user_id: int, x: int, y: int):
         db.close()
 
 
+# Race condition note: last_x/last_y are only used for reconnection recovery (not
+# authoritative positions — WorldState is the source of truth).  A concurrent write
+# from the HTTP API handler can overwrite this value; the DB-level race is acceptable
+# and not worth the complexity of an upsert for these non-critical fields.
 async def _bg_update_user_xy(user_id: int, x: int, y: int):
     db = next(get_db())
     try:
@@ -1754,7 +1764,6 @@ async def _bg_delete_acked(user_id: int, acked_ids: list):
     处理消息已读（ack）：
     1. 将对方的消息标记 read_at（告知发送方已读）
     2. 通知发送方（通过 WS）：message_read
-    3. 删除 social_events 中对应的记录（不删除 Message 本体）
     """
     db = next(get_db())
     try:
@@ -1800,16 +1809,7 @@ async def _bg_delete_acked(user_id: int, acked_ids: list):
                     }
                 )
 
-        # 4. 删除 social_events 中对应的记录
-        try:
-            from app.models import SocialEvent
-            db.query(SocialEvent).filter(
-                SocialEvent.user_id == user_id,
-                SocialEvent.id.in_(id_nums),
-            ).delete(synchronize_session=False)
-            db.commit()
-        except ImportError:
-            pass
+
     except Exception as exc:
         logger.warning("[uid=%d] delete_acked 失败  acked_ids=%s  exc=%s", user_id, acked_ids, exc)
         db.rollback()

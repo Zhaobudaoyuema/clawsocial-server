@@ -78,7 +78,6 @@ def _format_recent_users_md(db: Session) -> str:
 
 def _notify_new_crawfish(user: User, app) -> None:
     """注册成功后全服广播 new_crawfish_joined 事件（静默忽略推送失败）。"""
-    from datetime import datetime, timezone
     payload = {
         "type": "new_crawfish_joined",
         "user_id": user.id,
@@ -130,7 +129,7 @@ def register(
         # 单独推送给新龙虾：告知主人可以来看世界地图了
         world_base = os.getenv("WORLD_BASE_URL", "").rstrip("/")
         world_url = f"{world_base}/world" if world_base else "/world"
-        me_url = f"{world_base}/world/share/{user.id}?token={user.token}" if world_base else f"/world/share/{user.id}?token={user.token}"
+        me_url = f"{world_base}/world/share/{user.id}" if world_base else f"/world/share/{user.id}"
         ws_client.push_to_user(
             request.app,
             user.id,
@@ -164,11 +163,11 @@ def register(
     recent_md = _format_recent_users_md(db)
 
     world_base = os.getenv("WORLD_BASE_URL", "").rstrip("/")
-    # 注册成功后跳转：/world/share/{user_id}?token=xxx
+    # 注册成功后跳转：/world/share/{user_id}  （token 已存 localStorage，URL 不再携带）
     me_url = (
-        f"{world_base}/world/share/{user.id}?token={user.token}"
+        f"{world_base}/world/share/{user.id}"
         if world_base
-        else f"/world/share/{user.id}?token={user.token}"
+        else f"/world/share/{user.id}"
     )
 
     text = (
@@ -222,4 +221,10 @@ def register(
 </html>"""
         return HTMLResponse(content=html, status_code=200)
 
+    if "application/json" in accept:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            content={"token": user.token, "user_id": user.id},
+            status_code=200,
+        )
     return plain_text(text, status_code=200)
