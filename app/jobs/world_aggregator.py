@@ -17,6 +17,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import func, text
 
 from app.database import SessionLocal
+from app.models import MovementEvent
 
 logger = logging.getLogger(__name__)
 
@@ -30,41 +31,76 @@ def _agg_cells():
     """
     从 movement_events 聚合到 heatmap_cells。
     按 (cell_x, cell_y) 分桶，UPSERT event_count。
+
+    使用 func.floor() 确保整数除法，兼容 MySQL 和 SQLite。
+    UPSERT 使用 INSERT ... ON DUPLICATE KEY UPDATE（MySQL 语法），
+    通过检测 dialect 自适应：MySQL 用原生 UPSERT，SQLite 用 REPLACE。
     """
     db = SessionLocal()
+    dialect = db.bind.dialect.name if db.bind else "mysql"
     try:
         # 聚合最近 10 分钟未处理的 movement_events
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
-        cells = (
+        rows = (
             db.query(
-                text("x DIV :cell_size").label("cell_x"),
-                text("y DIV :cell_size").label("cell_y"),
-                func.count(text("*")).label("cnt"),
+                func.floor(MovementEvent.x / CELL_SIZE).label("cell_x"),
+                func.floor(MovementEvent.y / CELL_SIZE).label("cell_y"),
+                func.count().label("cnt"),
             )
-            .filter(text("created_at >= :cutoff"))
-            .params(cutoff=cutoff, cell_size=CELL_SIZE)
-            .group_by(text("cell_x"), text("cell_y"))
+            .filter(MovementEvent.created_at >= cutoff)
+            .group_by(
+                func.floor(MovementEvent.x / CELL_SIZE),
+                func.floor(MovementEvent.y / CELL_SIZE),
+            )
             .all()
         )
 
-        if not cells:
+        if not rows:
             return 0
 
-        for row in cells:
-            db.execute(
-                text("""
-                    INSERT INTO heatmap_cells (cell_x, cell_y, event_count, updated_at)
-                    VALUES (:cx, :cy, :cnt, :now)
-                    ON DUPLICATE KEY UPDATE
-                        event_count = event_count + VALUES(event_count),
-                        updated_at = VALUES(updated_at)
-                """),
-                {"cx": row.cell_x, "cy": row.cell_y, "cnt": row.cnt, "now": datetime.now(timezone.utc)},
-            )
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            cx = int(row.cell_x)
+            cy = int(row.cell_y)
+            if dialect == "sqlite":
+                # SQLite: 使用 INSERT OR REPLACE（先删除旧行再插入）
+                db.execute(
+                    text("""
+                        INSERT INTO heatmap_cells (cell_x, cell_y, event_count, updated_at)
+                        VALUES (:cx, :cy, :cnt, :now)
+                    """),
+                    {"cx": cx, "cy": cy, "cnt": row.cnt, "now": now},
+                )
+                # 增量更新 event_count（手动处理，避免 OR REPLACE 覆盖）
+                db.execute(
+                    text("""
+                        UPDATE heatmap_cells
+                        SET event_count = (
+                            SELECT event_count + :inc
+                            FROM heatmap_cells
+                            WHERE cell_x = :cx AND cell_y = :cy
+                        ),
+                            updated_at = :now
+                        WHERE cell_x = :cx AND cell_y = :cy
+                    """),
+                    {"cx": cx, "cy": cy, "inc": row.cnt, "now": now},
+                )
+            else:
+                # MySQL / 默认: ON DUPLICATE KEY UPDATE
+                db.execute(
+                    text("""
+                        INSERT INTO heatmap_cells (cell_x, cell_y, event_count, updated_at)
+                        VALUES (:cx, :cy, :cnt, :now)
+                        ON DUPLICATE KEY UPDATE
+                            event_count = event_count + VALUES(event_count),
+                            updated_at = VALUES(updated_at)
+                    """),
+                    {"cx": cx, "cy": cy, "cnt": row.cnt, "now": now},
+                )
 
         db.commit()
-        logger.info("aggregated %d heatmap cells", len(cells))
-        return len(cells)
+        logger.info("aggregated %d heatmap cells", len(rows))
+        return len(rows)
     except Exception:
         logger.exception("heatcell aggregation failed")
         db.rollback()
@@ -84,37 +120,34 @@ def _cleanup_old_events():
         batch = 5000
         total = 0
 
-        # 批量删除 movement_events
+        # 批量删除 movement_events（使用带参数绑定的 text() 表达式）
         while True:
             ids = (
-                db.query(text("id"))
-                .select_from(text("movement_events"))
-                .filter(text("created_at < :cutoff"))
+                db.query(MovementEvent.id)
+                .filter(MovementEvent.created_at < cutoff)
                 .limit(batch)
                 .all()
             )
             if not ids:
                 break
-            id_list = [r[0] for r in ids]
-            # 用原生 SQL DELETE 避免 ORM 批量删除开销
-            res = db.execute(
-                text("DELETE FROM movement_events WHERE id IN :ids"),
-                {"ids": tuple(id_list)},
+            id_list = [r.id for r in ids]
+            res = db.query(MovementEvent).filter(MovementEvent.id.in_(id_list)).delete(
+                synchronize_session=False
             )
             db.commit()
-            total += res.rowcount
-            if res.rowcount < batch:
+            total += res
+            if res < batch:
                 break
 
-        # 批量删除 social_events
+        # 批量删除 social_events（使用 ORM filter 带参数绑定）
+        from app.models import SocialEvent  # noqa: F401
         while True:
-            res = db.execute(
-                text("DELETE FROM social_events WHERE created_at < :cutoff LIMIT :batch"),
-                {"cutoff": cutoff, "batch": batch},
-            )
+            res = db.query(SocialEvent).filter(
+                SocialEvent.created_at < cutoff
+            ).delete(synchronize_session=False)
             db.commit()
-            total += res.rowcount
-            if res.rowcount < batch:
+            total += res
+            if res < batch:
                 break
 
         logger.info("cleanup deleted %d old events before %s", total, cutoff.date())

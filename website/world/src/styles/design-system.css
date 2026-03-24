@@ -1,0 +1,162 @@
+/* ============================================================
+   DESIGN SYSTEM — Warm Coastal Crawfish Theme
+   From DESIGN.md — do not deviate
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+:root {
+  /* 背景 & 表面 */
+  --color-bg: #FFF8F0;
+  --color-surface: #FFFFFF;
+  --color-surface-raised: #FFFBF5;
+  --color-border: #F0E6D8;
+
+  /* 主色：龙虾红橙 */
+  --color-primary: #E8623A;
+  --color-primary-hover: #D4542B;
+
+  /* 辅助：沙滩橙 */
+  --color-secondary: #F4A261;
+
+  /* 点缀：温暖海洋蓝 */
+  --color-accent: #2D9CCA;
+
+  /* 文字 */
+  --color-text: #3D2C24;
+  --color-text-muted: #8B7B6E;
+
+  /* 语义 */
+  --color-success: #3FB950;
+  --color-error: #E63946;
+
+  /* 地图 */
+  --color-trail: #E8623A;
+  --color-trail-line: rgba(232, 98, 58, 0.25);
+  --color-heatmap-low: #F4A261;
+  --color-heatmap-mid: #E8623A;
+  --color-heatmap-high: #D4542B;
+  --color-heatmap-peak: #C0392B;
+  --color-encounter: #E8623A;
+  --color-friendship: rgba(63, 185, 80, 0.5);
+  --color-grid: rgba(232, 98, 58, 0.06);
+
+  /* 字体 */
+  --font-display: 'Fredoka', sans-serif;
+  --font-body: 'Nunito', sans-serif;
+  --font-data: 'Space Grotesk', sans-serif;
+
+  /* 间距 */
+  --space-2xs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+
+  /* 过渡 */
+  --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-fast: 150ms var(--ease-out);
+  --transition-panel: 280ms var(--ease-out);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 深色模式 */
+[data-theme="dark"] {
+  --color-bg: #1A1208;
+  --color-surface: rgba(42, 31, 20, 0.96);
+  --color-surface-raised: #3A2B1C;
+  --color-border: #4A3A28;
+  --color-text: #F5EDE4;
+  --color-text-muted: #A8907A;
+}
+
+/* 通用按钮 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: background var(--transition-fast), transform var(--transition-fast);
+  min-height: 36px;
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary {
+  background: var(--color-primary);
+  color: #fff;
+}
+.btn-primary:hover { background: var(--color-primary-hover); }
+.btn-ghost {
+  background: transparent;
+  color: var(--color-text-muted);
+}
+.btn-ghost:hover {
+  background: var(--color-border);
+  color: var(--color-text);
+}
+.btn.on { background: var(--color-primary); color: #fff; }
+
+/* 卡片 */
+.card {
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md);
+}
+
+/* 输入框 */
+input[type="text"], input[type="password"] {
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-xs) var(--space-sm);
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  color: var(--color-text);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+input:focus { border-color: var(--color-primary); }
+
+/* Toast */
+.toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-xs) var(--space-md);
+  font-size: 0.875rem;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+  z-index: 1000;
+  animation: toast-in 0.2s var(--ease-out);
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}

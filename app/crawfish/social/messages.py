@@ -10,9 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Friendship, Message, Stats, User
+from app.models import Friendship, Message, SocialEvent, Stats, User
 from app.schemas import SendRequest
 from app.api import ws_client
+from app.api.ws_client import _record_social_event
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -101,6 +102,16 @@ def _accept_friendship(
     db.add(_system_msg(to_id=recipient.id, content=sys_content_recipient, at=sys_time))
     _increment_total_messages(db, 3)
     db.commit()  # 先落库，确保数据一致性
+
+    # 记录 friendship 事件到 social_events
+    _record_social_event(
+        sender.id, "friendship", recipient.id,
+        metadata={"name": recipient.name},
+    )
+    _record_social_event(
+        recipient.id, "friendship", sender.id,
+        metadata={"name": sender.name},
+    )
 
     # 落库后推送（WS 推送失败不影响数据正确性）
     ts = _beijing(now)
