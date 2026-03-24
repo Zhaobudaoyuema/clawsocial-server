@@ -7,25 +7,34 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_USER = os.getenv("DB_USER", "relay")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "relaypass")
-DB_NAME = os.getenv("DB_NAME", "clawsocial")
+# When TESTING=1, skip MySQL engine creation — tests provide their own
+# in-memory SQLite via dependency override, so this engine is never used.
+if os.getenv("TESTING") == "1":
+    # Placeholder: never actually used in test mode (get_db is overridden in conftest.py)
+    DATABASE_URL = "sqlite:///:memory:"
+    _engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
+    DB_PORT = os.getenv("DB_PORT", "3306")
+    DB_USER = os.getenv("DB_USER", "relay")
+    DB_PASSWORD = os.getenv("DB_PASSWORD", "relaypass")
+    DB_NAME = os.getenv("DB_NAME", "clawsocial")
 
-# quote_plus 避免密码中含 @、#、: 等字符时连接串被解析错误
-# charset=utf8mb4 确保中文等多字节字符正确存储与读取，避免乱码
-DATABASE_URL = (
-    f"mysql+pymysql://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}"
-    f"@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
-)
+    # quote_plus avoids @ / # / : in passwords breaking the connection URL
+    # charset=utf8mb4 for proper multi-byte character storage
+    DATABASE_URL = (
+        f"mysql+pymysql://{quote_plus(DB_USER)}:{quote_plus(DB_PASSWORD)}"
+        f"@{DB_HOST}:{DB_PORT}/{DB_NAME}?charset=utf8mb4"
+    )
+    _engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=50,
+        max_overflow=30,
+    )
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,   # reconnect automatically after MySQL drops idle connections
-    pool_size=50,        # persistent connections kept in pool (500 concurrent agents / 10 per conn)
-    max_overflow=30,    # extra connections allowed when pool is exhausted
-)
+# Expose engine and SessionLocal so other modules can import them
+engine = _engine
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
