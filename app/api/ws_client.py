@@ -48,11 +48,13 @@ _ACTIVE_WEIGHTS = {
 _NEW_CRAWFISH_DAYS = 7
 
 
-def _calc_active_score(user_id: int) -> float:
+def _calc_active_score(user_id: int, db=None) -> float:
     """计算用户实时活跃度（综合事件分，无时间衰减，用于实时感知）。"""
     from sqlalchemy import func, or_ as sql_or
     from app.models import Friendship, Message, MovementEvent, SocialEvent
-    db = next(get_db())
+    own_db = db is None
+    if own_db:
+        db = next(get_db())
     try:
         msg_sent = db.query(func.count(Message.id)).filter(
             Message.from_id == user_id).scalar() or 0
@@ -80,7 +82,8 @@ def _calc_active_score(user_id: int) -> float:
         )
         return round(score, 1)
     finally:
-        db.close()
+        if own_db:
+            db.close()
 
 
 def _ensure_aware(dt: datetime) -> datetime:
@@ -345,7 +348,7 @@ def _build_step_context(
         world_size = ws_state.config.world_size
 
         # ── 1. crawfish（自身状态）──────────────────────────
-        me_score = _calc_active_score(user_id)
+        me_score = _calc_active_score(user_id, db)
         me_new = _is_new(user.created_at)
         crawfish = {
             "id": user_id,
@@ -405,10 +408,18 @@ def _build_step_context(
             .filter(Friendship.initiated_by == user_id)
             .all()
         )
+        sent_other_ids = [
+            row.user_b_id if row.user_a_id == user_id else row.user_a_id
+            for row in sent_requests
+        ]
+        other_user_map = {}
+        if sent_other_ids:
+            for u in db.query(User).filter(User.id.in_(sent_other_ids)).all():
+                other_user_map[u.id] = u
         sent_friend_requests = []
         for row in sent_requests:
             other_id = row.user_b_id if row.user_a_id == user_id else row.user_a_id
-            other_u = db.query(User).filter(User.id == other_id).first()
+            other_u = other_user_map.get(other_id)
             other_name = other_u.name if other_u else f"ID:{other_id}"
             delta = now - _ensure_aware(row.updated_at)
             if delta.total_seconds() < 60:
@@ -425,59 +436,129 @@ def _build_step_context(
             })
 
         # ── 3. visible（视野内的龙虾）────────────────────
-        visible_users = []
-        for s in visible:
-            if s.user_id == user_id:
-                continue
-            u = _load_user(s.user_id)
-            if u is None:
-                continue
-            score = _calc_active_score(u.id)
-            is_new_u = _is_new(u.created_at)
-            # 关系判断：是否是好友
-            friend_row = db.query(Friendship).filter(
+        # Batch-load all needed user IDs at once to avoid N+1 queries
+        visible_ids = [s.user_id for s in visible if s.user_id != user_id]
+        user_map = {}  # id -> User
+        if visible_ids:
+            for u in db.query(User).filter(User.id.in_(visible_ids)).all():
+                user_map[u.id] = u
+        visible_friend_ids: set[int] = set()
+        if visible_ids:
+            # Batch query for all friendship rows involving visible users
+            friend_rows = db.query(Friendship).filter(
                 sql_or(
                     Friendship.user_a_id == user_id,
                     Friendship.user_b_id == user_id,
                 ),
                 sql_or(
-                    Friendship.user_a_id == u.id,
-                    Friendship.user_b_id == u.id,
+                    Friendship.user_a_id.in_(visible_ids),
+                    Friendship.user_b_id.in_(visible_ids),
                 ),
                 Friendship.status == "accepted",
-            ).first()
-            is_friend = friend_row is not None
-            # 最后互动时间（从 social_events 查最近的 message 事件）
-            last_interaction = None
-            last_msg = (
-                db.query(Message)
+            ).all()
+            for fr in friend_rows:
+                visible_friend_ids.add(fr.user_a_id)
+                visible_friend_ids.add(fr.user_b_id)
+        # Batch-load last interaction messages for all visible users
+        last_msg_map: dict[int, datetime] = {}
+        if visible_ids:
+            last_msgs = (
+                db.query(
+                    func.coalesce(Message.from_id, Message.to_id).label("other_id"),
+                    func.max(Message.created_at).label("last_at"),
+                )
                 .filter(
                     sql_or(
-                        (Message.from_id == user_id) & (Message.to_id == u.id),
-                        (Message.from_id == u.id) & (Message.to_id == user_id),
+                        (Message.from_id == user_id) & (Message.to_id.in_(visible_ids)),
+                        (Message.from_id.in_(visible_ids)) & (Message.to_id == user_id),
                     ),
                     Message.msg_type.in_(["chat", "friend_request"]),
                 )
-                .order_by(Message.created_at.desc())
-                .first()
+                .group_by(
+                    func.coalesce(Message.from_id, Message.to_id)
+                )
+                .all()
             )
-            if last_msg:
-                delta = now - _ensure_aware(last_msg.created_at)
+            for row in last_msgs:
+                last_msg_map[row.other_id] = row.last_at
+        # Compute active scores in batch via a single aggregated query
+        score_map: dict[int, float] = {}
+        if visible_ids:
+            msg_sent_map = {
+                r[0]: r[1] for r in
+                db.query(Message.from_id, func.count(Message.id))
+                .filter(Message.from_id.in_(visible_ids))
+                .group_by(Message.from_id).all()
+            }
+            msg_recv_map = {
+                r[0]: r[1] for r in
+                db.query(Message.to_id, func.count(Message.id))
+                .filter(Message.to_id.in_(visible_ids))
+                .group_by(Message.to_id).all()
+            }
+            encounter_map = {
+                r[0]: r[1] for r in
+                db.query(SocialEvent.user_id, func.count(SocialEvent.id))
+                .filter(
+                    SocialEvent.user_id.in_(visible_ids),
+                    SocialEvent.event_type == "encounter",
+                )
+                .group_by(SocialEvent.user_id).all()
+            }
+            move_map = {
+                r[0]: r[1] for r in
+                db.query(MovementEvent.user_id, func.count(MovementEvent.id))
+                .filter(MovementEvent.user_id.in_(visible_ids))
+                .group_by(MovementEvent.user_id).all()
+            }
+            friend_count_map = {
+                r[0]: r[1] for r in
+                db.query(
+                    func.coalesce(Friendship.user_a_id, Friendship.user_b_id).label("uid"),
+                    func.count(Friendship.id).label("cnt"),
+                )
+                .filter(
+                    sql_or(Friendship.user_a_id.in_(visible_ids), Friendship.user_b_id.in_(visible_ids)),
+                    Friendship.status == "accepted",
+                )
+                .group_by(func.coalesce(Friendship.user_a_id, Friendship.user_b_id))
+                .all()
+            }
+            for uid in visible_ids:
+                s = (
+                    msg_sent_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_sent"]
+                    + msg_recv_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_received"]
+                    + encounter_map.get(uid, 0) * _ACTIVE_WEIGHTS["encounter"]
+                    + move_map.get(uid, 0) * _ACTIVE_WEIGHTS["move"]
+                    + friend_count_map.get(uid, 0) * _ACTIVE_WEIGHTS["friendship"]
+                )
+                score_map[uid] = round(s, 1)
+        visible_users = []
+        for s in visible:
+            if s.user_id == user_id:
+                continue
+            u = user_map.get(s.user_id)
+            if u is None:
+                continue
+            is_friend = s.user_id in visible_friend_ids
+            last_interaction = None
+            last_time = last_msg_map.get(s.user_id)
+            if last_time:
+                delta = now - _ensure_aware(last_time)
                 if delta.total_seconds() < 60:
                     last_interaction = f"{int(delta.total_seconds())}s ago"
                 elif delta.total_seconds() < 3600:
                     last_interaction = f"{int(delta.total_seconds() / 60)}m ago"
                 else:
                     last_interaction = f"{int(delta.total_seconds() / 3600)}h ago"
-
             visible_users.append({
                 "id": u.id,
                 "name": u.name,
                 "x": s.x,
                 "y": s.y,
                 "is_friend": is_friend,
-                "active_score": round(score, 1),
-                "is_new": is_new_u,
+                "active_score": score_map.get(s.user_id, 0.0),
+                "is_new": _is_new(u.created_at),
                 "last_interaction": last_interaction,
             })
 
@@ -491,9 +572,14 @@ def _build_step_context(
         ).all()
         friends_nearby = []
         friends_far = []
+        friend_ids = [fr.user_b_id if fr.user_a_id == user_id else fr.user_a_id for fr in friend_rows]
+        friend_user_map = {}
+        if friend_ids:
+            for u in db.query(User).filter(User.id.in_(friend_ids)).all():
+                friend_user_map[u.id] = u
         for fr in friend_rows:
             fid = fr.user_b_id if fr.user_a_id == user_id else fr.user_a_id
-            fu = db.query(User).filter(User.id == fid).first()
+            fu = friend_user_map.get(fid)
             if fu is None:
                 continue
             # 好友是否在线（在世界状态中）
@@ -535,9 +621,14 @@ def _build_step_context(
             .limit(10)
             .all()
         )
+        msg_from_ids = [m.from_id for m in unread_msgs if m.from_id]
+        msg_from_map = {}
+        if msg_from_ids:
+            for u in db.query(User).filter(User.id.in_(msg_from_ids)).all():
+                msg_from_map[u.id] = u
         unread_messages = []
         for m in unread_msgs:
-            from_u = db.query(User).filter(User.id == m.from_id).first() if m.from_id else None
+            from_u = msg_from_map.get(m.from_id) if m.from_id else None
             delta = now - _ensure_aware(m.created_at)
             if delta.total_seconds() < 60:
                 time_str = f"{int(delta.total_seconds())}s ago"
@@ -561,9 +652,14 @@ def _build_step_context(
             .limit(10)
             .all()
         )
+        pending_from_ids = [m.from_id for m in pending_reqs if m.from_id]
+        pending_from_map = {}
+        if pending_from_ids:
+            for u in db.query(User).filter(User.id.in_(pending_from_ids)).all():
+                pending_from_map[u.id] = u
         pending_friend_requests = []
         for m in pending_reqs:
-            from_u = db.query(User).filter(User.id == m.from_id).first() if m.from_id else None
+            from_u = pending_from_map.get(m.from_id) if m.from_id else None
             delta = now - _ensure_aware(m.created_at)
             if delta.total_seconds() < 60:
                 time_str = f"{int(delta.total_seconds())}s ago"
@@ -588,6 +684,12 @@ def _build_step_context(
             .limit(20)
             .all()
         )
+        # Batch-load all other_user_ids referenced in recent events
+        event_other_ids = [e.other_user_id for e in recent_events if e.other_user_id]
+        event_other_map = {}
+        if event_other_ids:
+            for u in db.query(User).filter(User.id.in_(event_other_ids)).all():
+                event_other_map[u.id] = u
         recent_events_out = []
         for e in recent_events:
             delta = now - _ensure_aware(e.created_at)
@@ -599,7 +701,7 @@ def _build_step_context(
                 time_str = f"{int(delta.total_seconds() / 3600)}h ago"
             item = {"type": e.event_type, "time": time_str}
             if e.other_user_id:
-                eu = db.query(User).filter(User.id == e.other_user_id).first()
+                eu = event_other_map.get(e.other_user_id)
                 item["user_id"] = e.other_user_id
                 item["user_name"] = eu.name if eu else "unknown"
             recent_events_out.append(item)
