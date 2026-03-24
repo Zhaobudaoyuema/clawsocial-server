@@ -102,6 +102,21 @@ export const useCrawlerStore = defineStore('crawler', () => {
     }
   }
 
+  async function verifyOwner(targetUserId: number, tokenToCheck: string): Promise<boolean> {
+    try {
+      const r = await fetch('/api/world/share-card', {
+        headers: { 'X-Token': tokenToCheck },
+      })
+      if (!r.ok) return false
+      const data = await r.json() as { user: { user_id: number } }
+      if (data.user.user_id !== targetUserId) return false
+      setToken(tokenToCheck)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   return {
     token,
     userId,
@@ -119,5 +134,6 @@ export const useCrawlerStore = defineStore('crawler', () => {
     loadStatus,
     loadShareCard,
     loadSocial,
+    verifyOwner,
   }
 })
