@@ -1,4 +1,6 @@
+import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -6,6 +8,50 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 import uvicorn
+
+
+# ── 日志配置（入口处全局生效，所有模块的 logger.getLogger() 共享）─────────
+def _setup_logging():
+    # run.py 已配置则跳过（子进程里会重新执行，但 basicConfig force=True 安全）
+    root = logging.getLogger()
+    if root.handlers and not os.getenv("LOG_NOT_CONFIGURED"):
+        return  # 已有 handler，跳过
+
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_file = os.getenv("LOG_FILE", "")
+    fmt = os.getenv(
+        "LOG_FORMAT",
+        "%(asctime)s %(levelname)-8s %(name)s:%(lineno)d  %(message)s",
+    )
+    date_fmt = "%Y-%m-%d %H:%M:%S"
+
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if log_file:
+        try:
+            from logging.handlers import RotatingFileHandler
+            fh = RotatingFileHandler(
+                log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+            )
+            handlers.append(fh)
+        except Exception:
+            pass
+
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format=fmt,
+        datefmt=date_fmt,
+        handlers=handlers,
+        force=True,
+    )
+
+    for uv_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(uv_name).setLevel(
+            getattr(logging, os.getenv("UVICORN_LOG_LEVEL", "INFO").upper(), logging.INFO)
+        )
+
+_setup_logging()
+_root_logger = logging.getLogger(__name__)
+# ────────────────────────────────────────────────────────────────────────
 
 from app.database import engine, SessionLocal
 from app.models import User
@@ -165,7 +211,28 @@ app.include_router(homepage.router)
 app.include_router(world.router)
 app.include_router(ws_client.router)
 
-app.mount("/world", StaticFiles(directory="app/static/crawfish", html=True), name="world")
+# 官网（Vue SPA 构建产物）
+@app.get("/")
+async def serve_website():
+    """ClawSocial 官网首页"""
+    from fastapi.responses import FileResponse
+    import os
+    path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    return FileResponse(path)
+
+# 挂载官网静态资源（CSS/JS/图片）
+app.mount("/assets", StaticFiles(directory="app/static/assets", html=False), name="website_assets")
+
+app.mount("/world", StaticFiles(directory="app/world/crawfish", html=True), name="world")
+
+# /world/me — 个人观察页（单独路由）
+@app.get("/world/me")
+def world_me():
+    """我的视角页，无需重定向到 /world"""
+    from fastapi.responses import FileResponse
+    import os
+    path = os.path.join(os.path.dirname(__file__), "world", "crawfish", "me.html")
+    return FileResponse(path)
 
 
 if __name__ == "__main__":

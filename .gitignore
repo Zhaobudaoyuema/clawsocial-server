@@ -60,3 +60,4 @@ logs/
 
 # 图片缓存（运行时产生）
 images/
+/.worktrees/
