@@ -370,7 +370,7 @@ def _build_step_context(
 
         unread_count = (
             db.query(func.count(Message.id))
-            .filter(Message.to_id == user_id, Message.msg_type == "chat")
+            .filter(Message.to_id == user_id, Message.msg_type.in_(["chat", "system"]))
             .scalar() or 0
         )
         pending_requests = (
@@ -409,7 +409,7 @@ def _build_step_context(
         # ── 2.5. sent_friend_requests（自己发出的好友请求状态）────
         sent_requests = (
             db.query(Friendship)
-            .filter(Friendship.initiated_by == user_id)
+            .filter(Friendship.initiated_by == user_id, Friendship.status == "pending")
             .all()
         )
         sent_other_ids = [
@@ -620,7 +620,7 @@ def _build_step_context(
         # ── 5. unread_messages（未读消息摘要）─────────────
         unread_msgs = (
             db.query(Message)
-            .filter(Message.to_id == user_id, Message.msg_type == "chat")
+            .filter(Message.to_id == user_id, Message.msg_type.in_(["chat", "system"]))
             .order_by(Message.created_at.desc())
             .limit(10)
             .all()
@@ -1097,7 +1097,7 @@ async def ws_client(websocket: WebSocket):
             elif t == "send":
                 await _client_send(websocket, user, msg, app)
             elif t == "ack":
-                await _client_ack(user.id, msg)
+                await _client_ack(user.id, msg, app)
             elif t == "get_friends":
                 await _client_get_friends(websocket, user.id, request_id)
             elif t == "discover":
@@ -1117,6 +1117,8 @@ async def ws_client(websocket: WebSocket):
         with contextlib.suppress(asyncio.CancelledError):
             await task
         ws_clients.pop(user.id, None)
+        # 从 WorldState 移除用户（防止断线后仍占位）
+        asyncio.create_task(asyncio.to_thread(ws_state.remove_user, user.id))
         # 记录下线事件
         me_state = getattr(user, '_ws_state', None)
         x, y = (me_state.x, me_state.y) if me_state else (None, None)
@@ -1188,10 +1190,10 @@ async def _client_send(ws: WebSocket, user: User, msg: dict, app):
     await ws.send_json({"type": "send_ack", "ok": ok, "detail": detail, "msg_id": msg_id})
 
 
-async def _client_ack(user_id: int, msg: dict):
+async def _client_ack(user_id: int, msg: dict, app):
     acked_ids = msg.get("acked_ids", [])
     if acked_ids:
-        asyncio.create_task(_bg_delete_acked(user_id, acked_ids))
+        asyncio.create_task(_bg_delete_acked(user_id, acked_ids, app))
 
 
 # ─── Social WS handlers (new) ───────────────────────────────────────
@@ -1565,6 +1567,12 @@ def _do_send_sync(
         if not recipient:
             return False, "user not found", None
 
+        # 隐私检查（与 messages.py 保持一致）
+        if recipient.status == "do_not_disturb":
+            return False, "recipient do_not_disturb", None
+        if recipient.status == "friends_only" and (not friendship or friendship.status != "accepted"):
+            return False, "recipient friends_only", None
+
         now = datetime.now(timezone.utc)
         msg_type = "chat"
         friendship = (
@@ -1759,7 +1767,7 @@ async def _bg_update_user_xy(user_id: int, x: int, y: int):
         db.close()
 
 
-async def _bg_delete_acked(user_id: int, acked_ids: list):
+async def _bg_delete_acked(user_id: int, acked_ids: list, app):
     """
     处理消息已读（ack）：
     1. 将对方的消息标记 read_at（告知发送方已读）
@@ -1796,7 +1804,6 @@ async def _bg_delete_acked(user_id: int, acked_ids: list):
         for sender_id, msg_ids in sender_to_ids.items():
             if sender_id is None:
                 continue
-            app = getattr(ws_client, "_app", None)
             if app is None:
                 continue
             for msg_id in msg_ids:

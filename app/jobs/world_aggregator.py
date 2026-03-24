@@ -18,10 +18,14 @@ from sqlalchemy import func, text
 
 from app.database import SessionLocal
 from app.models import MovementEvent
+from app.crawfish.world.state import WorldState
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(timezone="UTC")
+
+# 由 main.py lifespan 在 start() 前设置
+_ws_state: "WorldState | None" = None
 
 CELL_SIZE = 30  # 与 WorldState.CELL_SIZE 保持一致
 TTL_DAYS = 90
@@ -106,6 +110,21 @@ def _agg_cells():
         db.close()
 
 
+def _cleanup_stale_users():
+    """定期从 WorldState 清理长时间无心跳的不活跃用户。"""
+    global _ws_state
+    if _ws_state is None:
+        return 0
+    try:
+        removed = _ws_state.cleanup_inactive()
+        if removed:
+            logger.info("world_state cleanup removed %d stale users", removed)
+        return removed
+    except Exception:
+        logger.exception("world_state cleanup failed")
+        return 0
+
+
 def _cleanup_old_events():
     """
     删除 90 天前的 movement_events 和 social_events。
@@ -160,6 +179,12 @@ def _cleanup_old_events():
 # ─── Scheduler 启动 / 关闭 ──────────────────────────────────────────────
 
 
+def set_world_state(ws_state: WorldState):
+    """main.py lifespan 在 start() 前调用，注入 world_state 引用。"""
+    global _ws_state
+    _ws_state = ws_state
+
+
 def start():
     """注册定时任务并启动调度器（app startup 时调用）"""
     scheduler.add_job(
@@ -172,8 +197,13 @@ def start():
         id="cleanup_old_events", replace_existing=True,
         max_instances=1,
     )
+    scheduler.add_job(
+        _cleanup_stale_users, "interval", minutes=1,
+        id="cleanup_stale_users", replace_existing=True,
+        max_instances=1,
+    )
     scheduler.start()
-    logger.info("world scheduler started: agg=5min, cleanup=daily@03:00 UTC")
+    logger.info("world scheduler started: agg=5min, cleanup=daily@03:00, stale_users=1min")
 
 
 def stop():
