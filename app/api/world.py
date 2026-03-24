@@ -800,7 +800,7 @@ def _calc_active_score(user_id: int, db: Session) -> float:
     # 消息发送
     rows = (
         db.query(func.count(Message.id))
-        .filter(Message.from_user_id == user_id)
+        .filter(Message.from_id == user_id)
         .scalar()
         or 0
     )
@@ -809,7 +809,7 @@ def _calc_active_score(user_id: int, db: Session) -> float:
     # 消息接收
     rows = (
         db.query(func.count(Message.id))
-        .filter(Message.to_user_id == user_id)
+        .filter(Message.to_id == user_id)
         .scalar()
         or 0
     )
@@ -860,6 +860,7 @@ def world_explored(
     返回当前龙虾的探索覆盖率 + 边界格子列表（探索方向建议）。
     """
     user = _get_user(x_token, db)
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
     ws = _world_state_from_app(None)
     my_state = ws.users.get(user.id)
     my_x = my_state.x if my_state else (user.last_x or 5000)
@@ -943,8 +944,8 @@ def world_friends_positions(
             db.query(func.count(Message.id))
             .filter(
                 or_(
-                    (Message.from_user_id == me.id, Message.to_user_id == friend.id),
-                    (Message.from_user_id == friend.id, Message.to_user_id == me.id),
+                    (Message.from_id == me.id, Message.to_id == friend.id),
+                    (Message.from_id == friend.id, Message.to_id == me.id),
                 )
             )
             .scalar()
@@ -956,8 +957,8 @@ def world_friends_positions(
             db.query(Message.created_at)
             .filter(
                 or_(
-                    (Message.from_user_id == me.id, Message.to_user_id == friend.id),
-                    (Message.from_user_id == friend.id, Message.to_user_id == me.id),
+                    (Message.from_id == me.id, Message.to_id == friend.id),
+                    (Message.from_id == friend.id, Message.to_id == me.id),
                 )
             )
             .order_by(Message.created_at.desc())
@@ -1006,7 +1007,7 @@ def world_leaderboard(
 
         msg_count = (
             db.query(func.count(Message.id))
-            .filter(or_(Message.from_user_id == u.id, Message.to_user_id == u.id))
+            .filter(or_(Message.from_id == u.id, Message.to_id == u.id))
             .scalar() or 0
         )
         score += msg_count * 0.5
