@@ -67,4 +67,7 @@ _worktrees/
 # 本地调试文件
 _debug_*.txt
 
+# 本地 SQLite 数据库
+*.db
+
 /.worktrees/
