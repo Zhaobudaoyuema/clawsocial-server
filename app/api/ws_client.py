@@ -1268,14 +1268,14 @@ async def _client_update_status(ws: WebSocket, user, status: str | None, request
 
 # ─── Social query helpers (sync, run in asyncio.to_thread) ───────────
 
-def _user_dict(u: User) -> dict:
+def _user_dict(u: User, active_score: float | None = None) -> dict:
     """Return a dict representation of a User for WS responses."""
     return {
         "user_id": u.id,
         "name": u.name,
         "description": u.description or "",
         "status": u.status,
-        "active_score": _calc_active_score(u.id),
+        "active_score": active_score if active_score is not None else _calc_active_score(u.id),
         "is_new": _is_new(u.created_at),
         "last_seen_utc": (u.last_seen_at or u.created_at).isoformat(),
     }
@@ -1286,6 +1286,9 @@ def _query_open_users(user_id: int, keyword: str | None, _db=None) -> tuple[list
     Query open-status users (excluding self), optionally filtered by keyword.
     Returns (users_list, total_count). Uses batch query to avoid N+1.
     """
+    from sqlalchemy import or_ as sql_or
+    from app.models import Friendship, Message, MovementEvent, SocialEvent
+
     own_db = False
     if _db is None:
         db = next(get_db())
@@ -1305,7 +1308,50 @@ def _query_open_users(user_id: int, keyword: str | None, _db=None) -> tuple[list
             .limit(10)
             .all()
         )
-        return [_user_dict(u) for u in users], total
+        if not users:
+            return [], total
+        # Batch-compute active scores to avoid N DB sessions
+        uid_list = [u.id for u in users]
+        msg_sent_map = {r[0]: r[1] for r in
+            db.query(Message.from_id, func.count(Message.id))
+            .filter(Message.from_id.in_(uid_list))
+            .group_by(Message.from_id).all()}
+        msg_recv_map = {r[0]: r[1] for r in
+            db.query(Message.to_id, func.count(Message.id))
+            .filter(Message.to_id.in_(uid_list))
+            .group_by(Message.to_id).all()}
+        enc_map = {r[0]: r[1] for r in
+            db.query(SocialEvent.user_id, func.count(SocialEvent.id))
+            .filter(SocialEvent.user_id.in_(uid_list), SocialEvent.event_type == "encounter")
+            .group_by(SocialEvent.user_id).all()}
+        move_map = {r[0]: r[1] for r in
+            db.query(MovementEvent.user_id, func.count(MovementEvent.id))
+            .filter(MovementEvent.user_id.in_(uid_list))
+            .group_by(MovementEvent.user_id).all()}
+        friend_cnt_map = {
+            r[0]: r[1] for r in
+            db.query(
+                func.coalesce(Friendship.user_a_id, Friendship.user_b_id).label("uid"),
+                func.count(Friendship.id).label("cnt"),
+            )
+            .filter(
+                sql_or(Friendship.user_a_id.in_(uid_list), Friendship.user_b_id.in_(uid_list)),
+                Friendship.status == "accepted",
+            )
+            .group_by(func.coalesce(Friendship.user_a_id, Friendship.user_b_id))
+            .all()
+        }
+        score_map = {}
+        for uid in uid_list:
+            s = (
+                msg_sent_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_sent"]
+                + msg_recv_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_received"]
+                + enc_map.get(uid, 0) * _ACTIVE_WEIGHTS["encounter"]
+                + move_map.get(uid, 0) * _ACTIVE_WEIGHTS["move"]
+                + friend_cnt_map.get(uid, 0) * _ACTIVE_WEIGHTS["friendship"]
+            )
+            score_map[uid] = round(s, 1)
+        return [_user_dict(u, score_map.get(u.id)) for u in users], total
     finally:
         if own_db:
             db.close()
@@ -1316,6 +1362,9 @@ def _query_friends(user_id: int, _db=None) -> tuple[list[dict], int]:
     Query all accepted friends for user_id.
     Returns (friends_list, total_count). Uses batch query to avoid N+1.
     """
+    from sqlalchemy import and_, or_ as sql_or
+    from app.models import Friendship, Message, MovementEvent, SocialEvent
+
     own_db = False
     if _db is None:
         db = next(get_db())
@@ -1323,7 +1372,6 @@ def _query_friends(user_id: int, _db=None) -> tuple[list[dict], int]:
     else:
         db = _db
     try:
-        from sqlalchemy import and_, or_ as sql_or
         rows = db.query(Friendship).filter(
             sql_or(
                 and_(Friendship.user_a_id == user_id, Friendship.status == "accepted"),
@@ -1341,11 +1389,51 @@ def _query_friends(user_id: int, _db=None) -> tuple[list[dict], int]:
             return [], 0
         friend_ids = [fid for fid, _ in pairs]
         friend_map = {u.id: u for u in db.query(User).filter(User.id.in_(friend_ids)).all()}
+        # Batch-compute active scores to avoid N DB sessions
+        msg_sent_map = {r[0]: r[1] for r in
+            db.query(Message.from_id, func.count(Message.id))
+            .filter(Message.from_id.in_(friend_ids))
+            .group_by(Message.from_id).all()}
+        msg_recv_map = {r[0]: r[1] for r in
+            db.query(Message.to_id, func.count(Message.id))
+            .filter(Message.to_id.in_(friend_ids))
+            .group_by(Message.to_id).all()}
+        enc_map = {r[0]: r[1] for r in
+            db.query(SocialEvent.user_id, func.count(SocialEvent.id))
+            .filter(SocialEvent.user_id.in_(friend_ids), SocialEvent.event_type == "encounter")
+            .group_by(SocialEvent.user_id).all()}
+        move_map = {r[0]: r[1] for r in
+            db.query(MovementEvent.user_id, func.count(MovementEvent.id))
+            .filter(MovementEvent.user_id.in_(friend_ids))
+            .group_by(MovementEvent.user_id).all()}
+        friend_cnt_map = {
+            r[0]: r[1] for r in
+            db.query(
+                func.coalesce(Friendship.user_a_id, Friendship.user_b_id).label("uid"),
+                func.count(Friendship.id).label("cnt"),
+            )
+            .filter(
+                sql_or(Friendship.user_a_id.in_(friend_ids), Friendship.user_b_id.in_(friend_ids)),
+                Friendship.status == "accepted",
+            )
+            .group_by(func.coalesce(Friendship.user_a_id, Friendship.user_b_id))
+            .all()
+        }
+        score_map = {}
+        for uid in friend_ids:
+            s = (
+                msg_sent_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_sent"]
+                + msg_recv_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_received"]
+                + enc_map.get(uid, 0) * _ACTIVE_WEIGHTS["encounter"]
+                + move_map.get(uid, 0) * _ACTIVE_WEIGHTS["move"]
+                + friend_cnt_map.get(uid, 0) * _ACTIVE_WEIGHTS["friendship"]
+            )
+            score_map[uid] = round(s, 1)
         friends = []
         for fid, row in pairs:
             u = friend_map.get(fid)
             if u:
-                friends.append(_user_dict(u))
+                friends.append(_user_dict(u, score_map.get(fid)))
         return friends, len(friends)
     finally:
         if own_db:
