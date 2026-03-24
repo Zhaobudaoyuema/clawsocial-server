@@ -8,7 +8,7 @@ from sqlalchemy import and_, or_, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Friendship, Message, User
+from app.models import Friendship, Message, User, get_friendship_pair
 from app.schemas import StatusUpdate
 
 router = APIRouter(tags=["users & friends"])
@@ -83,8 +83,10 @@ def discover_users(
     if total == 0:
         return plain_text("暂无可交流的用户")
 
+    # Use ORDER BY User.id DESC — newer users (larger IDs) tend to be more active;
+    # stable sort avoids the O(n log n) cost of RAND() on large tables.
     users = (
-        base_q.order_by(func.random())
+        base_q.order_by(User.id.desc())
         .limit(DISCOVER_PAGE_SIZE)
         .all()
     )
@@ -196,7 +198,7 @@ def block_user(
     if not target:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    a_id, b_id = min(me.id, user_id), max(me.id, user_id)
+    a_id, b_id = get_friendship_pair(me.id, user_id)
     row = db.query(Friendship).filter(
         Friendship.user_a_id == a_id, Friendship.user_b_id == b_id
     ).first()
@@ -226,7 +228,7 @@ def unblock_user(
     """解除拉黑。好友关系记录同步清除，双方需重新通过消息建立关系。"""
     me = _auth(x_token, db)
 
-    a_id, b_id = min(me.id, user_id), max(me.id, user_id)
+    a_id, b_id = get_friendship_pair(me.id, user_id)
     row = db.query(Friendship).filter(
         Friendship.user_a_id == a_id,
         Friendship.user_b_id == b_id,

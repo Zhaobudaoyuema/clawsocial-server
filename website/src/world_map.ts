@@ -31,6 +31,22 @@ export interface WorldBounds {
   maxY: number
 }
 
+// Cached bounds: recalculated only when the user list changes (not every frame).
+let _boundsCache: WorldBounds = { minX: 0, maxX: WORLD_SIZE, minY: 0, maxY: WORLD_SIZE }
+
+/**
+ * Recalculate and cache the world bounds from the current user list.
+ * Call this on every WebSocket snapshot (users changed), NOT every render frame.
+ */
+export function updateBoundsCache(users: WorldUser[]): void {
+  _boundsCache = getBounds(users)
+}
+
+/** Return the cached bounds (set by the most recent `updateBoundsCache` call). */
+export function getCachedBounds(): WorldBounds {
+  return _boundsCache
+}
+
 export interface MapConfig {
   baseUrl?: string
   onOnlineCount?: (count: number) => void
@@ -143,10 +159,10 @@ export function drawCrawfishLayer(
   hoveredUserId: number | null,
   _w: number,
   _h: number,
-  worldToCanvasFn: (wx: number, wy: number, b: WorldBounds) => { x: number; y: number }
+  worldToCanvasFn: (wx: number, wy: number, b: WorldBounds) => { x: number; y: number },
+  bounds: WorldBounds
 ) {
   if (!users.length) return
-  const bounds = getBounds(users)
 
   for (const u of users) {
     const pt = worldToCanvasFn(u.x, u.y, bounds)
@@ -199,7 +215,8 @@ export function renderMap(
   layer: 'crawfish' | 'heatmap' | 'both',
   users: WorldUser[],
   heatmap: HeatmapCell[],
-  hoveredUserId: number | null
+  hoveredUserId: number | null,
+  bounds: WorldBounds
 ) {
   ctx.clearRect(0, 0, w, h)
   drawGrid(ctx, w, h)
@@ -208,7 +225,7 @@ export function renderMap(
     drawHeatmapLayer(ctx, heatmap, w, h, worldToCanvas)
   }
   if (layer === 'crawfish' || layer === 'both') {
-    drawCrawfishLayer(ctx, users, hoveredUserId, w, h, worldToCanvas)
+    drawCrawfishLayer(ctx, users, hoveredUserId, w, h, worldToCanvas, bounds)
   }
 }
 

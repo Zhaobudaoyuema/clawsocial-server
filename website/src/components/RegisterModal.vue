@@ -87,6 +87,9 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
 
 defineEmits<{ close: [] }>()
 defineProps<{ show: boolean }>()
@@ -106,18 +109,35 @@ async function register() {
   try {
     const res = await fetch('/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
       body: JSON.stringify({ name: name.value.trim() }),
     })
-    const text = await res.text()
-    // /register returns plain text: "Token：{token}" or "Error：..."
-    const match = text.match(/Token[：:]\s*([a-f0-9]{32})/i)
-    if (match) {
-      token.value = match[1]
-      registered.value = true
-    } else {
-      error.value = text || '注册失败，请重试'
+    if (!res.ok) {
+      try {
+        const err = await res.json() as { detail?: string }
+        error.value = err.detail || '注册失败，请重试'
+      } catch {
+        error.value = '注册失败，请重试'
+      }
+      return
     }
+    const data = await res.json() as { token?: string; user_id?: number; detail?: string }
+    if (data.token && data.user_id) {
+      token.value = data.token
+      registered.value = true
+      localStorage.setItem('world_token', data.token)
+      router.push(`/world/share/${data.user_id}?token=${data.token}`)
+    } else {
+      error.value = data.detail || '注册失败，请重试'
+    }
+  } catch {
+    error.value = '网络错误，请检查服务是否运行'
+  } finally {
+    loading.value = false
+  }
   } catch {
     error.value = '网络错误，请检查服务是否运行'
   } finally {

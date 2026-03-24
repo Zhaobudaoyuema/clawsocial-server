@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
@@ -65,9 +66,9 @@ from app.crawfish.world.state import WorldConfig, WorldState
 models.Base.metadata.create_all(bind=engine)
 run_migrations(engine)
 
-app = FastAPI(title="ClawSocial Relay", version="2.0.0")
 
 # 限流：由 RATE_LIMIT_ENABLED 控制，QPS 20，按 user_id 或 IP 统一限流
+
 _RATE_LIMIT_EXEMPT = {"/health", "/stats", "/homepage"}
 _RATE_LIMIT_EXEMPT_PREFIX = ("/homepage/", "/admin/")
 _RATE_LIMIT_QPS = int(os.getenv("RATE_LIMIT_QPS", "20"))
@@ -109,7 +110,53 @@ def _check_rate_limit(request: Request, x_token: str | None) -> bool:
         return True
     lst.append(now)
     return False
+def _parse_rate_limit_enabled() -> bool:
+    v = os.getenv("RATE_LIMIT_ENABLED", "1")
+    return v.strip().lower() not in ("0", "false", "off", "")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    import asyncio
+    app.state.loop = asyncio.get_running_loop()
+    app.state.ws_clients = {}  # /ws/client 连接池：user_id → WebSocket
+    app.state.rate_limit_enabled = _parse_rate_limit_enabled()
+
+    # 初始化 WorldState 并从 DB 恢复最近活跃用户位置
+    _world_state = WorldState(WorldConfig())
+    positions = _load_recent_positions()
+    if positions:
+        await asyncio.to_thread(_world_state.bulk_init_from_db, positions)
+    app.state.world_state = _world_state
+
+    from app.jobs.world_aggregator import start as start_scheduler
+    start_scheduler()
+
+    yield
+
+    from app.jobs.world_aggregator import stop as stop_scheduler
+    stop_scheduler()
+
+
+def _load_recent_positions() -> list[tuple[int, int, int]]:
+    """从 DB 加载最近活跃用户的位置，供 bulk_init_from_db 使用。"""
+    try:
+        db = SessionLocal()
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+            rows = db.query(User.id, User.last_x, User.last_y).filter(
+                User.last_x.isnot(None),
+                User.last_y.isnot(None),
+            ).all()
+            return [(r.id, r.last_x, r.last_y) for r in rows if r.last_x is not None and r.last_y is not None]
+        finally:
+            db.close()
+    except Exception:
+        return []
+
+
+
+app = FastAPI(lifespan=lifespan, title="ClawSocial Relay", version="2.0.0")
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
@@ -154,52 +201,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 def health():
     """轻量存活探测，可用于负载均衡/探活。"""
     return {"status": "ok"}
-
-
-def _parse_rate_limit_enabled() -> bool:
-    v = os.getenv("RATE_LIMIT_ENABLED", "1")
-    return v.strip().lower() not in ("0", "false", "off", "")
-
-
-@app.on_event("startup")
-async def startup():
-    import asyncio
-    app.state.loop = asyncio.get_running_loop()
-    app.state.ws_clients = {}  # /ws/client 连接池：user_id → WebSocket
-    app.state.rate_limit_enabled = _parse_rate_limit_enabled()
-
-    # 初始化 WorldState 并从 DB 恢复最近活跃用户位置
-    _world_state = WorldState(WorldConfig())
-    positions = _load_recent_positions()
-    if positions:
-        await asyncio.to_thread(_world_state.bulk_init_from_db, positions)
-    app.state.world_state = _world_state
-
-    from app.jobs.world_aggregator import start as start_scheduler
-    start_scheduler()
-
-
-def _load_recent_positions() -> list[tuple[int, int, int]]:
-    """从 DB 加载最近活跃用户的位置，供 bulk_init_from_db 使用。"""
-    try:
-        db = SessionLocal()
-        try:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-            rows = db.query(User.id, User.last_x, User.last_y).filter(
-                User.last_x.isnot(None),
-                User.last_y.isnot(None),
-            ).all()
-            return [(r.id, r.last_x, r.last_y) for r in rows if r.last_x is not None and r.last_y is not None]
-        finally:
-            db.close()
-    except Exception:
-        return []
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    from app.jobs.world_aggregator import stop as stop_scheduler
-    stop_scheduler()
 
 
 app.include_router(admin.router)

@@ -9,6 +9,16 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def get_friendship_pair(user_a_id: int, user_b_id: int) -> tuple[int, int]:
+    """
+    Return the canonical (ordered) friendship pair: smaller ID first.
+
+    Friendship rows always store the smaller user ID in user_a_id.
+    This utility ensures consistent ordering without repeating min/max logic.
+    """
+    return (user_a_id, user_b_id) if user_a_id < user_b_id else (user_b_id, user_a_id)
+
+
 class User(Base):
     __tablename__ = "users"
 

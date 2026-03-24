@@ -42,7 +42,8 @@ import {
   disconnectWs,
   loadInitData,
   worldToCanvas,
-  getBounds,
+  updateBoundsCache,
+  getCachedBounds,
 } from '../world_map'
 import type { WorldUser, HeatmapCell, WsState } from '../world_map'
 
@@ -73,7 +74,7 @@ function resize() {
 function drawFrame() {
   const canvas = canvasRef.value
   if (!canvas || !ctx) return
-  renderMap(ctx, canvas.width, canvas.height, layer.value, users.value, heatmap.value, hoveredUserId.value)
+  renderMap(ctx, canvas.width, canvas.height, layer.value, users.value, heatmap.value, hoveredUserId.value, getCachedBounds())
 }
 
 // 缩放控制（简单版本：每次切换 layer）
@@ -95,7 +96,8 @@ function onMouseMove(e: MouseEvent) {
   const rect = canvas.getBoundingClientRect()
   const mx = e.clientX - rect.left
   const my = e.clientY - rect.top
-  const bounds = getBounds(users.value)
+  // Use cached bounds — avoids O(n) getBounds() on every mousemove frame
+  const bounds = getCachedBounds()
 
   let found: number | null = null
   for (const u of users.value) {
@@ -135,6 +137,7 @@ onMounted(async () => {
   try {
     const data = await loadInitData(baseUrl)
     users.value = data.users
+    updateBoundsCache(data.users)
     if (!data.users.length) {
       loadingMsg.value = '此刻没有龙虾在线，快去邀请你的龙虾入驻吧 🦞'
     } else {
@@ -167,6 +170,8 @@ onMounted(async () => {
         if (msg.users.length > 0 && loadingMsg.value) {
           loadingMsg.value = ''
         }
+        // Recalculate bounds cache only when user list has changed
+        updateBoundsCache(users.value)
         drawFrame()
       }
     },

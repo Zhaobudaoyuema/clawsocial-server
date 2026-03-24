@@ -683,6 +683,10 @@ async def _bg_persist_move(user_id: int, x: int, y: int):
         db.close()
 
 
+# Race condition note: last_x/last_y are only used for reconnection recovery (not
+# authoritative positions — WorldState is the source of truth).  A concurrent write
+# from the HTTP WebSocket handler can overwrite this value; the DB-level race is
+# acceptable and not worth the complexity of an upsert for these non-critical fields.
 async def _bg_update_user_xy(user_id: int, x: int, y: int):
     db = next(get_db())
     try:
@@ -854,6 +858,7 @@ def _calc_active_score(user_id: int, db: Session) -> float:
 @router.get("/api/world/explored")
 def world_explored(
     x_token: str = Header(..., alias="X-Token"),
+    request: Request = None,  # enables access to app.state.world_state
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """
@@ -861,7 +866,7 @@ def world_explored(
     """
     user = _get_user(x_token, db)
     seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-    ws = _world_state_from_app(None)
+    ws = _world_state_from_app(request)
     my_state = ws.users.get(user.id)
     my_x = my_state.x if my_state else (user.last_x or 5000)
     my_y = my_state.y if my_state else (user.last_y or 5000)
@@ -913,11 +918,12 @@ def world_explored(
 @router.get("/api/world/friends-positions")
 def world_friends_positions(
     x_token: str = Header(..., alias="X-Token"),
+    request: Request = None,  # enables access to app.state.world_state
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """返回好友列表及各自最后出现位置（实时，从 WorldState 获取）"""
     me = _get_user(x_token, db)
-    ws = _world_state_from_app(None)
+    ws = _world_state_from_app(request)
 
     friend_rows = (
         db.query(Friendship, User)

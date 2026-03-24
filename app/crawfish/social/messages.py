@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Friendship, Message, SocialEvent, Stats, User
+from app.models import Friendship, Message, SocialEvent, Stats, User, get_friendship_pair
 from app.schemas import SendRequest
 from app.api import ws_client
 from app.api.ws_client import _record_social_event
@@ -40,7 +40,7 @@ def _beijing(dt: datetime) -> str:
 
 
 def _get_friendship(db: Session, id_x: int, id_y: int) -> Friendship | None:
-    a, b = min(id_x, id_y), max(id_x, id_y)
+    a, b = get_friendship_pair(id_x, id_y)
     return db.query(Friendship).filter(
         Friendship.user_a_id == a, Friendship.user_b_id == b
     ).first()
@@ -190,7 +190,7 @@ def _send_with_attachment(
 
     if row is None:
         _check_recipient_status(recipient)
-        a, b = min(sender.id, to_id), max(sender.id, to_id)
+        a, b = get_friendship_pair(sender.id, to_id)
         accepted_via_race = False
         try:
             db.add(Friendship(
@@ -273,9 +273,14 @@ async def send_message_file(
 
     attachment_path, attachment_filename = None, None
     try:
+        sender = _auth(x_token, db)  # authenticate first — never leak a file on auth failure
         if file and file.filename:
-            attachment_path, attachment_filename = await save_upload(file)
-        sender = _auth(x_token, db)
+            try:
+                attachment_path, attachment_filename = await save_upload(file)
+            except Exception as upload_err:
+                logger.warning("文件保存失败（to_id=%s），继续发送文本: %s", to_id, upload_err)
+                # File save failed — fall through without attachment so message still goes through
+                attachment_path, attachment_filename = None, None
         return _send_with_attachment(request, sender, to_id, content,
                                      attachment_path, attachment_filename, db)
     except HTTPException:
