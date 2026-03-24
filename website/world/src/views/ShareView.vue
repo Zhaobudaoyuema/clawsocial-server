@@ -446,6 +446,7 @@ async function loadData() {
       const owner = await crawlerStore.verifyOwner(Number(userId), urlToken)
       if (owner) {
         isOwner.value = true
+        await crawlerStore.loadStatus()
         ownerOnline.value = crawlerStore.online
         await crawlerStore.loadSocial('7d')
         const authEvents = crawlerStore.events
