@@ -24,6 +24,14 @@
       <!-- Map background canvas -->
       <canvas ref="mapCanvas" class="share-map" />
 
+      <!-- Owner mode: current position highlight -->
+      <div
+        v-if="isOwner && crawlerStore.online"
+        class="owner-pos-badge"
+      >
+        📍 你的虾在 ({{ crawlerStore.x }}, {{ crawlerStore.y }})
+      </div>
+
       <!-- Top gradient header bar -->
       <div class="story-header">
         <div class="story-header-left">
@@ -32,6 +40,11 @@
         <div class="story-header-right">
           第 {{ currentIdx + 1 }} / {{ events.length }} 天
         </div>
+      </div>
+
+      <!-- Owner mode: online status badge -->
+      <div v-if="isOwner" class="owner-badge" :class="ownerOnline ? 'online' : 'offline'">
+        {{ ownerOnline ? '🟢 在线' : '⚪ 离线' }}
       </div>
 
       <!-- Event Card (slide-in transition) -->
@@ -128,6 +141,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useCrawlerStore } from '../stores/crawler'
 
 const route = useRoute()
 const router = useRouter()
@@ -153,6 +167,9 @@ const stats = ref<{ move_count: number; encounter_count: number; friend_count: n
 const currentIdx = ref(0)
 const showStats = ref(false)
 const slideDir = ref<'next' | 'prev'>('next')
+const crawlerStore = useCrawlerStore()
+const isOwner = ref(false)
+const ownerOnline = ref(false)
 const WORLD_SIZE = 10000
 const TOTAL_WORLD_AREA = WORLD_SIZE * WORLD_SIZE
 
@@ -407,16 +424,16 @@ function formatDate(iso: string): string {
 // ── Load data ────────────────────────────────────────────────────────
 async function loadData() {
   const userId = route.params.userId as string
-  // Read token from URL query param (e.g. /world/share/23?token=xxx)
   const urlToken = (route.query.token as string | undefined) ?? ''
 
   loading.value = true
   notFound.value = false
   showStats.value = false
   currentIdx.value = 0
+  isOwner.value = false
+  ownerOnline.value = false
 
   try {
-    // Fetch share info
     const infoRes = await fetch(`/api/world/share/${userId}`)
     if (!infoRes.ok) {
       notFound.value = true
@@ -424,14 +441,30 @@ async function loadData() {
     }
     shareInfo.value = await infoRes.json() as typeof shareInfo.value
 
-    // Fetch events
+    // Verify owner identity (only when token is present)
+    if (urlToken) {
+      const owner = await crawlerStore.verifyOwner(Number(userId), urlToken)
+      if (owner) {
+        isOwner.value = true
+        ownerOnline.value = crawlerStore.online
+        await crawlerStore.loadSocial('7d')
+        const authEvents = crawlerStore.events
+        if (authEvents.length > 0) {
+          events.value = authEvents
+        }
+      }
+    }
+
+    // Fetch events (public endpoint)
     const evRes = await fetch(`/api/world/share/${userId}/events`)
     if (evRes.ok) {
       const evData = await evRes.json() as { events: ShareEvent[] }
-      events.value = evData.events ?? []
+      if (!isOwner.value) {
+        events.value = evData.events ?? []
+      }
     }
 
-    // Fetch stats
+    // Fetch stats (public endpoint)
     const statsRes = await fetch(`/api/world/share/${userId}/stats`)
     if (statsRes.ok) {
       stats.value = await statsRes.json() as typeof stats.value
@@ -735,4 +768,44 @@ watch(() => route.params.userId, loadData)
 }
 .cta-btn:hover { background: #D4542B; }
 .cta-btn:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+
+/* ── Owner Mode ─────────────────────────────────────── */
+.owner-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  padding: 4px 10px;
+  border-radius: 99px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: var(--font-data, monospace);
+}
+.owner-badge.online {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3FB950;
+  border: 1.5px solid rgba(63, 185, 80, 0.3);
+}
+.owner-badge.offline {
+  background: rgba(139, 123, 110, 0.12);
+  color: var(--color-text-muted, #8B7B6E);
+  border: 1.5px solid rgba(139, 123, 110, 0.25);
+}
+
+.owner-pos-badge {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1.5px solid rgba(232, 98, 58, 0.3);
+  border-radius: 99px;
+  padding: 6px 14px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #E8623A;
+  white-space: nowrap;
+}
 </style>
