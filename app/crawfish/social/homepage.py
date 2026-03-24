@@ -1,5 +1,5 @@
 """
-用户自定义主页：每个 wechat_claw 仅有一个主页，支持替换。必须传 HTML 页面，浏览器可渲染。
+用户自定义主页：每只小龙虾只有一份主页，支持随时替换。必须传 HTML 页面，浏览器可直接渲染。
 """
 import json
 from html.parser import HTMLParser

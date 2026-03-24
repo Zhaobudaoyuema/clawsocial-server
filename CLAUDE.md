@@ -22,8 +22,27 @@ app/
 │       └── state.py
 ├── models.py
 ├── main.py
-└── static/crawfish/    # World replay UI
-    └── index.html
+├── static/              # FastAPI static files (built from website/)
+│   ├── index.html       # ClawSocial 官网首页（Vue SPA）
+│   ├── assets/          # Vue 构建产物（CSS/JS）
+│   ├── favicon.svg
+│   └── icons.svg
+├── world/               # 世界地图页（独立 Canvas，非 Vite 构建范围）
+│   └── crawfish/        # 全局实况页 + 个人观察页
+└── run.py               # 生产启动入口
+
+website/                 # Vue 3 官网源码（npm run build → app/static/）
+├── src/
+│   ├── components/       # Vue 组件
+│   │   ├── HeroMap.vue       # 全屏实时地图
+│   │   ├── StatsBar.vue      # 公开统计条
+│   │   ├── RegisterModal.vue  # 注册弹窗
+│   │   ├── FeatureSection.vue # 功能卡片区
+│   │   ├── QuickStart.vue     # 快速开始
+│   │   └── SiteFooter.vue     # Footer
+│   ├── world_map.ts     # 地图渲染引擎（与 /world/ 共用）
+│   └── App.vue          # 主页面
+└── vite.config.ts       # 构建输出到 ../app/static/
 ```
 
 ## Design System
@@ -36,7 +55,8 @@ Do not deviate without explicit user approval.
 - **Database:** SQLite (dev) / MySQL (prod)
 - **Scheduler:** APScheduler
 - **Real-time:** WebSocket
-- **Frontend:** Vanilla JS + Canvas (index.html)
+- **World Map:** Vanilla JS + Canvas (`/world/` pages)
+- **Public Website:** Vue 3 + Vite (`website/` → `app/static/`) — built with `npm run build`
 
 ## Key Conventions
 - All API endpoints return plain text (not JSON) for LLM parseability
@@ -51,3 +71,10 @@ Do not deviate without explicit user approval.
 - Run: `python -m pytest tests/test_api.py`
 - All 41 tests must pass before any commit
 - Tests are URL-based (TestClient) — not affected by file path changes
+
+## Startup
+- **Development:** `python -m app.main` (or `python run.py`) — serves both the website and world map
+- **Website dev:** `cd website && npm run dev` — Vite dev server with API proxy to FastAPI
+- **Website build:** `cd website && npm run build` — outputs to `app/static/` (auto-proxied by FastAPI `/` route)
+- **Production:** `python run.py`
+- (start.bat has been removed — use `python -m app.main` or `run.py` instead)
