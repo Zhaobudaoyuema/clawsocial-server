@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -16,8 +17,16 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Friendship, HeatmapCell, Message, MovementEvent, SocialEvent, User
 from app.crawfish.world.state import WorldConfig, WorldState
+from app.api.ws_client import _record_social_event
 
 logger = logging.getLogger(__name__)
+
+# ─── 日志规范 ─────────────────────────────────────────────────────────
+# 格式: [REQ=8字符] [uid=N|anon] <操作> <结果>
+# - HTTP 请求: 入口生成 req_id，贯穿整个请求
+# - WebSocket: 连接时生成 ws_id = f"ws-{user_id}"，断连时结束
+# - token 只截断显示，防止日志泄露: token[:8]+"..."
+# - 日志级别: INFO=业务关键路径, DEBUG=详细参数, WARNING=异常/失败, ERROR=服务端错误
 
 router = APIRouter(tags=["world"])
 
@@ -67,6 +76,76 @@ def _state_dict(state, me_id: int) -> dict[str, Any]:
     }
 
 
+# ─── REST: Public Global ──────────────────────────────────────────────
+
+
+@router.get("/api/world/online")
+def world_online(request: Request) -> dict[str, Any]:
+    """
+    公开接口：返回所有在线龙虾列表（无需认证）。
+    用于全局实况页初始化。
+    """
+    req_id = uuid.uuid4().hex[:8]
+    logger.info("[REQ=%s] [anon] → GET /api/world/online  获取在线龙虾", req_id)
+    from app.database import SessionLocal
+    ws = _world_state_from_app(request)
+    online_states = ws.get_all()
+
+    if not online_states:
+        logger.info("[REQ=%s] [anon] ← 200  在线=0", req_id)
+        return {"online": [], "count": 0}
+
+    db = SessionLocal()
+    try:
+        online_ids = [s.user_id for s in online_states]
+        users = db.query(User).filter(User.id.in_(online_ids)).all()
+        user_map = {u.id: u for u in users}
+
+        result = []
+        for s in online_states:
+            u = user_map.get(s.user_id)
+            result.append({
+                "user_id": s.user_id,
+                "name": u.name if u else str(s.user_id),
+                "description": u.description if u else "",
+                "x": s.x,
+                "y": s.y,
+                "last_seen": datetime.fromtimestamp(s.last_seen, tz=timezone.utc).isoformat()
+                    if s.last_seen else None,
+            })
+        count = len(result)
+        logger.info("[REQ=%s] [anon] ← 200  在线=%d  用户=%s", req_id, count, [r["name"] for r in result])
+        return {"online": result, "count": count}
+    finally:
+        db.close()
+
+
+@router.get("/api/world/stats")
+def world_stats(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """
+    公开接口：返回全局统计数据。
+    在线数（实时）+ 注册总数 + 今日注册数。
+    """
+    req_id = uuid.uuid4().hex[:8]
+    logger.info("[REQ=%s] [anon] → GET /api/world/stats", req_id)
+    from app.models import RegistrationLog
+    ws = _world_state_from_app(request)
+    online_count = ws.get_online_count()
+
+    total = db.query(User).count()
+    today = datetime.now(timezone.utc).date()
+    today_reg = db.query(RegistrationLog).filter(
+        RegistrationLog.registration_date == today
+    ).count()
+
+    logger.info("[REQ=%s] [anon] ← 200  online=%d total=%d today_new=%d", req_id, online_count, total, today_reg)
+    return {
+        "online": online_count,
+        "total": total,
+        "today_new": today_reg,
+    }
+
+
 # ─── REST: Status ──────────────────────────────────────────────────────
 
 
@@ -77,19 +156,18 @@ def world_status(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """查看自己在 2D 世界的位置"""
+    req_id = uuid.uuid4().hex[:8]
     user = _get_user(x_token, db)
+    logger.info("[REQ=%s] [uid=%d] → GET /api/world/status", req_id, user.id)
     ws = _world_state_from_app(request)
     state = ws.users.get(user.id)
     if state:
+        logger.info("[REQ=%s] [uid=%d] ← 200  在线 x=%d y=%d", req_id, user.id, state.x, state.y)
         return {"x": state.x, "y": state.y, "online": True}
-    return {
-        "x": getattr(user, "last_x", 0) or 0,
-        "y": getattr(user, "last_y", 0) or 0,
-        "online": False,
-    }
-
-
-# ─── REST: History ─────────────────────────────────────────────────────
+    last_x = getattr(user, "last_x", 0) or 0
+    last_y = getattr(user, "last_y", 0) or 0
+    logger.info("[REQ=%s] [uid=%d] ← 200  离线 last_x=%d last_y=%d", req_id, user.id, last_x, last_y)
+    return {"x": last_x, "y": last_y, "online": False}
 
 
 @router.get("/api/world/history")
@@ -100,7 +178,9 @@ def world_history(
     db: Session = Depends(get_db),
 ):
     """获取移动轨迹"""
+    req_id = uuid.uuid4().hex[:8]
     user = _get_user(x_token, db)
+    logger.info("[REQ=%s] [uid=%d] → GET /api/world/history  window=%s limit=%d", req_id, user.id, window, limit)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -111,6 +191,7 @@ def world_history(
         .limit(limit)
         .all()
     )
+    logger.info("[REQ=%s] [uid=%d] ← 200  轨迹点=%d", req_id, user.id, len(events))
     return {
         "user_id": user.id,
         "window": window,
@@ -125,13 +206,16 @@ def world_social(
     db: Session = Depends(get_db),
 ):
     """获取社交事件序列"""
+    req_id = uuid.uuid4().hex[:8]
     user = _get_user(x_token, db)
+    logger.info("[REQ=%s] [uid=%d] → GET /api/world/social  window=%s", req_id, user.id, window)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     try:
         from app.models import SocialEvent
     except ImportError:
+        logger.warning("[REQ=%s] [uid=%d] SocialEvent 模型未找到", req_id, user.id)
         return {"user_id": user.id, "window": window, "events": []}
     events = (
         db.query(SocialEvent)
@@ -154,6 +238,7 @@ def world_social(
             except Exception:
                 pass
         result.append(item)
+    logger.info("[REQ=%s] [uid=%d] ← 200  社交事件=%d", req_id, user.id, len(result))
     return {"user_id": user.id, "window": window, "events": result}
 
 
@@ -164,15 +249,19 @@ def world_heatmap(
     db: Session = Depends(get_db),
 ):
     """获取热力图格子数据"""
-    _get_user(x_token, db)
+    req_id = uuid.uuid4().hex[:8]
+    user = _get_user(x_token, db)
+    logger.info("[REQ=%s] [uid=%d] → GET /api/world/heatmap  window=%s", req_id, user.id, window)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     try:
         from app.models import HeatmapCell
     except ImportError:
+        logger.warning("[REQ=%s] [uid=%d] HeatmapCell 模型未找到", req_id, user.id)
         return {"window": window, "cells": []}
     cells = db.query(HeatmapCell).filter(HeatmapCell.updated_at >= since).limit(10000).all()
+    logger.info("[REQ=%s] [uid=%d] ← 200  格子=%d", req_id, user.id, len(cells))
     return {
         "window": window,
         "cells": [
@@ -189,9 +278,12 @@ def world_share_card(
     db: Session = Depends(get_db),
 ):
     """生成分享卡片数据"""
+    req_id = uuid.uuid4().hex[:8]
     me = _get_user(x_token, db)
+    logger.info("[REQ=%s] [uid=%d] → GET /api/world/share-card  target_id=%s", req_id, me.id, target_id)
     target = db.query(User).filter(User.id == (target_id or me.id)).first()
     if not target:
+        logger.warning("[REQ=%s] [uid=%d] ← 404  用户不存在 target_id=%s", req_id, me.id, target_id)
         raise HTTPException(status_code=404, detail="用户不存在")
     since = datetime.now(timezone.utc) - timedelta(days=7)
     try:
@@ -232,6 +324,8 @@ def world_share_card(
         }
     except ImportError:
         stats = {"move_count": 0, "encounter_count": 0, "friend_count": 0, "period": "7d"}
+    logger.info("[REQ=%s] [uid=%d] ← 200  target=%s moves=%d encounters=%d friends=%d",
+                req_id, me.id, target.name, stats["move_count"], stats["encounter_count"], stats["friend_count"])
     return {"user": _user_public(target), "stats": stats}
 
 
@@ -243,10 +337,13 @@ def world_nearby(
     db: Session = Depends(get_db),
 ) -> PlainTextResponse:
     """发现附近在线用户（REST 回退）。视野范围 range 格，支持 100~3000。"""
+    req_id = uuid.uuid4().hex[:8]
     user = _get_user(x_token, db)
+    logger.info("[REQ=%s] [uid=%d] → GET /api/world/nearby  range=%d", req_id, user.id, range)
     ws = _world_state_from_app(request)
     state = ws.users.get(user.id)
     if not state:
+        logger.info("[REQ=%s] [uid=%d] ← 200  未进入世界，WS 未连接", req_id, user.id)
         return PlainTextResponse("你尚未进入世界，请先连接 WS")
     visible = ws.get_visible(user.id, view_radius=range)
     parts = []
@@ -259,57 +356,153 @@ def world_nearby(
                 f"[{u.id}] {u.name} | 简介：{u.description or '无'} | 位置：({s.x},{s.y})"
             )
     if not parts:
+        logger.info("[REQ=%s] [uid=%d] ← 200  附近无其他龙虾", req_id, user.id)
         return PlainTextResponse("附近暂无其他龙虾")
     body = "\n" + ("─" * 40) + "\n" + "\n".join(parts)
+    logger.info("[REQ=%s] [uid=%d] ← 200  附近=%d人 %s", req_id, user.id, len(parts), [p.split("|")[0].strip() for p in parts])
     return PlainTextResponse(f"附近在线 {len(parts)} 人\n{body}")
 
 
-# ─── WebSocket Handler ────────────────────────────────────────────────
+# ─── WebSocket: 匿名观察者（全局实况页用）──────────────────────────────
+
+
+@router.websocket("/ws/world/observer")
+async def ws_world_observer(websocket: WebSocket):
+    """
+    匿名 WebSocket 观察者入口。
+    无需认证，只接收全局快照（所有在线龙虾位置）。
+    用于 /world/ 全局实况页。
+    """
+    ws_id = f"observer-{uuid.uuid4().hex[:6]}"
+    await websocket.accept()
+    logger.info("[%s] WS 连接  client=%s", ws_id, websocket.client)
+
+    ws_state = _world_state_from_app(websocket)
+    push_count = 0
+
+    async def observer_loop():
+        nonlocal push_count
+        try:
+            from app.database import SessionLocal
+            from app.models import RegistrationLog
+            today = datetime.now(timezone.utc).date()
+            # 缓入减少 DB 查询频率（total/today_new 每 10 个周期刷新一次）
+            stats_refresh_counter = 0
+            cached_total = 0
+            cached_today_new = 0
+            while True:
+                all_users = await asyncio.to_thread(ws_state.get_all)
+                online_count = len(all_users)
+
+                # total/today_new 每 20 秒刷新一次
+                stats_refresh_counter += 1
+                if stats_refresh_counter >= 10:
+                    stats_refresh_counter = 0
+                    try:
+                        db = SessionLocal()
+                        try:
+                            cached_total = db.query(User).count()
+                            cached_today_new = db.query(RegistrationLog).filter(
+                                RegistrationLog.registration_date == today
+                            ).count()
+                        finally:
+                            db.close()
+                    except Exception:
+                        pass
+
+                await websocket.send_json({
+                    "type": "global_snapshot",
+                    "users": [
+                        {"user_id": s.user_id, "x": s.x, "y": s.y}
+                        for s in all_users
+                    ],
+                    "count": online_count,
+                    "stats": {
+                        "online": online_count,
+                        "total": cached_total,
+                        "today_new": cached_today_new,
+                    },
+                    "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
+                })
+                push_count += 1
+                if push_count % 30 == 0:
+                    logger.debug("[%s] 快照推送 count=%d users=%d", ws_id, push_count, online_count)
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("[%s] 循环异常: %s", ws_id, exc)
+
+    task = asyncio.create_task(observer_loop())
+    try:
+        while True:
+            # 观察者不需要接收任何消息，静等断连
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        logger.info("[%s] WS 断开  client=%s  推送快照=%d次", ws_id, websocket.client, push_count)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+# ─── WebSocket: 龙虾客户端入口 ─────────────────────────────────────────
 
 
 @router.websocket("/ws/world")
 async def ws_world(websocket: WebSocket, x_token: str = Header(None, alias="X-Token")):
     """WebSocket 世界入口（统一消息分发）"""
     await websocket.accept()
+    ws_id = f"world-{uuid.uuid4().hex[:6]}"
     token = (x_token or "").strip()
+    masked_token = (token[:8] + "...") if token else "(none)"
+    logger.info("[%s] WS 连接  client=%s  token=%s", ws_id, websocket.client, masked_token)
 
     # ── Auth ──────────────────────────────────────────────────────────
     if not token:
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=3)
         except (asyncio.TimeoutError, WebSocketDisconnect):
+            logger.warning("[%s] ← WS 关闭  auth timeout（等待首消息超时）  code=1008", ws_id)
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
         try:
             init = json.loads(raw)
         except json.JSONDecodeError:
+            logger.warning("[%s] ← WS 关闭  auth JSON 解析失败  code=1008", ws_id)
             await websocket.send_json({"type": "error", "message": "invalid auth payload"})
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
         if not isinstance(init, dict) or init.get("type") != "auth" or not isinstance(init.get("token"), str):
+            logger.warning("[%s] ← WS 关闭  auth 格式错误  code=1008", ws_id)
             await websocket.send_json({"type": "error", "message": "auth 格式错误"})
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
         token = init["token"].strip()
+        masked_token = (token[:8] + "...")
+        logger.info("[%s] ← WS 关闭  auth timeout（无 token）  code=1008", ws_id)
 
     # DB session 获取（同步线程池）
     db_gen = get_db()
     try:
         db = next(db_gen)
     except StopIteration:
+        logger.error("[%s] ← WS 关闭  DB 不可用  code=1008", ws_id)
         await websocket.send_json({"type": "error", "message": "DB unavailable"})
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         return
 
     try:
         user = _get_user(token, db)
+        logger.info("[%s] [uid=%d] 鉴权成功  name=%s", ws_id, user.id, user.name)
     except HTTPException:
+        logger.warning("[%s] ← WS 关闭  Token 无效  masked_token=%s  code=1008", ws_id, masked_token)
         await websocket.send_json({"type": "error", "message": "Token 无效"})
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         db.close()
         return
     except Exception as exc:
-        logger.warning("auth error: %s", exc)
+        logger.error("[%s] ← WS 关闭  鉴权异常  masked_token=%s  exc=%s  code=1008", ws_id, masked_token, exc)
         await websocket.send_json({"type": "error", "message": "鉴权失败"})
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         db.close()
@@ -323,7 +516,9 @@ async def ws_world(websocket: WebSocket, x_token: str = Header(None, alias="X-To
         state = await asyncio.to_thread(
             ws_state.spawn_user, user.id, last_x, last_y
         )
+        logger.info("[%s] [uid=%d] ← ready  spawn成功 x=%d y=%d", ws_id, user.id, state.x, state.y)
     except ValueError as exc:
+        logger.error("[%s] [uid=%d] ← WS 关闭  spawn失败: %s  code=1013", ws_id, user.id, exc)
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=CLOSE_TRY_AGAIN_LATER)
         db.close()
@@ -346,7 +541,7 @@ async def ws_world(websocket: WebSocket, x_token: str = Header(None, alias="X-To
                         "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
                     })
                 except Exception as exc:
-                    logger.warning("snapshot error user %s: %s", user.id, exc)
+                    logger.warning("[%s] [uid=%d] snapshot 异常: %s", ws_id, user.id, exc)
                     break
                 await asyncio.sleep(ws_state.config.tick_ms / 1000.0)
         except asyncio.CancelledError:
@@ -378,7 +573,7 @@ async def ws_world(websocket: WebSocket, x_token: str = Header(None, alias="X-To
             else:
                 await websocket.send_json({"type": "error", "message": f"unknown type: {t}"})
     except WebSocketDisconnect:
-        pass
+        logger.info("[%s] [uid=%d] WS 断开  连接结束", ws_id, user.id)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -390,16 +585,22 @@ async def ws_world(websocket: WebSocket, x_token: str = Header(None, alias="X-To
 
 async def _ws_move(ws: WebSocket, user_id: int, msg: dict, ws_state):
     x, y = msg.get("x"), msg.get("y")
+    logger.debug("[uid=%d] move 尝试移动到 (%d,%d)", user_id, x, y)
     if not isinstance(x, int) or not isinstance(y, int):
+        logger.warning("[uid=%d] move 失败 参数类型错误 x=%s y=%s", user_id, type(x).__name__, type(y).__name__)
         await ws.send_json({"type": "move_ack", "ok": False, "error": "x_y_must_be_int"})
         return
     if not ws_state._in_bounds(x, y):
+        logger.debug("[uid=%d] move 失败 超出边界 (%d,%d)", user_id, x, y)
         await ws.send_json({"type": "move_ack", "ok": False, "x": x, "y": y, "error": "out_of_bounds"})
         return
     ok = await asyncio.to_thread(ws_state.move_user, user_id, x, y)
     if not ok:
+        logger.debug("[uid=%d] move 失败 目标被占用 (%d,%d)", user_id, x, y)
         await ws.send_json({"type": "move_ack", "ok": False, "x": x, "y": y, "error": "occupied"})
         return
+    logger.info("[uid=%d] move 成功 (%d,%d)", user_id, x, y)
+    await ws.send_json({"type": "move_ack", "ok": True, "x": x, "y": y})
     # 异步写 DB
     asyncio.create_task(_bg_persist_move(user_id, x, y))
     asyncio.create_task(_bg_update_user_xy(user_id, x, y))
@@ -497,34 +698,15 @@ async def _bg_update_user_xy(user_id: int, x: int, y: int):
 
 
 async def _bg_record_encounter(user_id: int, other_id: int, x: int, y: int):
-    try:
-        from app.models import SocialEvent
-    except ImportError:
-        return
-    db = next(get_db())
-    try:
-        exists = (
-            db.query(SocialEvent)
-            .filter(
-                SocialEvent.user_id == user_id,
-                SocialEvent.other_user_id == other_id,
-                SocialEvent.event_type == "encounter",
-            )
-            .first()
-        )
-        if not exists:
-            db.add(SocialEvent(
-                user_id=user_id,
-                other_user_id=other_id,
-                event_type="encounter",
-                x=x, y=y,
-                created_at=datetime.now(timezone.utc),
-            ))
-            db.commit()
-    except Exception as exc:
-        logger.warning("record encounter failed: %s", exc)
-    finally:
-        db.close()
+    """
+    记录 encounter 和 encountered 事件到 social_events。
+    使用共享的 _record_social_event（静默失败，不影响主流程）。
+    """
+    # 记录 encounter（已存在的 encounter 不会被重复记录）
+    _record_social_event(user_id, "encounter", other_id, x, y)
+    # 记录 encountered（对方视角）
+    _record_social_event(other_id, "encountered", user_id, x, y)
+
 
 
 async def _bg_delete_acked(user_id: int, acked_ids: list):
@@ -580,6 +762,9 @@ def _do_send_sync(from_id: int, to_id: int, content: str) -> tuple[bool, str]:
             from_id=from_id, to_id=to_id, content=content,
             msg_type=msg_type, created_at=now,
         ))
+        # 记录 message 事件到 social_events
+        _record_social_event(from_id, "message", to_id, metadata={"msg_type": msg_type})
+        _record_social_event(to_id, "message", from_id, metadata={"msg_type": msg_type})
         db.commit()
         return True, "ok"
     except Exception as exc:
@@ -947,3 +1132,109 @@ def world_homepage_update(
         db.commit()
         return {"success": True}
     return {"success": False}
+
+
+# ─── REST: Share Page ───────────────────────────────────────────
+
+
+@router.get("/api/world/share/{user_id}")
+def world_share_info(
+    request: Request,
+    user_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """公开接口：获取分享页基本信息（用户名、描述）"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {
+        "user_id": user.id,
+        "name": user.name,
+        "description": user.description or "",
+    }
+
+
+@router.get("/api/world/share/{user_id}/events")
+def world_share_events(
+    user_id: int,
+    window: str = "7d",
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """公开接口：获取用户的社交事件（用于分享页故事流）"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    days = 7 if window == "7d" else (1 if window == "24h" else 0)
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days else datetime.min.replace(tzinfo=timezone.utc)
+
+    events = (
+        db.query(SocialEvent)
+        .filter(
+            SocialEvent.user_id == user_id,
+            SocialEvent.created_at >= since,
+        )
+        .order_by(SocialEvent.created_at)
+        .all()
+    )
+    return {
+        "events": [
+            {
+                "id": e.id,
+                "type": e.event_type,
+                "other_user_id": e.other_user_id,
+                "x": e.x,
+                "y": e.y,
+                "ts": e.created_at.isoformat(),
+            }
+            for e in events
+        ]
+    }
+
+
+@router.get("/api/world/share/{user_id}/stats")
+def world_share_stats(
+    user_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """公开接口：获取用户的统计数据（用于分享页统计卡）"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    move_count = (
+        db.query(func.count(MovementEvent.id))
+        .filter(MovementEvent.user_id == user_id, MovementEvent.created_at >= seven_days_ago)
+        .scalar() or 0
+    )
+    encounter_count = (
+        db.query(func.count(SocialEvent.id))
+        .filter(
+            SocialEvent.user_id == user_id,
+            SocialEvent.event_type == "encounter",
+            SocialEvent.created_at >= seven_days_ago,
+        )
+        .scalar() or 0
+    )
+    friend_count = (
+        db.query(func.count(Friendship.id))
+        .filter(
+            or_(Friendship.user_a_id == user_id, Friendship.user_b_id == user_id),
+            Friendship.status == "accepted",
+        )
+        .scalar() or 0
+    )
+    message_count = (
+        db.query(func.count(Message.id))
+        .filter(
+            or_(Message.from_id == user_id, Message.to_id == user_id),
+        )
+        .scalar() or 0
+    )
+    return {
+        "move_count": move_count,
+        "encounter_count": encounter_count,
+        "friend_count": friend_count,
+        "message_count": message_count,
+    }

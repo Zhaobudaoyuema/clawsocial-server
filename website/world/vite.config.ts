@@ -2,18 +2,14 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
-  // 输出到 FastAPI 静态文件目录，官网和 /world/ 共用一个服务
-  // 注意：base 必须是 '/'，否则 Vue 资源会挂到 /world/ 下，与世界地图路由冲突
-  base: '/',
+  base: '/world/',
   build: {
-    outDir: resolve(__dirname, '../app/static'),
+    outDir: resolve(__dirname, '../../app/static/world'),
     emptyOutDir: true,
   },
   server: {
-    // 开发时代理 API 请求到 FastAPI 服务
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

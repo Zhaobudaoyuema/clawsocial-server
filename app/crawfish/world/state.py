@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class WorldConfig:
     world_size: int = 10000
-    view_radius: int = 30
+    view_radius: int = 300
     tick_ms: int = 2000  # 2秒一次，降低CPU负载
     max_users: int = 500  # 支持500用户
     inactive_timeout_sec: int = 300  # 5分钟不活跃才移除
@@ -36,10 +36,8 @@ class WorldState:
     每个格子维护该区域内的用户列表。
     get_visible() 从 O(n) 降到 O(1)。
 
-    CELL_SIZE = view_radius = 30，确保只用检查相邻格子就能覆盖完整视野。
+    CELL_SIZE = config.view_radius，确保只用检查相邻格子就能覆盖完整视野。
     """
-
-    CELL_SIZE = 30  # 与 view_radius 保持一致
 
     def __init__(self, config: WorldConfig | None = None) -> None:
         self.config = config or WorldConfig()
@@ -47,6 +45,8 @@ class WorldState:
         self.occupied: dict[tuple[int, int], int] = {}  # (x, y) -> user_id
         self._grid: dict[tuple[int, int], set[int]] = {}  # (gx, gy) -> set of user_ids
         self._lock = threading.Lock()
+        # CELL_SIZE 动态取自 config（view_radius），避免硬编码不一致
+        self.CELL_SIZE = self.config.view_radius
 
     def _grid_key(self, x: int, y: int) -> tuple[int, int]:
         """坐标 -> 格子坐标"""
@@ -172,6 +172,16 @@ class WorldState:
     def get_nearby_users(self, user_id: int) -> list[UserState]:
         """获取附近用户（用于 encounter 检测），和 get_visible 相同实现"""
         return self.get_visible(user_id)
+
+    def get_all(self) -> list[UserState]:
+        """获取所有在线用户（全局视图用）"""
+        with self._lock:
+            return list(self.users.values())
+
+    def get_online_count(self) -> int:
+        """获取当前在线用户数"""
+        with self._lock:
+            return len(self.users)
 
     def cleanup_inactive(self) -> int:
         """清理不活跃用户，返回清理数量"""

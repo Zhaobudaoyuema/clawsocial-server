@@ -23,12 +23,14 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from sqlalchemy import func
+from sqlalchemy import func, or_ as sql_or
 from app.database import get_db
 from app.models import Friendship, Message, SocialEvent, User
 from app.crawfish.world.state import WorldConfig, WorldState
@@ -81,13 +83,52 @@ def _calc_active_score(user_id: int) -> float:
         db.close()
 
 
+def _ensure_aware(dt: datetime) -> datetime:
+    """将 naive datetime 强制转为 UTC aware（防止 naive/aware 混合比较崩溃）。"""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _is_new(created_at: datetime) -> bool:
     """判断用户是否为新虾（注册7天内）。"""
     now = datetime.now(timezone.utc)
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
-    delta = now - created_at
+    delta = now - _ensure_aware(created_at)
     return delta.days <= _NEW_CRAWFISH_DAYS
+
+
+def _record_social_event(
+    user_id: int,
+    event_type: str,
+    other_user_id: int | None = None,
+    x: int | None = None,
+    y: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """
+    将社交事件写入 social_events 表（静默失败，不影响主流程）。
+    用于 encounter / friendship / message / departure 事件的持久化记录。
+    """
+    import json
+    try:
+        db = next(get_db())
+        try:
+            now = datetime.now(timezone.utc)
+            event = SocialEvent(
+                user_id=user_id,
+                other_user_id=other_user_id,
+                event_type=event_type,
+                x=x,
+                y=y,
+                event_metadata=json.dumps(metadata) if metadata else None,
+                created_at=now,
+            )
+            db.add(event)
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass  # 静默失败，不影响主流程
 
 
 # ─── Step Context 聚合（Reactive 上下文封装）─────────────────────
@@ -178,7 +219,7 @@ def _build_message_feedback(db, user_id: int, now: datetime) -> list[dict]:
                 delta = (m.read_at - m.created_at).total_seconds()
                 replied = delta < NO_REPLY_THRESHOLD_SEC
 
-        delta_sent = now - m.created_at
+        delta_sent = now - _ensure_aware(m.created_at)
         if delta_sent.total_seconds() < 60:
             sent_str = f"{int(delta_sent.total_seconds())}s ago"
         elif delta_sent.total_seconds() < 3600:
@@ -188,7 +229,7 @@ def _build_message_feedback(db, user_id: int, now: datetime) -> list[dict]:
 
         delta_read = ""
         if read and m.read_at:
-            dr = now - m.read_at
+            dr = now - _ensure_aware(m.read_at)
             if dr.total_seconds() < 60:
                 delta_read = f"{int(dr.total_seconds())}s ago"
             elif dr.total_seconds() < 3600:
@@ -249,14 +290,17 @@ def _build_consecutive_no_reply(db, user_id: int, now: datetime) -> list[dict]:
             last_reply_time[r.from_id] = r.created_at
 
     # 每个方向：从最新一条消息开始计数，遇见有回复则该方向归零
+    # 逻辑：只重置发送时间早于最后一条回复的消息；发送于最后回复之后的仍算"无回复"
     counters: dict[int, int] = {}  # to_id -> consecutive count
     for m in sent:
         if m.to_id is None:
             continue
-        replied = last_reply_time.get(m.to_id) is not None
-        if replied:
+        last_reply = last_reply_time.get(m.to_id)
+        if last_reply is not None and m.created_at <= last_reply:
+            # 这条消息在最后回复之前或同时 → 有回复，重置计数器
             counters[m.to_id] = 0
         else:
+            # 这条消息在最后回复之后（或完全没有回复）→ 计入无回复
             counters[m.to_id] = counters.get(m.to_id, 0) + 1
 
     result = []
@@ -366,7 +410,7 @@ def _build_step_context(
             other_id = row.user_b_id if row.user_a_id == user_id else row.user_a_id
             other_u = db.query(User).filter(User.id == other_id).first()
             other_name = other_u.name if other_u else f"ID:{other_id}"
-            delta = now - row.updated_at
+            delta = now - _ensure_aware(row.updated_at)
             if delta.total_seconds() < 60:
                 time_str = f"{int(delta.total_seconds())}s ago"
             elif delta.total_seconds() < 3600:
@@ -418,7 +462,7 @@ def _build_step_context(
                 .first()
             )
             if last_msg:
-                delta = now - last_msg.created_at
+                delta = now - _ensure_aware(last_msg.created_at)
                 if delta.total_seconds() < 60:
                     last_interaction = f"{int(delta.total_seconds())}s ago"
                 elif delta.total_seconds() < 3600:
@@ -470,7 +514,7 @@ def _build_step_context(
                 })
             else:
                 last_seen = fu.last_seen_at or fu.created_at
-                delta = now - last_seen
+                delta = now - _ensure_aware(last_seen)
                 if delta.days > 0:
                     last_seen_str = f"{delta.days}d ago"
                 elif delta.total_seconds() >= 3600:
@@ -494,7 +538,7 @@ def _build_step_context(
         unread_messages = []
         for m in unread_msgs:
             from_u = db.query(User).filter(User.id == m.from_id).first() if m.from_id else None
-            delta = now - m.created_at
+            delta = now - _ensure_aware(m.created_at)
             if delta.total_seconds() < 60:
                 time_str = f"{int(delta.total_seconds())}s ago"
             elif delta.total_seconds() < 3600:
@@ -520,7 +564,7 @@ def _build_step_context(
         pending_friend_requests = []
         for m in pending_reqs:
             from_u = db.query(User).filter(User.id == m.from_id).first() if m.from_id else None
-            delta = now - m.created_at
+            delta = now - _ensure_aware(m.created_at)
             if delta.total_seconds() < 60:
                 time_str = f"{int(delta.total_seconds())}s ago"
             elif delta.total_seconds() < 3600:
@@ -546,7 +590,7 @@ def _build_step_context(
         )
         recent_events_out = []
         for e in recent_events:
-            delta = now - e.created_at
+            delta = now - _ensure_aware(e.created_at)
             if delta.total_seconds() < 60:
                 time_str = f"{int(delta.total_seconds())}s ago"
             elif delta.total_seconds() < 3600:
@@ -667,7 +711,7 @@ def _calc_exploration_frontier(x: int, y: int, visited: set[str]) -> str:
                     cell = f"{sx // _CELL_SIZE},{sy // _CELL_SIZE}"
                     if cell not in visited:
                         dist = abs(sx - x) + abs(sy - y)
-                        if dist > best_dist:
+                        if dist < best_dist:
                             best_dist = dist
                             best_dir = direction
                         break
@@ -748,22 +792,26 @@ async def ws_client(websocket: WebSocket):
        friends_list / discover_ack / block_ack / unblock_ack / status_ack / error
     """
     await websocket.accept()
+    logger.info("[ws/client] 客户端连接 client=%s", websocket.client)
     # FastAPI's Header() dependency doesn't populate WS handler params from HTTP headers,
-    # so we read x-token manually from the WebSocket HTTP headers.
-    # Production clients pass it as a header; test clients send the auth message instead.
+    # so we try: 1) query param x_token  2) HTTP header x-token  3) body auth message
     header_token = websocket.headers.get("x-token", "").strip()
-    token = header_token
+    query_token = websocket.query_params.get("x_token", "").strip()
+    token = query_token or header_token
 
     # ── Auth ─────────────────────────────────────────────────────────
     if not token:
+        logger.debug("[ws/client] 无 header token，等待 auth 消息")
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=5)
         except (asyncio.TimeoutError, WebSocketDisconnect):
+            logger.warning("[ws/client] auth timeout，关闭连接")
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
         try:
             init = json.loads(raw)
         except json.JSONDecodeError:
+            logger.warning("[ws/client] auth JSON 解析失败")
             await websocket.send_json({"type": "error", "code": "INVALID_JSON", "message": "invalid JSON"})
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
@@ -772,6 +820,7 @@ async def ws_client(websocket: WebSocket):
             or init.get("type") != "auth"
             or not isinstance(init.get("token"), str)
         ):
+            logger.warning("[ws/client] auth 格式错误（期望 type=auth, token=str）")
             await websocket.send_json({"type": "error", "code": "AUTH_FORMAT", "message": "auth 格式错误"})
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
@@ -779,12 +828,14 @@ async def ws_client(websocket: WebSocket):
 
     try:
         user = get_current_user(token)
+        logger.info("[ws/client] 鉴权成功 user_id=%d name=%s", user.id, user.name)
     except ValueError:
+        logger.warning("[ws/client] Token 无效")
         await websocket.send_json({"type": "error", "code": "TOKEN_INVALID", "message": "Token 无效"})
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         return
     except Exception as exc:
-        logger.warning("client auth error: %s", exc)
+        logger.warning("[ws/client] auth exception: %s", exc)
         await websocket.send_json({"type": "error", "code": "AUTH_FAILED", "message": "鉴权失败"})
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         return
@@ -795,19 +846,25 @@ async def ws_client(websocket: WebSocket):
     # ── Spawn into world ────────────────────────────────────────────
     last_x = getattr(user, "last_x", None)
     last_y = getattr(user, "last_y", None)
+    logger.debug("[ws/client] user_id=%d spawn last_x=%s last_y=%s", user.id, last_x, last_y)
     try:
         state = await asyncio.to_thread(
             ws_state.spawn_user, user.id, last_x, last_y
         )
+        logger.info("[ws/client] user_id=%d spawn 成功 x=%d y=%d", user.id, state.x, state.y)
     except ValueError as exc:
+        logger.error("[ws/client] user_id=%d spawn 失败: %s", user.id, exc)
         await websocket.send_json({"type": "error", "code": "WORLD_FULL", "message": str(exc)})
         await websocket.close(code=CLOSE_TRY_AGAIN_LATER)
         return
+
+    world_base = os.getenv("WORLD_BASE_URL", "").rstrip("/")
 
     await websocket.send_json({
         "type": "ready",
         "me": _state_dict(state, user.id),
         "radius": ws_state.config.view_radius,
+        "world_url": f"{world_base}/world" if world_base else "/world",
     })
 
     # ── Register connection ────────────────────────────────────────
@@ -864,6 +921,19 @@ async def ws_client(websocket: WebSocket):
                                 }
                                 await websocket.send_json(event)
                                 new_encounters.append(event)
+                                # 写入 social_events（对双方都记录）
+                                asyncio.create_task(asyncio.to_thread(
+                                    _record_social_event,
+                                    user.id, "encounter", s.user_id,
+                                    s.x, s.y,
+                                    {"score": round(score, 1), "name": u.name},
+                                ))
+                                asyncio.create_task(asyncio.to_thread(
+                                    _record_social_event,
+                                    s.user_id, "encountered", user.id,
+                                    s.x, s.y,
+                                    {"score": round(_calc_active_score(user.id), 1), "name": user.name},
+                                ))
                     _known_user_ids = visible_ids
 
                     # 步骤计数
@@ -879,7 +949,7 @@ async def ws_client(websocket: WebSocket):
                     await websocket.send_json(ctx)
 
                 except Exception as exc:
-                    logger.warning("snapshot loop error user %s: %s", user.id, exc)
+                    logger.warning("[uid=%d] snapshot_loop 异常: %s", user.id, exc)
         except asyncio.CancelledError:
             pass
 
@@ -892,11 +962,13 @@ async def ws_client(websocket: WebSocket):
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
+                logger.warning("[ws/client] user_id=%d 收到无效 JSON: %s", user.id, raw[:100])
                 await websocket.send_json({"type": "error", "code": "INVALID_JSON", "message": "invalid_json"})
                 continue
 
             t = msg.get("type")
             request_id = msg.get("request_id")
+            logger.debug("[ws/client] user_id=%d 收到消息 type=%s request_id=%s", user.id, t, request_id)
             if t == "move":
                 await _client_move(websocket, user.id, user.name, msg, ws_state, app)
             elif t == "send":
@@ -916,12 +988,20 @@ async def ws_client(websocket: WebSocket):
             else:
                 await websocket.send_json({"type": "error", "code": "UNKNOWN_TYPE", "message": f"unknown type: {t}", "request_id": request_id})
     except WebSocketDisconnect:
-        pass
+        logger.info("[ws/client] user_id=%d WebSocket 断开", user.id)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
         ws_clients.pop(user.id, None)
+        # 记录下线事件
+        me_state = getattr(user, '_ws_state', None)
+        x, y = (me_state.x, me_state.y) if me_state else (None, None)
+        asyncio.create_task(asyncio.to_thread(
+            _record_social_event,
+            user.id, "departure", None, x, y,
+            {"name": user.name},
+        ))
         # 广播给好友：我下线了
         asyncio.create_task(_broadcast(app, user.id, {
             "type": "friend_offline",
@@ -929,6 +1009,7 @@ async def ws_client(websocket: WebSocket):
             "user_name": user.name,
             "ts": datetime.now(timezone.utc).isoformat(),
         }))
+        logger.info("[ws/client] user_id=%d 连接清理完成，已从 ws_clients 移除", user.id)
 
 
 # ─── Client command handlers ─────────────────────────────────────────
@@ -942,16 +1023,21 @@ async def _client_move(
     app,
 ):
     x, y = msg.get("x"), msg.get("y")
+    logger.debug("[move] user_id=%d move to (%d,%d)", user_id, x, y)
     if not isinstance(x, int) or not isinstance(y, int):
+        logger.warning("[move] user_id=%d 参数类型错误 x=%s y=%s", user_id, type(x).__name__, type(y).__name__)
         await ws.send_json({"type": "move_ack", "ok": False, "error": "x_y_must_be_int"})
         return
     if not ws_state._in_bounds(x, y):
+        logger.debug("[move] user_id=%d 超出边界 (%d,%d)", user_id, x, y)
         await ws.send_json({"type": "move_ack", "ok": False, "x": x, "y": y, "error": "out_of_bounds"})
         return
     ok = await asyncio.to_thread(ws_state.move_user, user_id, x, y)
     if not ok:
+        logger.debug("[move] user_id=%d 目标位置被占用 (%d,%d)", user_id, x, y)
         await ws.send_json({"type": "move_ack", "ok": False, "x": x, "y": y, "error": "occupied"})
         return
+    logger.info("[move] user_id=%d 移动成功 (%d,%d)", user_id, x, y)
     asyncio.create_task(_bg_persist_move(user_id, x, y))
     asyncio.create_task(_bg_update_user_xy(user_id, x, y))
     # 广播给好友：我移动了
@@ -969,10 +1055,13 @@ async def _client_move(
 async def _client_send(ws: WebSocket, user: User, msg: dict, app):
     to_id = msg.get("to_id")
     content = str(msg.get("content", ""))
+    logger.debug("[send] user_id=%d 发送消息 to_id=%d len=%d", user.id, to_id, len(content))
     if not isinstance(to_id, int):
+        logger.warning("[send] user_id=%d to_id 类型错误: %s", user.id, type(to_id).__name__)
         await ws.send_json({"type": "send_ack", "ok": False, "error": "to_id_must_be_int"})
         return
     ok, detail, msg_id = await asyncio.to_thread(_do_send_sync, user.id, to_id, content, app)
+    logger.info("[send] user_id=%d to_id=%d ok=%s msg_id=%s detail=%s", user.id, to_id, ok, msg_id, detail)
     await ws.send_json({"type": "send_ack", "ok": ok, "detail": detail, "msg_id": msg_id})
 
 
@@ -989,12 +1078,13 @@ async def _client_get_friends(ws: WebSocket, user_id: int, request_id: str | Non
     try:
         friends, total = await asyncio.to_thread(_query_friends, user_id, db_session)
     except Exception as exc:
-        logger.warning("get_friends error for user %s: %s", user_id, exc)
+        logger.warning("[uid=%d] get_friends 失败  request_id=%s  exc=%s", user_id, request_id, exc)
         await ws.send_json({
             "type": "friends_list", "request_id": request_id,
             "friends": [], "total": 0, "error": str(exc),
         })
         return
+    logger.info("[uid=%d] ← friends_list  request_id=%s  total=%d", user_id, request_id, total)
     await ws.send_json({
         "type": "friends_list", "request_id": request_id,
         "friends": friends, "total": total,
@@ -1003,15 +1093,17 @@ async def _client_get_friends(ws: WebSocket, user_id: int, request_id: str | Non
 
 async def _client_discover(ws: WebSocket, user_id: int, keyword: str | None, request_id: str | None, db_session=None):
     """Return a list of open-status users (excluding self), optionally filtered by keyword."""
+    logger.info("[uid=%d] discover  keyword=%s  request_id=%s", user_id, repr(keyword), request_id)
     try:
         users, total = await asyncio.to_thread(_query_open_users, user_id, keyword, db_session)
     except Exception as exc:
-        logger.warning("discover error for user %s: %s", user_id, exc)
+        logger.warning("[uid=%d] discover 失败  request_id=%s  exc=%s", user_id, request_id, exc)
         await ws.send_json({
             "type": "discover_ack", "request_id": request_id,
             "users": [], "total": 0, "error": str(exc),
         })
         return
+    logger.info("[uid=%d] ← discover_ack  request_id=%s  返回=%d  total=%d", user_id, request_id, len(users), total)
     await ws.send_json({
         "type": "discover_ack", "request_id": request_id,
         "users": users, "total": total,
@@ -1020,36 +1112,42 @@ async def _client_discover(ws: WebSocket, user_id: int, keyword: str | None, req
 
 async def _client_block(ws: WebSocket, user_id: int, target_id: int | None, request_id: str | None, db_session=None):
     """Block target_id (must be an accepted friend)."""
+    logger.info("[uid=%d] block  target_id=%s  request_id=%s", user_id, target_id, request_id)
     if not isinstance(target_id, int):
         await ws.send_json({"type": "block_ack", "ok": False, "error": "user_id_must_be_int", "request_id": request_id})
         return
     try:
         detail, ok = await asyncio.to_thread(_do_block, user_id, target_id, db_session)
     except Exception as exc:
-        logger.warning("block error user %s -> %s: %s", user_id, target_id, exc)
+        logger.warning("[uid=%d] block 失败  target_id=%s  exc=%s", user_id, target_id, exc)
         await ws.send_json({"type": "block_ack", "ok": False, "error": str(exc), "request_id": request_id})
         return
+    logger.info("[uid=%d] ← block_ack  ok=%s  target_id=%s  detail=%s", user_id, ok, target_id, detail)
     await ws.send_json({"type": "block_ack", "ok": ok, "detail": detail, "request_id": request_id})
 
 
 async def _client_unblock(ws: WebSocket, user_id: int, target_id: int | None, request_id: str | None, db_session=None):
     """Unblock target_id."""
+    logger.info("[uid=%d] unblock  target_id=%s  request_id=%s", user_id, target_id, request_id)
     if not isinstance(target_id, int):
         await ws.send_json({"type": "unblock_ack", "ok": False, "error": "user_id_must_be_int", "request_id": request_id})
         return
     try:
         detail, ok = await asyncio.to_thread(_do_unblock, user_id, target_id, db_session)
     except Exception as exc:
-        logger.warning("unblock error user %s -> %s: %s", user_id, target_id, exc)
+        logger.warning("[uid=%d] unblock 失败  target_id=%s  exc=%s", user_id, target_id, exc)
         await ws.send_json({"type": "unblock_ack", "ok": False, "error": str(exc), "request_id": request_id})
         return
+    logger.info("[uid=%d] ← unblock_ack  ok=%s  target_id=%s  detail=%s", user_id, ok, target_id, detail)
     await ws.send_json({"type": "unblock_ack", "ok": ok, "detail": detail, "request_id": request_id})
 
 
 async def _client_update_status(ws: WebSocket, user, status: str | None, request_id: str | None, db_session=None):
     """Update the authenticated user's status (open / friends_only / do_not_disturb)."""
     VALID_STATUSES = {"open", "friends_only", "do_not_disturb"}
+    logger.info("[uid=%d] update_status  status=%s  request_id=%s", user.id, status, request_id)
     if status not in VALID_STATUSES:
+        logger.warning("[uid=%d] update_status 失败  无效 status=%s", user.id, status)
         await ws.send_json({
             "type": "status_ack", "ok": False,
             "error": f"invalid_status: must be one of {sorted(VALID_STATUSES)}",
@@ -1059,9 +1157,10 @@ async def _client_update_status(ws: WebSocket, user, status: str | None, request
     try:
         await asyncio.to_thread(_do_update_status, user.id, status, db_session)
     except Exception as exc:
-        logger.warning("update_status error user %s: %s", user.id, exc)
+        logger.warning("[uid=%d] update_status 失败  status=%s  exc=%s", user.id, status, exc)
         await ws.send_json({"type": "status_ack", "ok": False, "error": str(exc), "request_id": request_id})
         return
+    logger.info("[uid=%d] ← status_ack  ok=True  status=%s", user.id, status)
     await ws.send_json({"type": "status_ack", "ok": True, "status": status, "request_id": request_id})
 
 
@@ -1280,6 +1379,14 @@ def _do_send_sync(
         db.refresh(msg_record)
         msg_id = f"msg_{msg_record.id}"
 
+        # 写入 social_events（双方都记录 message 事件）
+        _record_social_event(from_id, "message", to_id, metadata={
+            "msg_id": msg_record.id, "msg_type": msg_type,
+        })
+        _record_social_event(to_id, "message", from_id, metadata={
+            "msg_id": msg_record.id, "msg_type": msg_type,
+        })
+
         # 推送给目标用户的 ws_client（如果在线）
         ws_payload = {
             "type": "message",
@@ -1318,7 +1425,7 @@ def _friends_of(user_id: int) -> list[int]:
         rows = (
             db.query(Friendship)
             .filter(
-                or_(
+                sql_or(
                     Friendship.user_a_id == user_id,
                     Friendship.user_b_id == user_id,
                 ),
@@ -1339,23 +1446,30 @@ async def _broadcast(app, user_id: int, payload: dict) -> None:
     """向指定用户的所有在线好友 WebSocket 推送 payload（静默忽略离线用户）。"""
     friends = _friends_of(user_id)
     clients: dict = getattr(app.state, "ws_clients", {})
+    pushed_to = 0
     for fid in friends:
         ws = clients.get(fid)
         if ws is not None:
             try:
                 await ws.send_json(payload)
-            except Exception:
-                pass
+                pushed_to += 1
+            except Exception as exc:
+                logger.debug("[broadcast] user_id=%d → fid=%d 推送失败: %s", user_id, fid, exc)
+    if pushed_to > 0:
+        logger.debug("[broadcast] user_id=%d 推送给 %d 个好友 type=%s", user_id, pushed_to, payload.get("type"))
 
 
 async def _broadcast_all(app, payload: dict) -> None:
     """向所有在线龙虾 WebSocket 推送 payload（全服广播）。"""
     clients: dict = getattr(app.state, "ws_clients", {})
+    pushed_to = 0
     for ws in clients.values():
         try:
             await ws.send_json(payload)
-        except Exception:
-            pass
+            pushed_to += 1
+        except Exception as exc:
+            logger.debug("[broadcast_all] 推送失败: %s", exc)
+    logger.debug("[broadcast_all] 全服广播 %d 个客户端 type=%s", pushed_to, payload.get("type"))
 
 
 def _broadcast_all_sync(app, payload: dict) -> None:
@@ -1371,6 +1485,32 @@ def _broadcast_all_sync(app, payload: dict) -> None:
 broadcast_all_sync = _broadcast_all_sync
 
 
+async def _push_to_user(app, user_id: int, payload: dict) -> bool:
+    """向指定用户推送 payload，返回是否成功。静默忽略离线/错误。"""
+    clients: dict = getattr(app.state, "ws_clients", {})
+    ws = clients.get(user_id)
+    if ws is None:
+        return False
+    try:
+        await ws.send_json(payload)
+        return True
+    except Exception:
+        return False
+
+
+def _push_to_user_sync(app, user_id: int, payload: dict) -> bool:
+    """同步上下文调用（静默忽略推送失败）。"""
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_push_to_user(app, user_id, payload))
+        return True
+    except RuntimeError:
+        return False
+
+
+push_to_user = _push_to_user_sync
+
+
 # ─── Background tasks ───────────────────────────────────────────────
 
 async def _bg_persist_move(user_id: int, x: int, y: int):
@@ -1383,7 +1523,7 @@ async def _bg_persist_move(user_id: int, x: int, y: int):
         db.add(MovementEvent(user_id=user_id, x=x, y=y, created_at=datetime.now(timezone.utc)))
         db.commit()
     except Exception as exc:
-        logger.warning("persist move failed: %s", exc)
+        logger.warning("[uid=%d] persist_move 失败  x=%d y=%d  exc=%s", user_id, x, y, exc)
     finally:
         db.close()
 
@@ -1397,7 +1537,7 @@ async def _bg_update_user_xy(user_id: int, x: int, y: int):
             u.last_y = y
             db.commit()
     except Exception as exc:
-        logger.warning("update xy failed: %s", exc)
+        logger.warning("[uid=%d] update_xy 失败  x=%d y=%d  exc=%s", user_id, x, y, exc)
     finally:
         db.close()
 
@@ -1464,7 +1604,7 @@ async def _bg_delete_acked(user_id: int, acked_ids: list):
         except ImportError:
             pass
     except Exception as exc:
-        logger.warning("delete acked failed: %s", exc)
+        logger.warning("[uid=%d] delete_acked 失败  acked_ids=%s  exc=%s", user_id, acked_ids, exc)
         db.rollback()
     finally:
         db.close()
