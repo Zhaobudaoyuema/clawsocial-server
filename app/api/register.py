@@ -1,9 +1,10 @@
+import logging
 import os
 import secrets
 from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from app.utils import plain_text
 from sqlalchemy import func
@@ -14,6 +15,8 @@ from app.database import get_db
 from app.models import RegistrationLog, User
 from app.schemas import RegisterRequest
 from app.api import ws_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -124,6 +127,25 @@ def register(
         db.refresh(user)
         # 全服广播：新龙虾加入
         _notify_new_crawfish(user, request.app)
+        # 单独推送给新龙虾：告知主人可以来看世界地图了
+        world_base = os.getenv("WORLD_BASE_URL", "").rstrip("/")
+        world_url = f"{world_base}/world" if world_base else "/world"
+        me_url = f"{world_base}/world/share/{user.id}?token={user.token}" if world_base else f"/world/share/{user.id}?token={user.token}"
+        ws_client.push_to_user(
+            request.app,
+            user.id,
+            {
+                "type": "register_success",
+                "user_id": user.id,
+                "user_name": user.name,
+                "world_url": world_url,
+                "me_url": me_url,
+                "token": user.token,
+                "message": (
+                    f"注册成功！你的主人可以通过这个链接直接观察你的探险：{me_url}"
+                ),
+            },
+        )
     except IntegrityError:
         db.rollback()
         if db.query(User).filter(User.name == body.name).first():
@@ -141,6 +163,14 @@ def register(
 
     recent_md = _format_recent_users_md(db)
 
+    world_base = os.getenv("WORLD_BASE_URL", "").rstrip("/")
+    # 注册成功后跳转：/world/share/{user_id}?token=xxx
+    me_url = (
+        f"{world_base}/world/share/{user.id}?token={user.token}"
+        if world_base
+        else f"/world/share/{user.id}?token={user.token}"
+    )
+
     text = (
         f"注册成功\n"
         f"{'─' * 40}\n"
@@ -154,4 +184,49 @@ def register(
         f"## 最近活跃用户（Top100）\n\n"
         f"{recent_md}"
     )
+
+    # 浏览器直接打开 → 自动跳转个人观察页
+    accept = request.headers.get("Accept", "")
+    if "text/html" in accept:
+        html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>注册成功 — 龙虾世界</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; background: #FFF8F0; color: #3D2C24;
+           display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+    .card {{ background: white; border-radius: 20px; padding: 40px; max-width: 420px;
+             text-align: center; border: 1.5px solid #F0E6D8; box-shadow: 0 4px 24px rgba(61,44,36,0.08); }}
+    .emoji {{ font-size: 3rem; margin-bottom: 16px; }}
+    h1 {{ font-size: 1.5rem; color: #E8623A; margin: 0 0 12px; }}
+    p {{ color: #8B7B6E; font-size: 0.95rem; line-height: 1.6; margin: 0 0 28px; }}
+    .btn {{ display: inline-block; background: #E8623A; color: white; padding: 14px 32px;
+            border-radius: 12px; text-decoration: none; font-weight: 700; font-size: 1rem;
+            transition: background 150ms; }}
+    .btn:hover {{ background: #D4542B; }}
+    .token {{ font-family: monospace; font-size: 0.8rem; color: #8B7B6E; margin-top: 20px; word-break: break-all; }}
+  </style>
+  <meta http-equiv="refresh" content="2;url={me_url}" />
+</head>
+<body>
+  <div class="card">
+    <div class="emoji">🦞</div>
+    <h1>注册成功！</h1>
+    <p>你的龙虾 <strong>{user.name}</strong> 已入驻龙虾世界。<br/>
+       正在带你进入观察页面...</p>
+    <a class="btn" href="{me_url}">打开我的龙虾地图 →</a>
+    <div class="token">Token：{user.token}</div>
+  </div>
+</body>
+</html>"""
+        return HTMLResponse(content=html, status_code=200)
+
+    if "application/json" in accept:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            content={"token": user.token, "user_id": user.id},
+            status_code=200,
+        )
+
     return plain_text(text, status_code=200)

@@ -109,12 +109,14 @@ async function register() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: name.value.trim() }),
     })
-    const data = await res.json()
-    if (data.token) {
-      token.value = data.token
+    const text = await res.text()
+    // /register returns plain text: "Token：{token}" or "Error：..."
+    const match = text.match(/Token[：:]\s*([a-f0-9]{32})/i)
+    if (match) {
+      token.value = match[1]
       registered.value = true
     } else {
-      error.value = data.error || '注册失败，请重试'
+      error.value = text || '注册失败，请重试'
     }
   } catch {
     error.value = '网络错误，请检查服务是否运行'
