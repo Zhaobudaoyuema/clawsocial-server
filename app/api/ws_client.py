@@ -743,7 +743,7 @@ def _build_step_context(
         visited_cells = {f"{x // _CELL_SIZE},{y // _CELL_SIZE}" for x, y in today_moves}
         total_map_cells = (world_size // _CELL_SIZE) ** 2
         coverage_percent = round(len(visited_cells) / total_map_cells * 100, 2) if total_map_cells else 0
-        frontier_dir = _calc_exploration_frontier(me_state.x, me_state.y, visited_cells)
+        frontier_dir = _calc_exploration_frontier(me_state.x, me_state.y, visited_cells, world_size)
 
         exploration_coverage = {
             "visited_cells_today": len(visited_cells),
@@ -800,23 +800,40 @@ def _calc_direction(dx: int, dy: int) -> str:
         return "S" if dy > 0 else "N"
 
 
-def _calc_exploration_frontier(x: int, y: int, visited: set[str]) -> str:
-    """计算最接近的未访问方向。"""
+def _calc_exploration_frontier(x: int, y: int, visited: set[str], world_size: int) -> str:
+    """
+    计算最接近的未访问方向（O(1) — no nested loops）。
+
+    策略：对每个方向，沿该方向向外以 CELL_SIZE 为步长搜索格子，
+    返回第一个遇到的未访问格子所在的方向。若所有方向都visited则返回"unknown"。
+    """
+    DIRECTIONS = [
+        ("N", 0, -1),
+        ("S", 0,  1),
+        ("E",  1, 0),
+        ("W", -1, 0),
+    ]
+    cx, cy = x // _CELL_SIZE, y // _CELL_SIZE
+    # 边界：世界大小 / CELL_SIZE（例如 10000/30 ≈ 333）
+    world_cells = world_size // _CELL_SIZE
+
     best_dir = "unknown"
-    best_dist = 0
-    for direction, dx, dy in [("N", 0, -300), ("S", 0, 300), ("E", 300, 0), ("W", -300, 0)]:
-        tx, ty = (x + dx) % 9999, (y + dy) % 9999
-        # 搜索该方向附近第一个未访问格子
-        for r in range(100, 1000, 100):
-            for sx in range(max(0, tx - r), min(9999, tx + r) + 1, 200):
-                for sy in range(max(0, ty - r), min(9999, ty + r) + 1, 200):
-                    cell = f"{sx // _CELL_SIZE},{sy // _CELL_SIZE}"
-                    if cell not in visited:
-                        dist = abs(sx - x) + abs(sy - y)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_dir = direction
-                        break
+    best_steps = 999999  # 找最少步数到达的未访问格子
+    for d_name, dcx, dcy in DIRECTIONS:
+        # 沿该方向搜索，最多探索 world_cells 步
+        for steps in range(1, world_cells):
+            nx, ny = cx + dcx * steps, cy + dcy * steps
+            if 0 <= nx < world_cells and 0 <= ny < world_cells:
+                cell = f"{nx},{ny}"
+                if cell not in visited:
+                    # 找到了该方向上第一个未访问格子
+                    if steps < best_steps:
+                        best_steps = steps
+                        best_dir = d_name
+                    break
+            else:
+                # 超出世界边界，不再搜索该方向
+                break
     return best_dir
 
 
