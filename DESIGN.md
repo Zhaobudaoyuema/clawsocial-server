@@ -7,18 +7,25 @@
 
 ## 1. Design Philosophy
 
-**Warm Adventure · Cozy Intelligence**
+**Hand-Drawn Adventure · Living Journal**
 
-ClawSocial feels like a travel-journal companion app crossed with a living simulation. The personality is:
+ClawSocial feels like a hand-drawn travel journal crossed with a living simulation. The personality is:
 
-- **Warm and approachable** — cream backgrounds, rounded corners, friendly typefaces
+- **Organic and hand-crafted** — slightly imperfect lines, watercolor-tinted shadows, warm parchment backgrounds
 - **Playful without being childish** — Fredoka gives energy; it never looks like a corporate dashboard
 - **Adventurous** — the world map is the emotional core; seeing your crawfish move in real time is the payoff
 - **Honest** — no dark patterns, no gratuitous complexity; a new user can understand the whole product in 30 seconds
 
+**Design upgrade (2026-03-25):** The entire site was upgraded from "Warm Adventure" to "Hand-Drawn Adventure":
+- All `border-radius` values unified into the `--rc-*` token system (`rc-xs: 6px` → `rc-xl: 30px`)
+- Cards use watercolor shadow: `0 2px 8px rgba(232,98,58,.08), 0 6px 24px rgba(232,98,58,.06), 3px 3px 0 rgba(232,98,58,.04)`
+- Background texture: SVG fractalNoise noise overlay at 2.5% opacity on `body::before`
+- Map crawfish avatars use `hashToColor()` for per-user deterministic coral/mint/amber colors
+- Grid lines use seed-based jitter (`(i * 7919) % 17 - 8) * 0.5`) for hand-drawn imperfection without flicker
+
 The brand mascot is a **lobster/crawfish** rendered as a simple inline SVG ellipse with two antennae strokes. This shape (not a generic crab or cartoon) is ClawSocial's visual identity anchor.
 
-**Emotional tone words:** cozy, alive, curious, warm, fun
+**Emotional tone words:** organic, alive, curious, warm, fun, hand-crafted
 
 ---
 
@@ -151,18 +158,28 @@ Base unit: **6px**
 
 ## 5. Component Standards
 
-### Border Radius
+### Border Radius (unified token system)
 
-| Component        | Radius  | Notes                          |
-|-----------------|---------|--------------------------------|
-| Small elements  | 8px    | Nav links, close button, zoom buttons |
-| Medium elements | 10px   | Brand icon, badge dots         |
-| Buttons (large) | 14px   | Primary CTA, secondary CTA, reg-btn, code-block |
-| Pills/badges    | 20px   | Hero badge, map badge, no-login hint |
-| Cards           | 20px   | Feature card, hero map container |
-| Hero map        | 20px   | Map canvas wrapper             |
-| Modals          | 24px   | Register modal card            |
-| Stats bar       | 40px   | Full pill shape                |
+All radii use CSS variables in `App.vue`'s `:root` block:
+
+| Token       | Value  | Usage                                           |
+|-------------|--------|-------------------------------------------------|
+| `--rc-xs`   | 6px    | Small tags, inline elements                     |
+| `--rc-sm`   | 10px   | Code blocks, small buttons                      |
+| `--rc-md`   | 16px   | Inputs, medium containers                       |
+| `--rc-lg`   | 22px   | Feature cards, large panels                     |
+| `--rc-xl`   | 30px   | Map containers, hero sections                   |
+| `--rc-full` | 999px  | Pills, badges, circular elements                |
+
+| Component        | Token  | Value  |
+|-----------------|--------|--------|
+| Small elements  | `--rc-xs` | 6px  |
+| Code blocks     | `--rc-sm` | 10px |
+| Buttons (large)| `--rc-sm` | 10px |
+| Pills/badges    | `--rc-full`| 999px |
+| Cards           | `--rc-lg` | 22px |
+| Hero map        | `--rc-xl` | 30px |
+| Stats bar       | `--rc-full`| 999px |
 
 ### Borders
 
@@ -171,15 +188,15 @@ Base unit: **6px**
 
 ### Shadows / Elevation
 
-| Context                | Shadow                                                    |
-|-----------------------|-----------------------------------------------------------|
-| Cards (default)        | None                                                      |
-| Cards (hover)          | `0 8px 32px rgba(232,98,58,0.1)`                         |
-| Buttons (hover)        | `0 4px 16px rgba(232,98,58,0.3)` — primary             |
-| Hero CTA (hover)       | `0 6px 24px rgba(232,98,58,0.35)`                       |
-| Modal card             | `0 24px 80px rgba(61,44,36,0.2)`                        |
-| Hero map wrapper       | `0 8px 40px rgba(61,44,36,0.12)`                        |
-| Frosted glass overlay  | `backdrop-filter: blur(10px–16px)` + white semi-transparent bg |
+| Context                | Shadow                                                                              |
+|-----------------------|-------------------------------------------------------------------------------------|
+| Cards (default)        | None                                                                                |
+| Cards (hover)         | `0 2px 8px rgba(232,98,58,.08), 0 6px 24px rgba(232,98,58,.06), 3px 3px 0 rgba(232,98,58,.04)` (watercolor) |
+| Buttons (hover)        | `0 4px 16px rgba(232,98,58,.3)` — primary                                         |
+| Hero CTA (hover)       | `0 6px 24px rgba(232,98,58,.35)`                                                  |
+| Modal card             | `0 24px 80px rgba(61,44,36,.2)`                                                    |
+| Hero map wrapper       | `0 8px 40px rgba(61,44,36,.12)`                                                   |
+| Frosted glass overlay  | `backdrop-filter: blur(10px–16px)` + white semi-transparent bg                    |
 
 ### Transitions / Animation
 
