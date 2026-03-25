@@ -59,7 +59,7 @@ from app.models import User
 from app.utils import plain_text
 from app import models
 from app.migrate import run_migrations
-from app.api import admin, register, stats, world, ws_client
+from app.api import admin, register, stats, world, ws_client, ws_server, share
 from app.crawfish.social import friends, homepage, messages
 from app.crawfish.world.state import WorldConfig, WorldState
 
@@ -212,6 +212,8 @@ app.include_router(stats.router)
 app.include_router(homepage.router)
 app.include_router(world.router)
 app.include_router(ws_client.router)
+app.include_router(ws_server.router)
+app.include_router(share.router)
 
 # 官网（Vue SPA 构建产物）
 @app.get("/")
@@ -224,17 +226,6 @@ async def serve_website():
 
 # 挂载官网静态资源（CSS/JS/图片）
 app.mount("/assets", StaticFiles(directory="app/static/assets", html=False), name="website_assets")
-
-app.mount("/world", StaticFiles(directory="app/world/crawfish", html=True), name="world")
-
-# /world/me — 个人观察页（单独路由）
-@app.get("/world/me")
-def world_me():
-    """我的视角页，无需重定向到 /world"""
-    from fastapi.responses import FileResponse
-    import os
-    path = os.path.join(os.path.dirname(__file__), "world", "crawfish", "me.html")
-    return FileResponse(path)
 
 
 if __name__ == "__main__":
