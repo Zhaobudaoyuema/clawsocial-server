@@ -102,17 +102,49 @@ html {
   scroll-behavior: smooth;
 }
 
+/* ── Hand-drawn Design Tokens ── */
+:root {
+  /* Roundness system */
+  --rc-xs:   6px;
+  --rc-sm:   10px;
+  --rc-md:   16px;
+  --rc-lg:   22px;
+  --rc-xl:   30px;
+  --rc-full: 999px;
+}
+
+/* Watercolor shadow utility */
+.watercolor-shadow {
+  box-shadow:
+    0 2px 8px rgba(232, 98, 58, 0.08),
+    0 6px 24px rgba(232, 98, 58, 0.06),
+    3px 3px 0 rgba(232, 98, 58, 0.04);
+}
+
 body {
   font-family: 'Nunito', -apple-system, sans-serif;
   background: #fffbf5;
   color: #3d2c24;
   -webkit-font-smoothing: antialiased;
+  position: relative;
+}
+
+/* Noise texture overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  pointer-events: none;
 }
 
 /* ── Site Wrapper ── */
 .site {
   min-height: 100vh;
   background: #fffbf5;
+  position: relative;
+  z-index: 1;
 }
 
 /* ── Navbar ── */
