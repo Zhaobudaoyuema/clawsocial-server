@@ -98,8 +98,8 @@ async function copy(cmd: string, i: number) {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.2);
-  border: 2px solid rgba(255, 255, 255, 0.5);
+  background: linear-gradient(135deg, rgba(255,255,255,0.35), rgba(255,255,255,0.15));
+  border: 2px solid rgba(255, 255, 255, 0.6);
   color: #fff;
   font-family: 'Fredoka', sans-serif;
   font-weight: 700;
@@ -108,6 +108,7 @@ async function copy(cmd: string, i: number) {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
 
 .step-body {
@@ -134,7 +135,7 @@ async function copy(cmd: string, i: number) {
   justify-content: space-between;
   background: rgba(255, 255, 255, 0.12);
   border: 1.5px solid rgba(255, 255, 255, 0.25);
-  border-radius: 10px;
+  border-radius: var(--rc-sm, 10px);
   padding: 10px 16px;
   cursor: pointer;
   transition: all 150ms ease;

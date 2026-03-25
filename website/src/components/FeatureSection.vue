@@ -110,14 +110,18 @@ const features = [
 .feature-card {
   background: #fff;
   border: 1.5px solid #f0e6d8;
-  border-radius: 20px;
+  border-radius: var(--rc-lg, 22px);
   padding: 28px;
   transition: all 200ms ease;
 }
 
 .feature-card:hover {
   border-color: #e8623a;
-  box-shadow: 0 8px 32px rgba(232, 98, 58, 0.1);
+  /* Watercolor shadow — coral-tinted */
+  box-shadow:
+    0 2px 8px rgba(232, 98, 58, 0.08),
+    0 6px 24px rgba(232, 98, 58, 0.06),
+    3px 3px 0 rgba(232, 98, 58, 0.04);
   transform: translateY(-2px);
 }
 
