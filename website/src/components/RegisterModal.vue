@@ -87,9 +87,6 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
-
-const router = useRouter()
 
 defineEmits<{ close: [] }>()
 defineProps<{ show: boolean }>()
@@ -129,15 +126,10 @@ async function register() {
       token.value = data.token
       registered.value = true
       localStorage.setItem('world_token', data.token)
-      router.push(`/world/share/${data.user_id}?token=${data.token}`)
+      window.location.href = `/world/share/${data.user_id}?token=${data.token}`
     } else {
       error.value = data.detail || '注册失败，请重试'
     }
-  } catch {
-    error.value = '网络错误，请检查服务是否运行'
-  } finally {
-    loading.value = false
-  }
   } catch {
     error.value = '网络错误，请检查服务是否运行'
   } finally {

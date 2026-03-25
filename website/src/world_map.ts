@@ -1,14 +1,12 @@
 /**
- * world_map.js — 龙虾世界地图渲染引擎
- * 复用自 /world/index.html 的 Canvas 逻辑
- * 被 HeroMap.vue 和 /world/index.html 共同引用
+ * world_map.ts — 龙虾世界地图渲染引擎
+ * Viewport-based rendering: offset + scale transform
+ * 被 HeroMap.vue 调用
  */
 
 const WORLD_SIZE = 10000
-const LOBSTER_RED = '#E8623A'
-const LOBSTER_RED_HOVER = '#D4542B'
 const GRID_COLOR = 'rgba(232, 98, 58, 0.06)'
-const PAD = 20
+const PAD = 24
 
 export interface WorldUser {
   user_id: number
@@ -30,6 +28,18 @@ export interface WorldBounds {
   minY: number
   maxY: number
 }
+
+// ── Viewport ──────────────────────────────────────────────────────────────
+
+export interface Viewport {
+  offsetX: number
+  offsetY: number
+  scale: number
+}
+
+let _viewport: Viewport = { offsetX: WORLD_SIZE / 2, offsetY: WORLD_SIZE / 2, scale: 1 }
+let _canvasW = 800
+let _canvasH = 600
 
 // Cached bounds: recalculated only when the user list changes (not every frame).
 let _boundsCache: WorldBounds = { minX: 0, maxX: WORLD_SIZE, minY: 0, maxY: WORLD_SIZE }
@@ -57,24 +67,89 @@ export interface MapConfig {
   onHideMessage?: () => void
 }
 
-// ── 坐标转换 ──────────────────────────────────────────────────────────────
+/**
+ * Initialize viewport centered on user bounds.
+ * Call once when user list first arrives.
+ */
+export function initViewport(users: WorldUser[], canvasW: number, canvasH: number): Viewport {
+  _canvasW = canvasW
+  _canvasH = canvasH
+  const bounds = getBounds(users)
+  _viewport = {
+    offsetX: (bounds.minX + bounds.maxX) / 2,
+    offsetY: (bounds.minY + bounds.maxY) / 2,
+    scale: 1,
+  }
+  return _viewport
+}
+
+export function getViewport(): Viewport {
+  return _viewport
+}
+
+export function setCanvasSize(w: number, h: number) {
+  _canvasW = w
+  _canvasH = h
+}
+
+export function applyViewportTransform(ctx: CanvasRenderingContext2D) {
+  ctx.save()
+  ctx.translate(_canvasW / 2, _canvasH / 2)
+  ctx.scale(_viewport.scale, _viewport.scale)
+  ctx.translate(-_viewport.offsetX, -_viewport.offsetY)
+}
+
+export function restoreViewportTransform(ctx: CanvasRenderingContext2D) {
+  ctx.restore()
+}
+
+/**
+ * Zoom centered on a world coordinate (pinch-to-zoom semantics).
+ */
+export function zoomViewport(delta: number, centerWorldX: number, centerWorldY: number): void {
+  const newScale = Math.min(5, Math.max(0.2, _viewport.scale * (1 + delta * 0.15)))
+  _viewport.offsetX = centerWorldX - (centerWorldX - _viewport.offsetX) * (newScale / _viewport.scale)
+  _viewport.offsetY = centerWorldY - (centerWorldY - _viewport.offsetY) * (newScale / _viewport.scale)
+  _viewport.scale = newScale
+}
+
+export function panViewport(dx: number, dy: number): void {
+  _viewport.offsetX -= dx / _viewport.scale
+  _viewport.offsetY -= dy / _viewport.scale
+}
+
+export function resetViewport(users: WorldUser[]): void {
+  const bounds = getBounds(users)
+  _viewport = {
+    offsetX: (bounds.minX + bounds.maxX) / 2,
+    offsetY: (bounds.minY + bounds.maxY) / 2,
+    scale: 1,
+  }
+}
+
+// ── 坐标转换（Viewport-based）───────────────────────────────────────────────
+
+/**
+ * Convert world coordinates to canvas pixel coordinates using current viewport.
+ */
 export function worldToCanvas(
   wx: number,
   wy: number,
-  bounds: WorldBounds
+  _bounds?: WorldBounds
 ): { x: number; y: number } {
-  const cw = (window as any)._mapCanvas?.width - PAD * 2 || 800
-  const ch = (window as any)._mapCanvas?.height - PAD * 2 || 600
-  const bw = (bounds.maxX - bounds.minX) || 1
-  const bh = (bounds.maxY - bounds.minY) || 1
-  const sx = cw / bw
-  const sy = ch / bh
-  const s = Math.min(sx, sy)
-  const ox = PAD + (cw - bw * s) / 2
-  const oy = PAD + (ch - bh * s) / 2
   return {
-    x: (wx - bounds.minX) * s + ox,
-    y: (wy - bounds.minY) * s + oy,
+    x: (wx - _viewport.offsetX) * _viewport.scale + _canvasW / 2,
+    y: (wy - _viewport.offsetY) * _viewport.scale + _canvasH / 2,
+  }
+}
+
+/**
+ * Convert canvas pixel coordinates back to world coordinates.
+ */
+export function canvasToWorld(sx: number, sy: number): { x: number; y: number } {
+  return {
+    x: (sx - _canvasW / 2) / _viewport.scale + _viewport.offsetX,
+    y: (sy - _canvasH / 2) / _viewport.scale + _viewport.offsetY,
   }
 }
 
@@ -101,55 +176,217 @@ export function getBounds(users: WorldUser[]): WorldBounds {
   }
 }
 
-// ── Canvas 渲染 ─────────────────────────────────────────────────────────────
+// ── Canvas 渲染（手绘风）────────────────────────────────────────────────────
+
+/**
+ * Draw grid with seed-based jitter — lines never flicker.
+ */
 export function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number) {
   ctx.strokeStyle = GRID_COLOR
   ctx.lineWidth = 0.5
   const step = 30
+  const jitter = (i: number) => ((i * 7919) % 17 - 8) * 0.5 // ±3.5px max
+
   for (let x = 0; x < w; x += step) {
+    const jx = jitter(Math.floor(x / step))
     ctx.beginPath()
-    ctx.moveTo(x, 0)
-    ctx.lineTo(x, h)
+    ctx.moveTo(x + jx, 0)
+    ctx.lineTo(x + jx, h)
     ctx.stroke()
   }
   for (let y = 0; y < h; y += step) {
+    const jy = jitter(Math.floor(y / step))
     ctx.beginPath()
-    ctx.moveTo(0, y)
-    ctx.lineTo(w, y)
+    ctx.moveTo(0, y + jy)
+    ctx.lineTo(w, y + jy)
     ctx.stroke()
   }
 }
 
+/**
+ * Draw coordinate axis ticks on canvas edges (hand-drawn jitter).
+ */
+export function drawAxisTicks(ctx: CanvasRenderingContext2D) {
+  const TICK = 6
+  const PAD_VAL = PAD
+  const TICK_STEP = 100
+
+  // X axis ticks (top and bottom)
+  const worldLeft = _viewport.offsetX - (_canvasW / 2 - PAD_VAL) / _viewport.scale
+  const worldRight = _viewport.offsetX + (_canvasW / 2 - PAD_VAL) / _viewport.scale
+  const firstTickX = Math.ceil(worldLeft / TICK_STEP) * TICK_STEP
+
+  for (let wx = firstTickX; wx <= worldRight; wx += TICK_STEP) {
+    const sx = (wx - _viewport.offsetX) * _viewport.scale + _canvasW / 2
+    if (sx < PAD_VAL || sx > _canvasW - PAD_VAL) continue
+
+    const jx = (((wx / TICK_STEP) * 7919) % 11 - 5) * 0.4
+
+    ctx.font = '500 10px Space Grotesk, monospace'
+    ctx.fillStyle = 'rgba(139, 123, 110, 0.7)'
+
+    // Bottom
+    ctx.beginPath()
+    ctx.strokeStyle = 'rgba(232, 98, 58, 0.25)'
+    ctx.lineWidth = 1
+    ctx.moveTo(sx + jx, _canvasH - PAD_VAL)
+    ctx.lineTo(sx + jx, _canvasH - PAD_VAL + TICK)
+    ctx.stroke()
+    ctx.save()
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'top'
+    ctx.fillText(String(Math.round(wx)), sx + jx, _canvasH - PAD_VAL + TICK + 2)
+    ctx.restore()
+
+    // Top
+    ctx.beginPath()
+    ctx.moveTo(sx + jx, PAD_VAL - TICK)
+    ctx.lineTo(sx + jx, PAD_VAL)
+    ctx.stroke()
+    ctx.save()
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    ctx.fillText(String(Math.round(wx)), sx + jx, PAD_VAL - TICK - 2)
+    ctx.restore()
+  }
+
+  // Y axis ticks (left and right)
+  const worldTop = _viewport.offsetY - (_canvasH / 2 - PAD_VAL) / _viewport.scale
+  const worldBottom = _viewport.offsetY + (_canvasH / 2 - PAD_VAL) / _viewport.scale
+  const firstTickY = Math.ceil(worldTop / TICK_STEP) * TICK_STEP
+
+  for (let wy = firstTickY; wy <= worldBottom; wy += TICK_STEP) {
+    const sy = (wy - _viewport.offsetY) * _viewport.scale + _canvasH / 2
+    if (sy < PAD_VAL || sy > _canvasH - PAD_VAL) continue
+
+    const jy = (((wy / TICK_STEP) * 7919) % 11 - 5) * 0.4
+
+    ctx.font = '500 10px Space Grotesk, monospace'
+    ctx.fillStyle = 'rgba(139, 123, 110, 0.7)'
+
+    // Left
+    ctx.beginPath()
+    ctx.strokeStyle = 'rgba(232, 98, 58, 0.25)'
+    ctx.lineWidth = 1
+    ctx.moveTo(PAD_VAL, sy + jy)
+    ctx.lineTo(PAD_VAL + TICK, sy + jy)
+    ctx.stroke()
+    ctx.save()
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(String(Math.round(wy)), PAD_VAL + TICK + 3, sy + jy)
+    ctx.restore()
+
+    // Right
+    ctx.beginPath()
+    ctx.moveTo(_canvasW - PAD_VAL - TICK, sy + jy)
+    ctx.lineTo(_canvasW - PAD_VAL, sy + jy)
+    ctx.stroke()
+    ctx.save()
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(String(Math.round(wy)), _canvasW - PAD_VAL - TICK - 3, sy + jy)
+    ctx.restore()
+  }
+}
+
+/**
+ * Deterministic color from username hash.
+ */
+export function hashToColor(name: string): string {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  const hue = Math.abs(hash) % 360
+  return `hsl(${hue}, 65%, 55%)`
+}
+
+/**
+ * Hand-drawn speech bubble for crawfish hover.
+ */
+function drawCrawfishBubble(
+  ctx: CanvasRenderingContext2D,
+  pt: { x: number; y: number },
+  name: string,
+  r: number
+) {
+  ctx.save()
+  ctx.translate(pt.x, pt.y - r - 16)
+
+  const text = name.length > 12 ? name.slice(0, 11) + '…' : name
+  ctx.font = '600 13px Fredoka, sans-serif'
+  const tw = ctx.measureText(text).width
+  const bw = tw + 20
+  const bh = 28
+  const br = 8
+
+  // Bubble body
+  ctx.beginPath()
+  ctx.moveTo(-bw / 2 + br, -bh / 2)
+  ctx.lineTo(bw / 2 - br, -bh / 2)
+  ctx.quadraticCurveTo(bw / 2, -bh / 2, bw / 2, -bh / 2 + br)
+  ctx.lineTo(bw / 2, bh / 2 - br)
+  ctx.quadraticCurveTo(bw / 2, bh / 2, bw / 2 - br, bh / 2)
+  ctx.lineTo(-bw / 2 + br, bh / 2)
+  ctx.quadraticCurveTo(-bw / 2, bh / 2, -bw / 2, bh / 2 - br)
+  ctx.lineTo(-bw / 2, -bh / 2 + br)
+  ctx.quadraticCurveTo(-bw / 2, -bh / 2, -bw / 2 + br, -bh / 2)
+  ctx.closePath()
+  ctx.fillStyle = 'rgba(255, 245, 230, 0.96)'
+  ctx.fill()
+  ctx.strokeStyle = 'rgba(232, 98, 58, 0.35)'
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+
+  ctx.fillStyle = '#3d2c24'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(text, 0, 0)
+
+  ctx.restore()
+}
+
+/**
+ * Draw a single crawfish avatar (with viewport-aware scaling).
+ */
 export function drawCrawfishDot(
   ctx: CanvasRenderingContext2D,
   pt: { x: number; y: number },
   name: string,
   isHovered: boolean
 ) {
-  const r = isHovered ? 9 : 6
+  const BASE_R = 10
+  const r = Math.max(3, BASE_R / _viewport.scale)
 
-  ctx.shadowColor = LOBSTER_RED
-  ctx.shadowBlur = isHovered ? 12 : 5
+  if (_viewport.scale < 0.5) {
+    // Far zoom: simple dot
+    ctx.beginPath()
+    ctx.arc(pt.x, pt.y, Math.max(3, 4 / _viewport.scale), 0, Math.PI * 2)
+    ctx.fillStyle = hashToColor(name)
+    ctx.fill()
+    return
+  }
 
+  // Avatar circle
   ctx.beginPath()
   ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2)
-  ctx.fillStyle = isHovered ? LOBSTER_RED_HOVER : LOBSTER_RED
+  ctx.fillStyle = hashToColor(name)
   ctx.fill()
-
-  ctx.shadowBlur = 0
   ctx.strokeStyle = '#fff'
-  ctx.lineWidth = 1.5
+  ctx.lineWidth = Math.max(1, 1.5 / _viewport.scale)
   ctx.stroke()
 
-  // 名字气泡（仅悬停）
+  // First letter
+  const letterSize = Math.max(6, r * 0.7)
+  ctx.font = `700 ${letterSize}px Fredoka, sans-serif`
+  ctx.fillStyle = '#fff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(name.charAt(0).toUpperCase(), pt.x, pt.y)
+
   if (isHovered) {
-    ctx.font = '600 12px Fredoka, sans-serif'
-    ctx.textAlign = 'center'
-    const textW = ctx.measureText(name).width
-    ctx.fillStyle = 'rgba(61,44,36,0.85)'
-    ctx.fillRect(pt.x - textW / 2 - 5, pt.y - r - 20, textW + 10, 18)
-    ctx.fillStyle = LOBSTER_RED
-    ctx.fillText(name, pt.x, pt.y - r - 7)
+    drawCrawfishBubble(ctx, pt, name, r)
   }
 }
 
@@ -158,19 +395,17 @@ export function drawCrawfishLayer(
   users: WorldUser[],
   hoveredUserId: number | null,
   _w: number,
-  _h: number,
-  worldToCanvasFn: (wx: number, wy: number, b: WorldBounds) => { x: number; y: number },
-  bounds: WorldBounds
+  _h: number
 ) {
   if (!users.length) return
 
   for (const u of users) {
-    const pt = worldToCanvasFn(u.x, u.y, bounds)
+    const pt = worldToCanvas(u.x, u.y)
     const isHovered = u.user_id === hoveredUserId
     drawCrawfishDot(ctx, pt, u.name, isHovered)
   }
 
-  // 在线数字
+  // Online count
   ctx.font = '500 13px Space Grotesk, monospace'
   ctx.textAlign = 'left'
   ctx.fillStyle = 'rgba(139,123,110,0.7)'
@@ -181,19 +416,17 @@ export function drawHeatmapLayer(
   ctx: CanvasRenderingContext2D,
   cells: HeatmapCell[],
   _w: number,
-  _h: number,
-  worldToCanvasFn: (wx: number, wy: number, b: WorldBounds) => { x: number; y: number }
+  _h: number
 ) {
   if (!cells.length) return
-  const bounds = getBounds([])
   const maxCount = Math.max(...cells.map((c) => c.count), 1)
   const CELL = 30
 
   for (const c of cells) {
     const wx = c.cell_x * CELL
     const wy = c.cell_y * CELL
-    const pt = worldToCanvasFn(wx, wy, bounds)
-    const pt2 = worldToCanvasFn(wx + CELL, wy + CELL, bounds)
+    const pt = worldToCanvas(wx, wy)
+    const pt2 = worldToCanvas(wx + CELL, wy + CELL)
     const cw = Math.abs(pt2.x - pt.x)
     const ch = Math.abs(pt2.y - pt.y)
     const ratio = c.count / maxCount
@@ -207,7 +440,8 @@ export function drawHeatmapLayer(
   }
 }
 
-// ── 主渲染循环 ─────────────────────────────────────────────────────────────
+// ── 主渲染循环（Viewport-aware）────────────────────────────────────────────
+
 export function renderMap(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -215,18 +449,24 @@ export function renderMap(
   layer: 'crawfish' | 'heatmap' | 'both',
   users: WorldUser[],
   heatmap: HeatmapCell[],
-  hoveredUserId: number | null,
-  bounds: WorldBounds
+  hoveredUserId: number | null
 ) {
   ctx.clearRect(0, 0, w, h)
-  drawGrid(ctx, w, h)
+
+  // Apply viewport transform for world-space rendering
+  applyViewportTransform(ctx)
 
   if (layer === 'heatmap' || layer === 'both') {
-    drawHeatmapLayer(ctx, heatmap, w, h, worldToCanvas)
+    drawHeatmapLayer(ctx, heatmap, w, h)
   }
   if (layer === 'crawfish' || layer === 'both') {
-    drawCrawfishLayer(ctx, users, hoveredUserId, w, h, worldToCanvas, bounds)
+    drawCrawfishLayer(ctx, users, hoveredUserId, w, h)
   }
+
+  restoreViewportTransform(ctx)
+
+  // Axis ticks are in canvas-space (drawn after viewport restore)
+  drawAxisTicks(ctx)
 }
 
 // ── WebSocket 连接 ─────────────────────────────────────────────────────────

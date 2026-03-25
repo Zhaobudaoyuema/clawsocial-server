@@ -6,6 +6,13 @@
         ref="canvasRef"
         class="map-canvas"
         aria-label="龙虾社交地图 — 实时显示所有在线龙虾位置"
+        @wheel.prevent="onWheel"
+        @pointerdown="onPointerDown"
+        @pointermove="onPointerMove"
+        @pointerup="onPointerUp"
+        @pointerleave="onPointerUp"
+        @mousemove="onMouseMove"
+        @mouseleave="onMouseLeave"
       ></canvas>
 
       <!-- 加载中 / 空状态 -->
@@ -13,10 +20,11 @@
         <div v-if="loadingMsg" class="map-msg">{{ loadingMsg }}</div>
       </transition>
 
-      <!-- 右下角缩放 -->
+      <!-- 右下角缩放控制 -->
       <div class="map-controls">
         <button class="ctrl-btn" @click="zoomIn" title="放大">+</button>
         <button class="ctrl-btn" @click="zoomOut" title="缩小">−</button>
+        <button class="ctrl-btn" @click="resetView" title="重置视图">⌂</button>
       </div>
 
       <!-- 在线数 -->
@@ -30,6 +38,11 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         无需登录，打开即看
       </div>
+
+      <!-- 缩放比例显示 -->
+      <div v-if="scale > 0" class="scale-display">
+        {{ Math.round(scale * 100) }}%
+      </div>
     </div>
   </div>
 </template>
@@ -41,15 +54,21 @@ import {
   connectObserverWs,
   disconnectWs,
   loadInitData,
-  worldToCanvas,
+  initViewport,
+  setCanvasSize,
+  zoomViewport,
+  panViewport,
+  resetViewport,
+  getViewport,
+  canvasToWorld,
   updateBoundsCache,
-  getCachedBounds,
 } from '../world_map'
 import type { WorldUser, HeatmapCell, WsState } from '../world_map'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const loadingMsg = ref('正在加载世界...')
 const layer = ref<'crawfish' | 'heatmap' | 'both'>('crawfish')
+const scale = ref(1)
 
 const users = ref<WorldUser[]>([])
 const heatmap = ref<HeatmapCell[]>([])
@@ -57,8 +76,12 @@ const hoveredUserId = ref<number | null>(null)
 
 // 用于鼠标悬停检测的 refs
 let ctx: CanvasRenderingContext2D | null = null
-let rafId: number | null = null
 let wsState: WsState = { ws: null, reconnectTimer: null }
+
+// 拖拽状态
+let isPanning = false
+let lastPointerX = 0
+let lastPointerY = 0
 
 const baseUrl = window.location.host
 
@@ -68,42 +91,87 @@ function resize() {
   const wrap = canvas.parentElement!
   canvas.width = wrap.clientWidth
   canvas.height = wrap.clientHeight
+  setCanvasSize(canvas.width, canvas.height)
   drawFrame()
 }
 
 function drawFrame() {
   const canvas = canvasRef.value
   if (!canvas || !ctx) return
-  renderMap(ctx, canvas.width, canvas.height, layer.value, users.value, heatmap.value, hoveredUserId.value, getCachedBounds())
+  renderMap(ctx, canvas.width, canvas.height, layer.value, users.value, heatmap.value, hoveredUserId.value)
+  scale.value = getViewport().scale
 }
 
-// 缩放控制（简单版本：每次切换 layer）
+// ── 缩放 ──────────────────────────────────────────────────────────────────
+
 function zoomIn() {
-  if (layer.value === 'crawfish') layer.value = 'both'
-  else layer.value = 'crawfish'
-  drawFrame()
-}
-function zoomOut() {
-  if (layer.value === 'crawfish') layer.value = 'heatmap'
-  else layer.value = 'crawfish'
+  const vp = getViewport()
+  zoomViewport(1, vp.offsetX, vp.offsetY)
   drawFrame()
 }
 
-// 鼠标悬停检测
+function zoomOut() {
+  const vp = getViewport()
+  zoomViewport(-1, vp.offsetX, vp.offsetY)
+  drawFrame()
+}
+
+function resetView() {
+  resetViewport(users.value)
+  drawFrame()
+}
+
+// ── 滚轮缩放 ──────────────────────────────────────────────────────────────
+
+function onWheel(e: WheelEvent) {
+  const canvas = canvasRef.value!
+  const rect = canvas.getBoundingClientRect()
+  const sx = e.clientX - rect.left
+  const sy = e.clientY - rect.top
+  const { x: wx, y: wy } = canvasToWorld(sx, sy)
+  zoomViewport(-e.deltaY * 0.001, wx, wy)
+  drawFrame()
+}
+
+// ── 拖拽平移 ─────────────────────────────────────────────────────────────
+
+function onPointerDown(e: PointerEvent) {
+  if (e.button !== 0) return
+  isPanning = true
+  lastPointerX = e.clientX
+  lastPointerY = e.clientY
+  canvasRef.value?.setPointerCapture(e.pointerId)
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!isPanning) return
+  panViewport(e.clientX - lastPointerX, e.clientY - lastPointerY)
+  lastPointerX = e.clientX
+  lastPointerY = e.clientY
+  drawFrame()
+}
+
+function onPointerUp() {
+  isPanning = false
+}
+
+// ── 鼠标悬停检测 ─────────────────────────────────────────────────────────
+
 function onMouseMove(e: MouseEvent) {
   const canvas = canvasRef.value
   if (!canvas) return
   const rect = canvas.getBoundingClientRect()
-  const mx = e.clientX - rect.left
-  const my = e.clientY - rect.top
-  // Use cached bounds — avoids O(n) getBounds() on every mousemove frame
-  const bounds = getCachedBounds()
+  const sx = e.clientX - rect.left
+  const sy = e.clientY - rect.top
+
+  // 用 Viewport 坐标转换
+  const { x: wx, y: wy } = canvasToWorld(sx, sy)
 
   let found: number | null = null
+  const hitRadius = 12 / getViewport().scale
   for (const u of users.value) {
-    const pt = worldToCanvas(u.x, u.y, bounds)
-    const dist = Math.hypot(mx - pt.x, my - pt.y)
-    if (dist < 12) {
+    const dist = Math.hypot(wx - u.x, wy - u.y)
+    if (dist < hitRadius) {
       found = u.user_id
       break
     }
@@ -124,13 +192,7 @@ onMounted(async () => {
   const canvas = canvasRef.value!
   ctx = canvas.getContext('2d')!
 
-  // 挂到 window 上，方便 world_map 访问尺寸
-  ;(window as any)._mapCanvas = canvas
-
   window.addEventListener('resize', resize)
-  canvas.addEventListener('mousemove', onMouseMove)
-  canvas.addEventListener('mouseleave', onMouseLeave)
-
   resize()
 
   // REST 初始化
@@ -138,6 +200,12 @@ onMounted(async () => {
     const data = await loadInitData(baseUrl)
     users.value = data.users
     updateBoundsCache(data.users)
+
+    // 初始化 Viewport（居中于用户范围）
+    if (canvas) {
+      initViewport(data.users, canvas.width, canvas.height)
+    }
+
     if (!data.users.length) {
       loadingMsg.value = '此刻没有龙虾在线，快去邀请你的龙虾入驻吧 🦞'
     } else {
@@ -170,7 +238,6 @@ onMounted(async () => {
         if (msg.users.length > 0 && loadingMsg.value) {
           loadingMsg.value = ''
         }
-        // Recalculate bounds cache only when user list has changed
         updateBoundsCache(users.value)
         drawFrame()
       }
@@ -181,7 +248,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   disconnectWs(wsState)
-  if (rafId) cancelAnimationFrame(rafId)
   window.removeEventListener('resize', resize)
   const canvas = canvasRef.value
   if (canvas) {
@@ -212,6 +278,11 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   display: block;
+  cursor: grab;
+}
+
+.map-canvas:active {
+  cursor: grabbing;
 }
 
 .map-msg {
@@ -244,7 +315,7 @@ onUnmounted(() => {
   backdrop-filter: blur(10px);
   border: 1.5px solid #f0e6d8;
   color: #3d2c24;
-  font-size: 1.2rem;
+  font-size: 1.1rem;
   font-weight: 600;
   cursor: pointer;
   display: flex;
@@ -305,6 +376,21 @@ onUnmounted(() => {
   font-size: 0.73rem;
   color: #8b7b6e;
   font-weight: 600;
+}
+
+.scale-display {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(10px);
+  border: 1.5px solid #f0e6d8;
+  border-radius: 20px;
+  font-size: 0.73rem;
+  color: #8b7b6e;
+  font-weight: 600;
+  font-family: 'Space Grotesk', monospace;
 }
 
 .fade-enter-active,
