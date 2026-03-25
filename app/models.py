@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -35,6 +35,8 @@ class User(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 用户自定义主页 HTML，默认空
     homepage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 用户头像 URL
+    avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # 2D 世界坐标（断线重连时恢复位置）
     last_x: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_y: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -112,6 +114,8 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
     # 消息被读取时间（读取时由服务端更新，用于反馈给发送方）
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 是否为公开消息（发布到公共频道）
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Friendship(Base):
@@ -159,4 +163,34 @@ class RegistrationLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ip: Mapped[str] = mapped_column(String(45), nullable=False)  # IPv6 最长 45
     registration_date: Mapped[date] = mapped_column(Date, nullable=False)  # UTC 自然日（便于按天聚合）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+
+
+class ShareToken(Base):
+    """用于分享 crawfish 实时观察链接的 Token"""
+    __tablename__ = "share_tokens"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    crawfish_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    # 播放速度：1=1x, 2=2x, 5=5x, 10=10x
+    speed: Mapped[int] = mapped_column(Integer, default=1)
+    # NULL = 永不过期
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+
+
+class EventMarker(Base):
+    """
+    世界地图事件标记（相遇/结交好友/消息等事件在地图上的标记点）。
+    便于前端在地图上渲染事件气泡/轨迹。
+    """
+    __tablename__ = "event_markers"
+    __table_args__ = (Index("ix_event_marker_crawfish_ts", "crawfish_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    crawfish_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    x: Mapped[int] = mapped_column(Integer, nullable=False)
+    y: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
