@@ -70,7 +70,19 @@
       </div>
 
       <!-- Canvas: flex-grow fills remaining space -->
-      <canvas ref="canvasRef" class="world-canvas" />
+      <canvas
+        ref="canvasRef"
+        class="world-canvas"
+        @wheel.prevent="onWheel"
+        @pointerdown="onPointerDown"
+        @pointermove="onPointerMove"
+        @pointerup="onPointerUp"
+        @mousemove="onMouseMove"
+        @mouseleave="onMouseLeave"
+      />
+
+      <!-- Scale display -->
+      <div class="scale-display">{{ Math.round(scaleDisplay * 100) }}%</div>
 
       <!-- Empty overlay -->
       <div v-if="worldStore.loading" class="map-overlay">
@@ -128,6 +140,12 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useWorldStore } from '../stores/world'
 import { useCrawlerStore } from '../stores/crawler'
 import { useWorldWs } from '../composables/useWorldWs'
+import {
+  initViewport, setCanvasSize, zoomViewport, panViewport, resetViewport,
+  getViewport, canvasToWorld,
+  applyViewportTransform, restoreViewportTransform,
+  drawGrid, drawAxisTicks, drawOnlineUsers, drawTrail, drawHeatmap,
+} from '../render/worldViewport'
 
 const worldStore = useWorldStore()
 const crawlerStore = useCrawlerStore()
@@ -164,11 +182,17 @@ const EVENT_ICONS: Record<string, string> = {
   user_spawned: '🟢', user_left: '⚫', user_moved: '🐾',
 }
 
-// ── Canvas draw ──────────────────────────────────────────────────
+// ── Canvas + Viewport ───────────────────────────────────────────
 const WORLD_SIZE = 10000
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const view = ref<'trail' | 'heatmap'>('trail')
 const win = ref('7d')
+const hoveredUserId = ref<number | null>(null)
+const scaleDisplay = ref(1)
+
+// Drag state
+let isPanning = false
+let lastX = 0, lastY = 0
 
 function draw() {
   const canvas = canvasRef.value
@@ -182,84 +206,88 @@ function draw() {
   canvas.width = w * dpr
   canvas.height = h * dpr
   ctx.scale(dpr, dpr)
+  setCanvasSize(w, h)
 
   // Background
-  ctx.fillStyle = '#FDF5EC'
+  ctx.fillStyle = '#FFF8F0'
   ctx.fillRect(0, 0, w, h)
 
-  // Grid
-  const cells = Math.ceil(WORLD_SIZE / 100)
-  ctx.strokeStyle = 'rgba(232,98,58,0.06)'
-  ctx.lineWidth = 0.5
-  for (let i = 0; i <= cells; i++) {
-    const px = (i / cells) * w
-    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke()
-    const py = (i / cells) * h
-    ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(w, py); ctx.stroke()
-  }
+  // Grid (world-space)
+  applyViewportTransform(ctx)
+  drawGrid(ctx)
+  restoreViewportTransform(ctx)
 
-  // Trail
+  // Trail (world-space)
   if (view.value === 'trail') {
-    const pts = worldStore.trailPoints
-    if (pts.length > 1) {
-      ctx.beginPath()
-      ctx.moveTo((pts[0]!.x / WORLD_SIZE) * w, (pts[0]!.y / WORLD_SIZE) * h)
-      for (let i = 1; i < pts.length; i++) {
-        ctx.lineTo((pts[i]!.x / WORLD_SIZE) * w, (pts[i]!.y / WORLD_SIZE) * h)
-      }
-      ctx.strokeStyle = 'rgba(232,98,58,0.25)'
-      ctx.lineWidth = 1.5
-      ctx.stroke()
-    }
-    for (const pt of pts) {
-      ctx.beginPath()
-      ctx.arc((pt.x / WORLD_SIZE) * w, (pt.y / WORLD_SIZE) * h, 2, 0, Math.PI * 2)
-      ctx.fillStyle = '#E8623A'
-      ctx.fill()
-    }
+    applyViewportTransform(ctx)
+    drawTrail(ctx, worldStore.trailPoints)
+    restoreViewportTransform(ctx)
   }
 
-  // Heatmap
+  // Heatmap (world-space)
   if (view.value === 'heatmap') {
-    const density = new Map<string, number>()
-    for (const pt of worldStore.trailPoints) {
-      const cx = Math.floor(pt.x / 100)
-      const cy = Math.floor(pt.y / 100)
-      const key = `${cx},${cy}`
-      density.set(key, (density.get(key) ?? 0) + 1)
-    }
-    const maxD = Math.max(...density.values(), 1)
-    for (const [key, count] of density) {
-      const [cxStr, cyStr] = key.split(',')
-      const cx = Number(cxStr), cy = Number(cyStr)
-      const px = (cx * 100 / WORLD_SIZE) * w
-      const py = (cy * 100 / WORLD_SIZE) * h
-      const alpha = 0.3 + 0.7 * (count / maxD)
-      ctx.fillStyle = `rgba(232,98,58,${alpha})`
-      ctx.fillRect(px, py, (100 / WORLD_SIZE) * w, (100 / WORLD_SIZE) * h)
-    }
+    applyViewportTransform(ctx)
+    drawHeatmap(ctx, worldStore.trailPoints)
+    restoreViewportTransform(ctx)
   }
 
-  // Online users
-  for (const u of worldStore.onlineUsers) {
-    const px = (u.x / WORLD_SIZE) * w
-    const py = (u.y / WORLD_SIZE) * h
-    const grad = ctx.createRadialGradient(px, py, 0, px, py, 8)
-    grad.addColorStop(0, 'rgba(232,98,58,0.4)')
-    grad.addColorStop(1, 'rgba(232,98,58,0)')
-    ctx.beginPath()
-    ctx.arc(px, py, 8, 0, Math.PI * 2)
-    ctx.fillStyle = grad
-    ctx.fill()
-    ctx.beginPath()
-    ctx.arc(px, py, 4, 0, Math.PI * 2)
-    ctx.fillStyle = '#E8623A'
-    ctx.fill()
-    ctx.fillStyle = '#3D2C24'
-    ctx.font = '600 10px Nunito, sans-serif'
-    ctx.fillText(u.name || `用户#${u.user_id}`, px + 6, py + 4)
-  }
+  // Online users (world-space)
+  applyViewportTransform(ctx)
+  drawOnlineUsers(ctx, worldStore.onlineUsers, hoveredUserId.value)
+  restoreViewportTransform(ctx)
+
+  // Axis ticks (screen-space)
+  drawAxisTicks(ctx)
+
+  scaleDisplay.value = getViewport().scale
 }
+
+// ── Zoom/Pan events ────────────────────────────────────────────
+function onWheel(e: WheelEvent) {
+  e.preventDefault()
+  const canvas = canvasRef.value!
+  const rect = canvas.getBoundingClientRect()
+  const sx = e.clientX - rect.left
+  const sy = e.clientY - rect.top
+  const { x: wx, y: wy } = canvasToWorld(sx, sy)
+  zoomViewport(-e.deltaY * 0.001, wx, wy)
+  draw()
+}
+
+function onPointerDown(e: PointerEvent) {
+  if (e.button !== 0) return
+  isPanning = true
+  lastX = e.clientX; lastY = e.clientY
+  canvasRef.value?.setPointerCapture(e.pointerId)
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!isPanning) return
+  panViewport(e.clientX - lastX, e.clientY - lastY)
+  lastX = e.clientX; lastY = e.clientY
+  draw()
+}
+
+function onPointerUp() { isPanning = false }
+
+function onMouseMove(e: MouseEvent) {
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const rect = canvas.getBoundingClientRect()
+  const sx = e.clientX - rect.left
+  const sy = e.clientY - rect.top
+  const { x: wx, y: wy } = canvasToWorld(sx, sy)
+  let found: number | null = null
+  const hitR = 12 / getViewport().scale
+  for (const u of worldStore.onlineUsers) {
+    if (Math.hypot(wx - u.x, wy - u.y) < hitR) {
+      found = u.user_id; break
+    }
+  }
+  if (found !== hoveredUserId.value) { hoveredUserId.value = found; draw() }
+}
+
+function onMouseLeave() { hoveredUserId.value = null; draw() }
 
 // ── Computed ───────────────────────────────────────────────────
 const views = [
@@ -282,19 +310,28 @@ const recentEvents = computed<EventEntry[]>(() => {
 
 // ── Lifecycle ───────────────────────────────────────────────────
 let animFrame: number | null = null
-function loop() {
-  draw()
-  animFrame = requestAnimationFrame(loop)
-}
+function loop() { draw(); animFrame = requestAnimationFrame(loop) }
 
 onMounted(() => {
   connect()
   fetchGlobalStats()
+  // Init viewport
+  const canvas = canvasRef.value
+  if (canvas) initViewport(canvas.clientWidth, canvas.clientHeight)
   loop()
 })
 
 onUnmounted(() => {
   if (animFrame !== null) cancelAnimationFrame(animFrame)
+  const canvas = canvasRef.value
+  if (canvas) {
+    canvas.removeEventListener('wheel', onWheel)
+    canvas.removeEventListener('pointerdown', onPointerDown)
+    canvas.removeEventListener('pointermove', onPointerMove)
+    canvas.removeEventListener('pointerup', onPointerUp)
+    canvas.removeEventListener('mousemove', onMouseMove)
+    canvas.removeEventListener('mouseleave', onMouseLeave)
+  }
 })
 
 watch(() => worldStore.onlineUsers.length, draw)
@@ -374,7 +411,23 @@ watch(view, draw)
 .login-name { font-size: 0.8rem; font-weight: 600; color: rgba(255,255,255,0.95); max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Canvas */
-.world-canvas { flex: 1; width: 100%; cursor: crosshair; display: block; }
+.world-canvas { flex: 1; width: 100%; cursor: grab; display: block; }
+.world-canvas:active { cursor: grabbing; }
+
+/* Scale display */
+.scale-display {
+  position: absolute;
+  bottom: 12px;
+  right: 240px;
+  padding: 3px 10px;
+  background: rgba(255,255,255,0.88);
+  border: 1.5px solid var(--color-border);
+  border-radius: 99px;
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
 
 /* Overlay */
 .map-overlay {

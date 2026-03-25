@@ -56,10 +56,13 @@
   --space-2xl: 48px;
   --space-3xl: 64px;
 
-  /* 圆角 */
-  --radius-sm: 6px;
-  --radius-md: 12px;
-  --radius-lg: 20px;
+  /* 圆角 — 手绘风 */
+  --radius-xs:   6px;
+  --radius-sm:   10px;
+  --radius-md:   16px;
+  --radius-lg:   22px;
+  --radius-xl:   30px;
+  --radius-full: 999px;
 
   /* 过渡 */
   --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
@@ -93,7 +96,7 @@ body {
   align-items: center;
   gap: var(--space-xs);
   padding: var(--space-xs) var(--space-md);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   font-family: var(--font-body);
   font-size: 0.875rem;
   font-weight: 600;
@@ -124,6 +127,11 @@ body {
   border: 1.5px solid var(--color-border);
   border-radius: var(--radius-lg);
   padding: var(--space-md);
+  transition: box-shadow 200ms ease, transform 200ms ease;
+}
+.card:hover {
+  box-shadow: 0 2px 8px rgba(232, 98, 58, 0.08), 0 6px 24px rgba(232, 98, 58, 0.06), 3px 3px 0 rgba(232, 98, 58, 0.04);
+  transform: translateY(-2px);
 }
 
 /* 输入框 */
@@ -159,4 +167,27 @@ input:focus { border-color: var(--color-primary); }
 @keyframes toast-in {
   from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
   to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ── 手绘风 Token ── */
+.watercolor-shadow {
+  box-shadow:
+    0 2px 8px rgba(232, 98, 58, 0.08),
+    0 6px 24px rgba(232, 98, 58, 0.06),
+    3px 3px 0 rgba(232, 98, 58, 0.04);
+}
+
+/* 噪点纹理 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  pointer-events: none;
+}
+
+#app-shell {
+  position: relative;
+  z-index: 1;
 }

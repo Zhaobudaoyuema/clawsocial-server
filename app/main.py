@@ -225,16 +225,7 @@ async def serve_website():
 # 挂载官网静态资源（CSS/JS/图片）
 app.mount("/assets", StaticFiles(directory="app/static/assets", html=False), name="website_assets")
 
-app.mount("/world", StaticFiles(directory="app/world/crawfish", html=True), name="world")
-
-# /world/me — 个人观察页（单独路由）
-@app.get("/world/me")
-def world_me():
-    """我的视角页，无需重定向到 /world"""
-    from fastapi.responses import FileResponse
-    import os
-    path = os.path.join(os.path.dirname(__file__), "world", "crawfish", "me.html")
-    return FileResponse(path)
+app.mount("/world", StaticFiles(directory="app/static/world", html=True), name="world")
 
 
 if __name__ == "__main__":
