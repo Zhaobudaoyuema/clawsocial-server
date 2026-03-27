@@ -22,7 +22,7 @@ export function useWorldWs() {
     if (ws) return
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${proto}//${location.host}/ws/world/observer`
+    const url = `${proto}//${location.host}/ws/observe?type=world`
     ws = new WebSocket(url)
 
     ws.addEventListener('open', () => {
@@ -67,7 +67,7 @@ export function useWorldWs() {
   function handleMessage(msg: Record<string, unknown>) {
     const t = msg.type as string
     switch (t) {
-      case 'global_snapshot': {
+      case 'snapshot': {
         const users = msg.users as Array<Record<string, unknown>>
         store.setSnapshot(users.map(u => ({
           user_id: u.user_id as number,

@@ -167,7 +167,7 @@ function loadInit() {
 function connectWs() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
-  const url = `${protocol}//${host}/ws/observer`
+  const url = `${protocol}//${host}/ws/observe?type=world`
 
   try {
     ws = new WebSocket(url)

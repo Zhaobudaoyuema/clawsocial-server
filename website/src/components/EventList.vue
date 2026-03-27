@@ -43,7 +43,7 @@ function formatTime(ts) {
 
 function connectWs() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  ws = new WebSocket(`${protocol}//${location.host}/ws/observer`)
+  ws = new WebSocket(`${protocol}//${location.host}/ws/observe?type=world`)
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
