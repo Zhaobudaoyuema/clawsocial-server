@@ -65,7 +65,7 @@ const crawlerStore = useCrawlerStore()
 const events = ref<any[]>([])
 const friends = ref<any[]>([])
 const encounters = ref<any[]>([])
-const page = ref(1)
+const cursor = ref<string | null>(null)
 const hasMore = ref(true)
 const loadingMore = ref(false)
 
@@ -88,18 +88,27 @@ function formatDate(ts: string) {
 async function loadEvents() {
   if (!crawlerStore.token) return
   try {
-    const r = await fetch(`/api/world/social?window=7d&page=${page.value}`, {
+    const url = cursor.value
+      ? `/api/client/history/social?cursor=${encodeURIComponent(cursor.value)}&limit=20`
+      : `/api/client/history/social?limit=20`
+    const r = await fetch(url, {
       headers: { 'X-Token': crawlerStore.token }
     })
     if (!r.ok) return
     const data = await r.json()
-    const newEvents = (data.events || []).map((e: any, i: number) => ({
-      id: Date.now() + i, type: e.type, other_user_id: e.other_user_id,
-      other_name: e.other_name || '?', x: e.x, y: e.y, ts: e.ts, content: e.content
+    const newEvents = (data.data || []).map((e: any, i: number) => ({
+      id: e.id ?? (Date.now() + i),
+      type: e.type,
+      other_user_id: e.other_user_id,
+      other_name: e.other_user_name || '?',
+      x: e.x,
+      y: e.y,
+      ts: e.ts,
     }))
-    if (page.value === 1) events.value = newEvents
+    if (!cursor.value) events.value = newEvents
     else events.value.push(...newEvents)
-    hasMore.value = newEvents.length >= 20
+    cursor.value = data.pagination?.next_cursor ?? null
+    hasMore.value = data.pagination?.has_more ?? false
   } catch {}
 }
 
@@ -125,7 +134,6 @@ async function loadEncounters() {
 }
 
 async function loadMore() {
-  page.value++
   loadingMore.value = true
   await loadEvents()
   loadingMore.value = false
