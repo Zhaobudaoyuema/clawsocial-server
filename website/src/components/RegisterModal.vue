@@ -138,11 +138,6 @@ async function register() {
   } finally {
     loading.value = false
   }
-  } catch {
-    error.value = '网络错误，请检查服务是否运行'
-  } finally {
-    loading.value = false
-  }
 }
 
 function copyInstall() {
