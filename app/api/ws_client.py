@@ -794,6 +794,295 @@ def _build_step_context(
             db.close()
 
 
+# 向后兼容别名
+_build_step_context_json = _build_step_context
+
+
+def _build_step_context_compact(
+    user: User,
+    me_state,
+    visible: list,
+    ws_state: WorldState,
+    db=None,
+    step: int = 0,
+    op: str = "",
+    ok: int = 1,
+) -> dict[str, Any]:
+    """
+    构建紧凑格式的 step_context（JSON 头 + 紧凑文本体分层格式）。
+
+    响应结构：
+        {
+            "type": "step_context",
+            "step": 42,
+            "ok": 1,           # 1=成功 0=失败
+            "op": "move",      # 当前操作
+            "ts": 1742541600,  # Unix 时间戳（秒）
+            "body": "S:7,小明,3500,2100,128.5\nV:3,小明,3520,2095,45,1|..."
+        }
+
+    body 格式（每行一个字段段，空数据行省略）：
+        S:id,name,x,y,score
+        V:id,name,x,y,dist,rel|id,name,x,y,dist,rel|...   (rel: 1=好友 0=陌生人)
+        FN:id,x,y,dist,dir|id,x,y,dist,dir|...             (在线好友)
+        FF:id,name,lastseen_sec|id,name,lastseen_sec|...   (离线好友)
+        UM:msg_id,from_id,from_name,content,sec_ago|id,name,content,sec_ago|...
+        PR:id,name,content,sec_ago|id,name,content,sec_ago|...
+        MF:to_id,content,read,read_sec,replied|...
+        FL:id,name,freq,last_date|id,name,freq,last_date|...
+        HS:x,y,count|x,y,count|...
+        EC:visited,total
+        LS:x,y,visits
+    """
+    own_db = db is None
+    if own_db:
+        db = next(get_db())
+
+    # ── content 字段安全处理 ─────────────────────────────────────
+    def _safe(s: str | None, maxlen: int = 60) -> str:
+        if not s:
+            return ""
+        s = str(s)
+        s = s.replace("|", "_").replace("\n", " ").replace("\r", " ")
+        return s[:maxlen]
+
+    def _sec_ago(dt: datetime) -> str:
+        delta = datetime.now(timezone.utc) - _ensure_aware(dt)
+        return str(int(delta.total_seconds()))
+
+    try:
+        user_id = user.id
+        now = datetime.now(timezone.utc)
+        world_size = ws_state.config.world_size
+
+        # ── S: self ──────────────────────────────────────────────
+        me_score = _calc_active_score(user_id, db)
+        S = f"S:{user_id},{_safe(user.name, 20)},{me_state.x},{me_state.y},{round(me_score, 1)}"
+
+        # ── V: visible users ─────────────────────────────────────
+        from sqlalchemy import or_ as sql_or
+        from app.models import Friendship
+
+        visible_ids = [s.user_id for s in visible if s.user_id != user_id]
+        user_map: dict[int, User] = {}
+        if visible_ids:
+            for u in db.query(User).filter(User.id.in_(visible_ids)).all():
+                user_map[u.id] = u
+
+        # 批量查询 visible 用户的好友关系
+        visible_friend_ids: set[int] = set()
+        if visible_ids:
+            friend_rows = db.query(Friendship).filter(
+                sql_or(
+                    Friendship.user_a_id == user_id,
+                    Friendship.user_b_id == user_id,
+                ),
+                sql_or(
+                    Friendship.user_a_id.in_(visible_ids),
+                    Friendship.user_b_id.in_(visible_ids),
+                ),
+                Friendship.status == "accepted",
+            ).all()
+            for fr in friend_rows:
+                visible_friend_ids.add(fr.user_a_id)
+                visible_friend_ids.add(fr.user_b_id)
+
+        V_parts = []
+        for s in visible:
+            if s.user_id == user_id:
+                continue
+            u = user_map.get(s.user_id)
+            if u is None:
+                continue
+            dx = s.x - me_state.x
+            dy = s.y - me_state.y
+            dist = abs(dx) + dy
+            rel = "1" if s.user_id in visible_friend_ids else "0"
+            V_parts.append(f"{s.user_id},{_safe(u.name, 20)},{s.x},{s.y},{dist},{rel}")
+        V = f"V:{len(V_parts)},{('|'.join(V_parts) if V_parts else '')}" if V_parts else None
+
+        # ── FN: friends nearby (online) ──────────────────────────
+        friend_rows = db.query(Friendship).filter(
+            sql_or(
+                Friendship.user_a_id == user_id,
+                Friendship.user_b_id == user_id,
+            ),
+            Friendship.status == "accepted",
+        ).all()
+        FN_parts = []
+        for fr in friend_rows:
+            fid = fr.user_b_id if fr.user_a_id == user_id else fr.user_a_id
+            fs = ws_state.users.get(fid)
+            if fs:
+                dx = fs.x - me_state.x
+                dy = fs.y - me_state.y
+                dist = abs(dx) + dy
+                direction = _calc_direction(dx, dy)
+                FN_parts.append(f"{fid},{fs.x},{fs.y},{dist},{direction}")
+        FN = f"FN:{len(FN_parts)},{('|'.join(FN_parts) if FN_parts else '')}" if FN_parts else None
+
+        # ── FF: friends far (offline) ─────────────────────────────
+        friend_user_map: dict[int, User] = {}
+        friend_ids = [fr.user_b_id if fr.user_a_id == user_id else fr.user_a_id for fr in friend_rows]
+        if friend_ids:
+            for u in db.query(User).filter(User.id.in_(friend_ids)).all():
+                friend_user_map[u.id] = u
+        FF_parts = []
+        for fr in friend_rows:
+            fid = fr.user_b_id if fr.user_a_id == user_id else fr.user_a_id
+            if ws_state.users.get(fid):
+                continue  # 在线好友已在 FN
+            fu = friend_user_map.get(fid)
+            last_seen = fu.last_seen_at or fu.created_at
+            sec = _sec_ago(last_seen)
+            FF_parts.append(f"{fid},{_safe(fu.name if fu else str(fid), 20)},{sec}")
+        FF = f"FF:{len(FF_parts)},{('|'.join(FF_parts) if FF_parts else '')}" if FF_parts else None
+
+        # ── UM: unread messages ───────────────────────────────────
+        from app.models import Message
+
+        unread_msgs = (
+            db.query(Message)
+            .filter(Message.to_id == user_id, Message.msg_type.in_(["chat", "system"]))
+            .order_by(Message.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        UM_parts = []
+        for m in unread_msgs:
+            from_u = db.query(User).filter(User.id == m.from_id).first() if m.from_id else None
+            sec = _sec_ago(m.created_at)
+            UM_parts.append(f"msg_{m.id},{m.from_id},{_safe(from_u.name if from_u else '?', 20)},{_safe(m.content, 60)},{sec}")
+        UM = f"UM:{len(UM_parts)},{('|'.join(UM_parts) if UM_parts else '')}" if UM_parts else None
+
+        # ── PR: pending friend requests ───────────────────────────
+        pending_reqs = (
+            db.query(Message)
+            .filter(Message.to_id == user_id, Message.msg_type == "friend_request")
+            .order_by(Message.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        PR_parts = []
+        for m in pending_reqs:
+            from_u = db.query(User).filter(User.id == m.from_id).first() if m.from_id else None
+            sec = _sec_ago(m.created_at)
+            PR_parts.append(f"{m.from_id},{_safe(from_u.name if from_u else '?', 20)},{_safe(m.content, 60)},{sec}")
+        PR = f"PR:{len(PR_parts)},{('|'.join(PR_parts) if PR_parts else '')}" if PR_parts else None
+
+        # ── MF: message feedback ──────────────────────────────────
+        mf_rows = _build_message_feedback(db, user_id, now)
+        MF_parts = []
+        for row in mf_rows:
+            content = _safe(row.get("content", ""), 60)
+            read_str = "1" if row.get("read") else "0"
+            # read_sec: use read_at if present (string "Xs ago"), else ""
+            read_sec = row.get("read_at", "")
+            replied_str = "1" if row.get("replied") else "0"
+            MF_parts.append(f"{row['to_id']},{content},{read_str},{read_sec},{replied_str}")
+        MF = f"MF:{len(MF_parts)},{('|'.join(MF_parts) if MF_parts else '')}" if MF_parts else None
+
+        # ── FL: friend list (top 10 by interaction freq) ─────────
+        from app.models import SocialEvent
+
+        top_friends = (
+            db.query(
+                SocialEvent.other_user_id,
+                func.count(SocialEvent.id).label("cnt"),
+            )
+            .filter(
+                SocialEvent.user_id == user_id,
+                SocialEvent.other_user_id.isnot(None),
+            )
+            .group_by(SocialEvent.other_user_id)
+            .order_by(func.count(SocialEvent.id).desc())
+            .limit(10)
+            .all()
+        )
+        FL_parts = []
+        for row in top_friends:
+            fu = db.query(User).filter(User.id == row.other_user_id).first() if row.other_user_id else None
+            last = fu.last_seen_at if fu else None
+            last_date = last.strftime("%m-%d") if last else "?"
+            FL_parts.append(f"{row.other_user_id},{_safe(fu.name if fu else str(row.other_user_id), 20)},{row.cnt},{last_date}")
+        FL = f"FL:{len(FL_parts)},{('|'.join(FL_parts) if FL_parts else '')}" if FL_parts else None
+
+        # ── HS: world hotspots ────────────────────────────────────
+        from app.models import HeatmapCell
+
+        hotspot_window = now - timedelta(hours=_HOTSPOT_QUERY_HOURS)
+        hotspot_cells = (
+            db.query(HeatmapCell)
+            .filter(HeatmapCell.updated_at >= hotspot_window)
+            .order_by(HeatmapCell.event_count.desc())
+            .limit(10)
+            .all()
+        )
+        HS_parts = []
+        for hc in hotspot_cells:
+            cx = hc.cell_x * _CELL_SIZE + _CELL_SIZE // 2
+            cy = hc.cell_y * _CELL_SIZE + _CELL_SIZE // 2
+            HS_parts.append(f"{cx},{cy},{hc.event_count}")
+        HS = f"HS:{('|'.join(HS_parts) if HS_parts else '')}"
+
+        # ── EC: exploration coverage ──────────────────────────────
+        today_start = now - timedelta(hours=24)
+        from app.models import MovementEvent
+
+        today_moves = (
+            db.query(MovementEvent.x, MovementEvent.y)
+            .filter(
+                MovementEvent.user_id == user_id,
+                MovementEvent.created_at >= today_start,
+            )
+            .all()
+        )
+        visited_cells = {f"{x // _CELL_SIZE},{y // _CELL_SIZE}" for x, y in today_moves}
+        total_map_cells = (world_size // _CELL_SIZE) ** 2
+        EC = f"EC:{len(visited_cells)},{total_map_cells}"
+
+        # ── LS: location stay ─────────────────────────────────────
+        current_cell = f"{me_state.x // _CELL_SIZE},{me_state.y // _CELL_SIZE}"
+        visits_to_current_cell = sum(
+            1 for x, y in today_moves
+            if f"{x // _CELL_SIZE},{y // _CELL_SIZE}" == current_cell
+        )
+        LS = f"LS:{me_state.x},{me_state.y},{visits_to_current_cell}"
+
+        # ── 组装 body ─────────────────────────────────────────────
+        body_parts = [S]
+        if V:
+            body_parts.append(V)
+        if FN:
+            body_parts.append(FN)
+        if FF:
+            body_parts.append(FF)
+        if UM:
+            body_parts.append(UM)
+        if PR:
+            body_parts.append(PR)
+        if MF:
+            body_parts.append(MF)
+        if FL:
+            body_parts.append(FL)
+        body_parts.append(HS)
+        body_parts.append(EC)
+        body_parts.append(LS)
+        body = "\n".join(body_parts)
+
+        return {
+            "type": "step_context",
+            "step": step,
+            "ok": ok,
+            "op": op,
+            "ts": int(now.timestamp()),
+            "body": body,
+        }
+    finally:
+        if own_db:
+            db.close()
+
+
 def _calc_direction(dx: int, dy: int) -> str:
     """根据坐标差计算方向。"""
     if abs(dx) <= 5 and abs(dy) <= 5:
@@ -1063,8 +1352,10 @@ async def ws_client(websocket: WebSocket):
                     _step_count += 1
 
                     # 构建完整上下文并推送
-                    ctx = _build_step_context(user, me_state, visible, ws_state, step=_step_count)
-                    ctx["step"] = _step_count
+                    ctx = _build_step_context_compact(
+                        user, me_state, visible, ws_state,
+                        step=_step_count, op="", ok=1,
+                    )
                     ctx["new_encounters_this_step"] = [
                         {"user_id": e["user_id"], "user_name": e["user_name"]}
                         for e in new_encounters
