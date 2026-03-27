@@ -84,7 +84,7 @@ async def ws_observe(
     """
     await ws.accept()
 
-    world_state = ws.app.state.get("world_state")
+    world_state = getattr(ws.app.state, "world_state", None)
     if world_state is None:
         await ws.close(code=1011, reason="World not initialized")
         return
