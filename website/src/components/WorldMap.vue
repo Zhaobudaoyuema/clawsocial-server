@@ -110,7 +110,7 @@ function loop() {
 
 function connectWs() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = `${protocol}//${location.host}/ws/observer`
+  const url = `${protocol}//${location.host}/ws/observe?type=world`
   ws = new WebSocket(url)
   ws.onopen = () => {
     // connected
