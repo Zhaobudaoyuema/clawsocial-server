@@ -59,7 +59,7 @@ from app.models import User
 from app.utils import plain_text
 from app import models
 from app.migrate import run_migrations
-from app.api import admin, register, stats, world, ws_client, ws_server, share
+from app.api import register, stats, world, ws_client, ws_server, share
 from app.crawfish.social import friends, homepage, messages
 from app.crawfish.world.state import WorldConfig, WorldState
 
@@ -70,7 +70,7 @@ run_migrations(engine)
 # 限流：由 RATE_LIMIT_ENABLED 控制，QPS 20，按 user_id 或 IP 统一限流
 
 _RATE_LIMIT_EXEMPT = {"/health", "/stats", "/homepage"}
-_RATE_LIMIT_EXEMPT_PREFIX = ("/homepage/", "/admin/")
+_RATE_LIMIT_EXEMPT_PREFIX = ("/homepage/",)
 _RATE_LIMIT_QPS = int(os.getenv("RATE_LIMIT_QPS", "20"))
 _RATE_LIMIT_WINDOW_SEC = 1.0
 _rate_limit_buckets: dict[str, list[float]] = {}  # key -> [timestamps]
@@ -181,9 +181,10 @@ _PLAIN_TEXT_ONLY_PATHS = _RATE_LIMIT_EXEMPT
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     path = request.scope.get("path", "").split("?")[0]
-    if path in _PLAIN_TEXT_ONLY_PATHS or path.startswith("/homepage") or path.startswith("/admin"):
+    if path in _PLAIN_TEXT_ONLY_PATHS or path.startswith("/homepage"):
         return plain_text(f"错误 {exc.status_code}：{exc.detail}", status_code=exc.status_code)
-    return plain_text(f"错误：{exc.detail}", status_code=200)
+    # "Not Found" is the default 404 message — pass through real status code
+    return plain_text(f"错误：{exc.detail}", status_code=404 if exc.detail == "Not Found" else 200)
 
 
 @app.exception_handler(RequestValidationError)
@@ -204,7 +205,6 @@ def health():
     return {"status": "ok"}
 
 
-app.include_router(admin.router)
 app.include_router(register.router)
 app.include_router(messages.router)
 app.include_router(friends.router)
@@ -225,7 +225,29 @@ async def serve_website():
     return FileResponse(path)
 
 # 挂载官网静态资源（CSS/JS/图片）
-app.mount("/assets", StaticFiles(directory="app/static/assets", html=False), name="website_assets")
+_static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "assets")
+app.mount("/assets", StaticFiles(directory=_static_dir, html=False), name="website_assets")
+
+
+# ── Vue SPA 前端路由 ─────────────────────────────────────────────────────────
+# 使用显式路由，避免与 API 路由冲突（API 404 由 FastAPI 自然处理）
+
+@app.get("/world")
+@app.get("/world/")
+async def serve_world():
+    """世界地图页"""
+    from fastapi.responses import FileResponse
+    import os
+    return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
+
+
+@app.get("/world/me")
+@app.get("/world/me/")
+async def serve_crawler():
+    """我的虾页"""
+    from fastapi.responses import FileResponse
+    import os
+    return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
 
 
 if __name__ == "__main__":
