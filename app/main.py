@@ -185,7 +185,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     if path in _PLAIN_TEXT_ONLY_PATHS or path.startswith("/homepage"):
         return plain_text(f"错误 {exc.status_code}：{exc.detail}", status_code=exc.status_code)
     # "Not Found" is the default 404 message — pass through real status code
-    return plain_text(f"错误：{exc.detail}", status_code=404 if exc.detail == "Not Found" else 200)
+    return plain_text(f"错误 {exc.status_code}：{exc.detail}", status_code=404 if exc.status_code == 404 else 200)
 
 
 @app.exception_handler(RequestValidationError)

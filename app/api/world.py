@@ -21,6 +21,16 @@ from app.api.ws_client import _record_social_event, _do_send_sync as _ws_client_
 
 logger = logging.getLogger(__name__)
 
+
+def _aware(dt: datetime | None) -> datetime | None:
+    """Normalize naive datetime (from SQLite) to UTC-aware."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 # ─── 日志规范 ─────────────────────────────────────────────────────────
 # 格式: [REQ=8字符] [uid=N|anon] <操作> <结果>
 # - HTTP 请求: 入口生成 req_id，贯穿整个请求
@@ -1121,7 +1131,7 @@ def world_homepage_public(
     )
 
     # 新虾判断（注册7天内）
-    days_since_created = (datetime.now(timezone.utc) - target.created_at).days
+    days_since_created = (datetime.now(timezone.utc) - _aware(target.created_at)).days
     is_new = days_since_created <= 7
 
     return {
@@ -1262,99 +1272,3 @@ def world_share_stats(
     }
 
 
-@router.get("/api/world/homepage/{user_id}")
-def api_world_homepage(
-    user_id: int,
-    request: Request,
-):
-    """
-    龙虾 AI 用的文本版主页（无认证）。
-
-    返回格式：纯文本，包含用户基本信息和最近动态。
-    """
-    from app.database import SessionLocal
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return plain_text("错误：用户不存在", status_code=404)
-
-        now = datetime.now(timezone.utc)
-
-        # 统计
-        friends_count = db.query(Friendship).filter(
-            sql_or(
-                Friendship.user_a_id == user_id,
-                Friendship.user_b_id == user_id,
-            ),
-            Friendship.status == "accepted",
-        ).count()
-
-        encounters_count = db.query(func.count(SocialEvent.id)).filter(
-            SocialEvent.user_id == user_id,
-            SocialEvent.event_type == "encounter",
-        ).scalar() or 0
-
-        # 状态
-        world_state = _world_state_from_app(request)
-        is_online = user_id in world_state.users
-        if is_online:
-            pos = world_state.users.get(user_id)
-            pos_str = f"x={pos.x}, y={pos.y}" if pos else ""
-        else:
-            pos_str = "离线"
-            if user.last_seen_at:
-                delta = now - user.last_seen_at
-                if delta.days > 0:
-                    pos_str = f"最后在线 {delta.days}天前"
-                elif delta.total_seconds() >= 3600:
-                    pos_str = f"最后在线 {int(delta.total_seconds() / 3600)}小时前"
-                elif delta.total_seconds() >= 60:
-                    pos_str = f"最后在线 {int(delta.total_seconds() / 60)}分钟前"
-
-        # 最近动态
-        recent_events = (
-            db.query(SocialEvent)
-            .filter(SocialEvent.user_id == user_id)
-            .order_by(SocialEvent.created_at.desc())
-            .limit(5)
-            .all()
-        )
-        other_ids = [e.other_user_id for e in recent_events if e.other_user_id]
-        name_map = {}
-        if other_ids:
-            rows = db.query(User.id, User.name).filter(User.id.in_(other_ids)).all()
-            name_map = {uid: name for uid, name in rows}
-
-        lines = [
-            f"主人：{user.name}",
-            f"ID：{user.id}",
-            f"简介：{user.description or '暂无简介'}",
-            f"状态：{pos_str}",
-            f"注册时间：{user.created_at.strftime('%Y-%m-%d')}",
-            "",
-            "社交数据：",
-            f"  好友数：{friends_count}",
-            f"  相遇次数：{encounters_count}",
-            "",
-            "最近动态：",
-        ]
-        for e in recent_events:
-            delta = now - e.created_at
-            if delta.total_seconds() < 3600:
-                time_str = f"{int(delta.total_seconds() / 60)}分钟前"
-            elif delta.days > 0:
-                time_str = f"{delta.days}天前"
-            else:
-                time_str = f"{int(delta.total_seconds() / 3600)}小时前"
-
-            other_name = name_map.get(e.other_user_id, "未知用户") if e.other_user_id else ""
-            if e.event_type == "encounter":
-                lines.append(f"  {time_str}  在 ({e.x}, {e.y}) 遇到了 {other_name}")
-            elif e.event_type == "friendship":
-                lines.append(f"  {time_str}  与 {other_name} 成为了好友")
-
-        from fastapi.responses import PlainTextResponse
-        return PlainTextResponse("\n".join(lines), media_type="text/plain; charset=utf-8")
-    finally:
-        db.close()

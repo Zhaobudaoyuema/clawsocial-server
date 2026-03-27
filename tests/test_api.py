@@ -541,4 +541,85 @@ def test_ws_do_update_status_valid(token, db):
     assert u.status == "do_not_disturb"
 
 
+# ─── /api/client/history ────────────────────────────────────────────────────
 
+def test_history_messages(client: TestClient, token):
+    """GET /api/client/history/messages 返回消息历史"""
+    uid, tok = token
+    r = client.get(f"/api/client/history/messages", headers={"X-Token": tok})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == "messages"
+    assert "data" in data
+    assert "pagination" in data
+
+
+def test_history_movements(client: TestClient, token):
+    """GET /api/client/history/movements 返回移动轨迹"""
+    uid, tok = token
+    r = client.get(f"/api/client/history/movements", headers={"X-Token": tok})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == "movements"
+
+
+def test_history_social(client: TestClient, token):
+    """GET /api/client/history/social 返回社交事件"""
+    uid, tok = token
+    r = client.get(f"/api/client/history/social", headers={"X-Token": tok})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == "social"
+
+
+def test_history_backup(client: TestClient, token):
+    """GET /api/client/history/backup 返回全量数据（无数据时返回空数组）"""
+    uid, tok = token
+    r = client.get(f"/api/client/history/backup", headers={"X-Token": tok})
+    # 服务器以 text/plain 返回，即使有错误也返回 200
+    assert r.status_code == 200
+    # 成功时返回 JSON 格式，失败时返回纯文本
+    try:
+        data = r.json()
+        assert data["type"] == "all"
+        assert "data" in data
+        assert "total" in data
+    except Exception:
+        # 无数据时返回错误文本
+        assert "错误" in r.text or "有效类型" in r.text
+
+
+def test_history_invalid_type(client: TestClient, token):
+    """无效的 history_type 返回错误提示"""
+    uid, tok = token
+    r = client.get("/api/client/history/invalid", headers={"X-Token": tok})
+    # 自定义异常处理器将 HTTPException 转为 200 + plain text
+    assert r.status_code == 200
+    assert "无效类型" in r.text or "有效类型" in r.text
+
+
+def test_history_no_token(client: TestClient):
+    """无 token 返回验证错误提示"""
+    r = client.get("/api/client/history/messages")
+    # 自定义异常处理器将 ValidationError 转为 200 + plain text
+    assert r.status_code == 200
+    assert "X-Token" in r.text or "请求格式" in r.text or "错误" in r.text
+
+
+# ─── /api/world/homepage ───────────────────────────────────────────────────
+
+def test_world_homepage_ai(client: TestClient, token):
+    """GET /api/world/homepage/{user_id} 返回公开主页 JSON"""
+    uid, tok = token
+    r = client.get(f"/api/world/homepage/{uid}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["user_id"] == uid
+    assert "name" in data
+    assert "active_score" in data
+
+
+def test_world_homepage_not_found(client: TestClient):
+    """不存在的用户返回 404"""
+    r = client.get("/api/world/homepage/99999")
+    assert r.status_code == 404

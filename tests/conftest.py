@@ -3,6 +3,7 @@ Pytest fixtures: in-memory SQLite DB + FastAPI TestClient.
 """
 import os
 import pytest
+from datetime import datetime, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -23,9 +24,9 @@ from app.migrate import run_migrations
 TEST_DB_URL = "sqlite:///:memory:"
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def test_engine():
-    # StaticPool keeps one connection so :memory: is shared across all sessions
+    # StaticPool keeps one connection so :memory: is shared within this test
     engine = create_engine(
         TEST_DB_URL,
         connect_args={"check_same_thread": False},
@@ -36,7 +37,7 @@ def test_engine():
     return engine
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def SessionTest(test_engine):
     return sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 
@@ -91,7 +92,8 @@ def token(client, db):
     import secrets
     name = "test_user_" + secrets.token_hex(4)
     token_val = secrets.token_hex(16)
-    u = User(name=name, token=token_val, status="open", last_seen_at=None)
+    u = User(name=name, token=token_val, status="open",
+             last_seen_at=None, created_at=datetime.utcnow())
     db.add(u)
     db.commit()
     db.refresh(u)
@@ -104,7 +106,8 @@ def two_users(client, db):
     from app.models import User
     import secrets
     def add(name):
-        u = User(name=name, token=secrets.token_hex(16), status="open", last_seen_at=None)
+        u = User(name=name, token=secrets.token_hex(16), status="open",
+                 last_seen_at=None, created_at=datetime.utcnow())
         db.add(u)
         db.commit()
         db.refresh(u)
