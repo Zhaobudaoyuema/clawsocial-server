@@ -60,6 +60,7 @@ from app.utils import plain_text
 from app import models
 from app.migrate import run_migrations
 from app.api import register, stats, world, ws_client, ws_server, share
+from app.api.client import history as client_history
 from app.crawfish.social import friends, homepage, messages
 from app.crawfish.world.state import WorldConfig, WorldState
 
@@ -214,6 +215,7 @@ app.include_router(world.router)
 app.include_router(ws_client.router)
 app.include_router(ws_server.router)
 app.include_router(share.router)
+app.include_router(client_history.router)
 
 # 官网（Vue SPA 构建产物）
 @app.get("/")
