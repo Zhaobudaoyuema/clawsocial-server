@@ -6,9 +6,11 @@ ClawSocial 启动入口
 """
 import logging
 import os
+import signal
 import sys
 import subprocess
 import time
+from logging.handlers import RotatingFileHandler
 
 # Windows 下启用 UTF-8 模式
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -25,14 +27,22 @@ def _setup():
     fmt = "%(asctime)s %(levelname)-8s %(name)s:%(lineno)d  %(message)s"
     date_fmt = "%Y-%m-%d %H:%M:%S"
 
-    # 所有 handler 都写到 sys.stderr（uvicorn 默认写这里）
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(fmt, date_fmt))
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+
+    # 默认写日志文件到 logs/（不受 reload 子进程影响）
+    log_file = os.path.join(ROOT, "logs", "app.log")
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    fh = RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(logging.Formatter(fmt, date_fmt))
+    handlers.append(fh)
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, log_level, logging.INFO))
     root.handlers.clear()
-    root.addHandler(handler)
+    for h in handlers:
+        root.addHandler(h)
 
     # uvicorn 日志级别同步控制
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi", "uvicorn.protocol"):
@@ -46,19 +56,39 @@ _logger = _setup()
 
 
 def _kill_port(port):
-    """强制终止占用指定端口的进程（Windows taskkill）"""
+    """强制终止占用指定端口的 Windows 进程（不支持 WSL）"""
     try:
         result = subprocess.run(
-            f"netstat -ano | findstr :{port}",
-            shell=True, capture_output=True, text=True
+            f'powershell -Command "Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"',
+            shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
-        for line in result.stdout.strip().splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and parts[3].endswith(f":{port}"):
-                pid = parts[-1].strip()
-                if pid.isdigit():
-                    _logger.info("  终止旧进程 PID=%s (占用端口 %s)", pid, port)
-                    subprocess.run("taskkill /F /PID " + pid, shell=True, capture_output=True)
+        pids = [p.strip() for p in result.stdout.strip().splitlines() if p.strip().isdigit()]
+        if not pids:
+            return
+
+        killed = set()
+        for pid in pids:
+            if pid in killed:
+                continue
+            killed.add(pid)
+            # 先验证进程是否真实存在
+            check = subprocess.run(
+                f'powershell -Command "Get-Process -Id {pid} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"',
+                shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+            if not check.stdout.strip():
+                _logger.warning("  PID=%s 在 Windows 进程表中不存在，可能是 WSL/Docker 占用", pid)
+                _logger.warning("  请在 WSL 终端执行: sudo fuser -k %d/tcp", port)
+                continue
+            _logger.info("  终止旧进程 PID=%s (占用端口 %s)", pid, port)
+            kr = subprocess.run(
+                f"taskkill /F /PID {pid}",
+                shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+            if kr.returncode != 0:
+                _logger.warning("  taskkill 失败 PID=%s: %s", pid, kr.stderr.strip())
+            else:
+                _logger.info("  已终止 PID=%s", pid)
     except Exception as e:
         _logger.warning("  清理端口 %s 时出错（可忽略）: %s", port, e)
 
@@ -76,7 +106,7 @@ if __name__ == "__main__":
     _logger.info("=" * 50)
 
     # ── 0. 清理旧进程（确保端口不受占用）────────────────────
-    APP_PORT = int(os.getenv("APP_PORT", "8000"))
+    APP_PORT = 8001
     DB_HOST  = os.getenv("DB_HOST", "127.0.0.1")
     DB_PORT  = int(os.getenv("DB_PORT", "3306"))
     DB_USER  = os.getenv("DB_USER", "root")
@@ -141,10 +171,23 @@ if __name__ == "__main__":
     _logger.info("=" * 50)
     _logger.info("按 Ctrl+C 停止服务")
 
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=APP_PORT,
-        reload=True,
-        log_level=os.getenv("UVICORN_LOG_LEVEL", "info").lower(),
+    server = uvicorn.Server(
+        config=uvicorn.Config(
+            "app.main:app",
+            host="0.0.0.0",
+            port=APP_PORT,
+            reload=False,
+            log_level="info",
+            access_log=False,
+        )
     )
+
+    # Ctrl+C 优雅退出
+    def handle_sigterm(signum, frame):
+        _logger.info("收到 Ctrl+C，正在停止服务...")
+        server.should_exit = True
+
+    signal.signal(signal.SIGINT, handle_sigterm)
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    server.run()
