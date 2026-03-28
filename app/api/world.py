@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy import Integer, and_, func, or_
 from sqlalchemy.orm import Session
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _aware(dt: datetime | None) -> datetime | None:
-    """Normalize naive datetime (from SQLite) to UTC-aware."""
+    """Normalize naive datetime to UTC-aware."""
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -183,30 +183,64 @@ def world_status(
 @router.get("/api/world/history")
 def world_history(
     window: str = Query("7d"),
-    limit: int = Query(500, ge=1, le=5000),
-    x_token: str = Header(..., alias="X-Token"),
+    limit: int = Query(5000, ge=1, le=5000),
+    x_token: str | None = Header(None, alias="X-Token"),
     db: Session = Depends(get_db),
 ):
-    """获取移动轨迹"""
+    """获取移动轨迹（双模式）:
+    - 有 X-Token → 返回该用户的个人历史
+    - 无 X-Token → 返回所有用户的轨迹点（实时地图用）
+    """
     req_id = uuid.uuid4().hex[:8]
-    user = _get_user(x_token, db)
-    logger.info("[REQ=%s] [uid=%d] → GET /api/world/history  window=%s limit=%d", req_id, user.id, window, limit)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
-    hours = delta_map.get(window, 24 * 7)
+    hours = delta_map.get(window, 24)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    events = (
-        db.query(MovementEvent)
-        .filter(MovementEvent.user_id == user.id, MovementEvent.created_at >= since)
-        .order_by(MovementEvent.created_at.asc())
-        .limit(limit)
-        .all()
-    )
-    logger.info("[REQ=%s] [uid=%d] ← 200  轨迹点=%d", req_id, user.id, len(events))
-    return {
-        "user_id": user.id,
-        "window": window,
-        "points": [{"x": e.x, "y": e.y, "ts": e.created_at.isoformat()} for e in events],
-    }
+
+    if x_token:
+        user = _get_user(x_token, db)
+        logger.info("[REQ=%s] [uid=%d] → GET /api/world/history  window=%s limit=%d", req_id, user.id, window, limit)
+        events = (
+            db.query(MovementEvent)
+            .filter(MovementEvent.user_id == user.id, MovementEvent.created_at >= since)
+            .order_by(MovementEvent.created_at.asc())
+            .limit(limit)
+            .all()
+        )
+        logger.info("[REQ=%s] [uid=%d] ← 200  轨迹点=%d", req_id, user.id, len(events))
+        return {
+            "user_id": user.id,
+            "window": window,
+            "points": [{"x": e.x, "y": e.y, "ts": e.created_at.isoformat()} for e in events],
+        }
+    else:
+        logger.info("[REQ=%s] [anon] → GET /api/world/history  window=%s limit=%d", req_id, window, limit)
+        events = (
+            db.query(MovementEvent)
+            .filter(MovementEvent.created_at >= since)
+            .order_by(MovementEvent.created_at.asc())
+            .limit(limit)
+            .all()
+        )
+        user_ids = list(set(e.user_id for e in events))
+        name_map = {}
+        if user_ids:
+            rows = db.query(User.id, User.name).filter(User.id.in_(user_ids)).all()
+            name_map = {uid: name for uid, name in rows}
+        result = []
+        for e in events:
+            result.append({
+                "user_id": e.user_id,
+                "user_name": name_map.get(e.user_id, ""),
+                "x": e.x,
+                "y": e.y,
+                "ts": e.created_at.isoformat(),
+            })
+        logger.info("[REQ=%s] [anon] ← 200  轨迹点=%d", req_id, len(result))
+        return {
+            "window": window,
+            "total": len(result),
+            "points": result,
+        }
 
 
 @router.get("/api/world/social")
@@ -343,7 +377,7 @@ def world_nearby(
     x_token: str = Header(..., alias="X-Token"),
     range: int = Query(default=300, ge=100, le=3000),
     db: Session = Depends(get_db),
-) -> PlainTextResponse:
+):
     """发现附近在线用户（REST 回退）。视野范围 range 格，支持 100~3000。"""
     req_id = uuid.uuid4().hex[:8]
     user = _get_user(x_token, db)
@@ -352,23 +386,23 @@ def world_nearby(
     state = ws.users.get(user.id)
     if not state:
         logger.info("[REQ=%s] [uid=%d] ← 200  未进入世界，WS 未连接", req_id, user.id)
-        return PlainTextResponse("你尚未进入世界，请先连接 WS")
+        return JSONResponse({"ok": False, "message": "你尚未进入世界，请先连接 WS", "users": []})
     visible = ws.get_visible(user.id, view_radius=range)
-    parts = []
+    users = []
     for s in visible:
         if s.user_id == user.id:
             continue
         u = db.query(User).filter(User.id == s.user_id).first()
         if u and u.status == "open":
-            parts.append(
-                f"[{u.id}] {u.name} | 简介：{u.description or '无'} | 位置：({s.x},{s.y})"
-            )
-    if not parts:
-        logger.info("[REQ=%s] [uid=%d] ← 200  附近无其他龙虾", req_id, user.id)
-        return PlainTextResponse("附近暂无其他龙虾")
-    body = "\n" + ("─" * 40) + "\n" + "\n".join(parts)
-    logger.info("[REQ=%s] [uid=%d] ← 200  附近=%d人 %s", req_id, user.id, len(parts), [p.split("|")[0].strip() for p in parts])
-    return PlainTextResponse(f"附近在线 {len(parts)} 人\n{body}")
+            users.append({
+                "id": u.id,
+                "name": u.name,
+                "description": u.description or "",
+                "x": s.x,
+                "y": s.y,
+            })
+    logger.info("[REQ=%s] [uid=%d] ← 200  附近=%d人", req_id, user.id, len(users))
+    return JSONResponse({"ok": True, "count": len(users), "range": range, "users": users})
 
 
 # ─── WebSocket: 匿名观察者（全局实况页用）──────────────────────────────

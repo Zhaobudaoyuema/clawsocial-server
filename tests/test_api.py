@@ -1,5 +1,5 @@
 """
-Tests for each API endpoint. Uses in-memory SQLite + dependency_overrides.
+Tests for each API endpoint. Uses MySQL per-function test database via dependency_overrides.
 """
 import pytest
 from fastapi.testclient import TestClient
@@ -37,9 +37,13 @@ def test_register_ok(client: TestClient):
         json={"name": "alice", "description": "hi", "status": "open"},
     )
     assert r.status_code == 200
-    assert "Token：" in r.text
-    assert "注册成功" in r.text
-    assert "alice" in r.text
+    data = r.json()
+    assert data["ok"] is True
+    assert data["name"] == "alice"
+    assert data["description"] == "hi"
+    assert data["status"] == "open"
+    assert "token" in data
+    assert "me_url" in data
 
 
 def test_register_duplicate_name(client: TestClient):
@@ -48,14 +52,14 @@ def test_register_duplicate_name(client: TestClient):
     # 409 name taken, or 429 same-IP same-day, or 200 with error message
     assert r.status_code in (200, 409, 429)
     if r.status_code == 200:
-        assert "错误" in r.text or "已被使用" in r.text or "仅允许" in r.text
+        assert r.json().get("ok") is False or "已被使用" in r.text
 
 
 def test_register_validation(client: TestClient):
     r = client.post("/register", json={"name": ""})
     assert r.status_code in (200, 422)
     if r.status_code == 200:
-        assert "错误" in r.text or "格式" in r.text
+        assert r.json().get("ok") is False or "格式" in r.text
 
 
 # ─── Messages (require X-Token) ──────────────────────────────────────────────
@@ -94,7 +98,7 @@ def test_send_to_nonexistent(client: TestClient, token):
     )
     assert r.status_code in (200, 404)
     if r.status_code == 200:
-        assert "错误" in r.text or "用户" in r.text
+        assert r.json().get("ok") is False or "用户" in r.text
 
 
 def test_send_ok_first_contact(client: TestClient, two_users):
@@ -106,7 +110,8 @@ def test_send_ok_first_contact(client: TestClient, two_users):
         json={"to_id": id_b, "content": "friend request"},
     )
     assert r.status_code == 200
-    assert len(r.text) > 0
+    data = r.json()
+    assert data["ok"] is True
 
 
 def test_send_reply_accepts_friendship(client: TestClient, two_users):
@@ -114,7 +119,8 @@ def test_send_reply_accepts_friendship(client: TestClient, two_users):
     client.post("/send", headers={"X-Token": tok_a}, json={"to_id": id_b, "content": "hi"})
     r = client.post("/send", headers={"X-Token": tok_b}, json={"to_id": id_a, "content": "hello"})
     assert r.status_code == 200
-    assert len(r.text) > 0
+    data = r.json()
+    assert data["ok"] is True
 
 
 def test_send_file_ok(client: TestClient, two_users):
@@ -128,7 +134,7 @@ def test_send_file_ok(client: TestClient, two_users):
     )
     assert r.status_code == 200
     # 成功或业务错误（如限流、好友申请已发出）均返回 200
-    assert "请求格式错误" not in r.text
+    assert r.json().get("ok") is True
 
 
 # ─── Users & Friends ────────────────────────────────────────────────────────
@@ -137,21 +143,25 @@ def test_users_discover_no_token(client: TestClient):
     r = client.get("/users")
     assert r.status_code in (200, 422)
     if r.status_code == 200:
-        assert "请求格式错误" in r.text or "错误" in r.text
+        assert r.json().get("ok") is False
 
 
 def test_users_discover_ok(client: TestClient, token):
     _id, tok = token
     r = client.get("/users", headers={"X-Token": tok})
     assert r.status_code == 200
-    # may be empty or include self-excluded list
-    assert "text/plain" in r.headers.get("content-type", "")
+    data = r.json()
+    assert data["ok"] is True
+    assert "users" in data
 
 
 def test_users_get_me(client: TestClient, token):
     uid, tok = token
     r = client.get(f"/users/{uid}", headers={"X-Token": tok})
     assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["user"]["id"] == uid
 
 
 def test_users_get_nonexistent(client: TestClient, token):
@@ -159,15 +169,16 @@ def test_users_get_nonexistent(client: TestClient, token):
     r = client.get("/users/99999", headers={"X-Token": tok})
     assert r.status_code in (200, 404)
     if r.status_code == 200:
-        assert "错误" in r.text or "用户" in r.text
+        assert r.json().get("ok") is False or r.json().get("user") is None
 
 
 def test_friends_empty(client: TestClient, token):
     _id, tok = token
     r = client.get("/friends", headers={"X-Token": tok})
     assert r.status_code == 200
-    # Empty list: "暂无好友" or list with "好友"
-    assert len(r.text) > 0
+    data = r.json()
+    assert data["ok"] is True
+    assert data["friends"] == []
 
 
 def test_friends_after_accept(client: TestClient, two_users):
@@ -175,7 +186,6 @@ def test_friends_after_accept(client: TestClient, two_users):
     id_a, tok_a, id_b, tok_b = two_users
     r1 = client.post("/send", headers={"X-Token": tok_a}, json={"to_id": id_b, "content": "hi"})
     assert r1.status_code == 200
-
     r2 = client.post("/send", headers={"X-Token": tok_b}, json={"to_id": id_a, "content": "ok"})
     assert r2.status_code == 200
 
@@ -184,7 +194,9 @@ def test_me_patch_status(client: TestClient, token):
     _id, tok = token
     r = client.patch("/me", headers={"X-Token": tok}, json={"status": "friends_only"})
     assert r.status_code == 200
-    assert len(r.text) > 0
+    data = r.json()
+    assert data["ok"] is True
+    assert data["status"] == "friends_only"
 
 
 def test_block_not_friend(client: TestClient, two_users):
@@ -192,7 +204,7 @@ def test_block_not_friend(client: TestClient, two_users):
     r = client.post(f"/block/{id_b}", headers={"X-Token": tok_a})
     assert r.status_code in (200, 403)
     if r.status_code == 200:
-        assert "错误" in r.text or "拉黑" in r.text
+        assert r.json().get("ok") is True
 
 
 def test_block_and_unblock(client: TestClient, two_users):
@@ -201,10 +213,10 @@ def test_block_and_unblock(client: TestClient, two_users):
     client.post("/send", headers={"X-Token": tok_b}, json={"to_id": id_a, "content": "ok"})
     r = client.post(f"/block/{id_b}", headers={"X-Token": tok_a})
     assert r.status_code == 200
-    assert len(r.text) > 0
+    assert r.json()["ok"] is True
     r2 = client.post(f"/unblock/{id_b}", headers={"X-Token": tok_a})
     assert r2.status_code == 200
-    assert len(r2.text) > 0
+    assert r2.json()["ok"] is True
 
 
 # ─── Homepage ────────────────────────────────────────────────────────────────
@@ -219,7 +231,9 @@ def test_homepage_upload_and_view(client: TestClient, token):
         content=html,
     )
     assert r.status_code == 200
-    assert "访问地址" in r.text
+    data = r.json()
+    assert data["ok"] is True
+    assert "url" in data
     r2 = client.get(f"/homepage/{uid}")
     assert r2.status_code == 200
     assert "Hello" in r2.text
@@ -296,9 +310,11 @@ def test_world_status_ok(client: TestClient, token):
 
 def test_world_history_no_token(client: TestClient):
     r = client.get("/api/world/history")
-    assert r.status_code in (200, 422)
-    if r.status_code == 200:
-        assert "请求格式错误" in r.text or "错误" in r.text
+    assert r.status_code == 200, f"Expected 200 for public history, got {r.status_code}: {r.text}"
+    data = r.json()
+    assert "window" in data
+    assert "total" in data
+    assert "points" in data
 
 
 def test_world_history_ok(client: TestClient, token):
@@ -573,37 +589,31 @@ def test_history_social(client: TestClient, token):
 
 
 def test_history_backup(client: TestClient, token):
-    """GET /api/client/history/backup 返回全量数据（无数据时返回空数组）"""
+    """GET /api/client/history/backup 返回全量数据"""
     uid, tok = token
-    r = client.get(f"/api/client/history/backup", headers={"X-Token": tok})
-    # 服务器以 text/plain 返回，即使有错误也返回 200
+    r = client.get("/api/client/history/backup", headers={"X-Token": tok})
     assert r.status_code == 200
-    # 成功时返回 JSON 格式，失败时返回纯文本
-    try:
-        data = r.json()
-        assert data["type"] == "all"
-        assert "data" in data
-        assert "total" in data
-    except Exception:
-        # 无数据时返回错误文本
-        assert "错误" in r.text or "有效类型" in r.text
+    data = r.json()
+    assert data["type"] == "all"
+    assert "data" in data
+    assert "total" in data
 
 
 def test_history_invalid_type(client: TestClient, token):
-    """无效的 history_type 返回错误提示"""
+    """无效的 history_type 被 Literal 类型约束拦截，返回 422"""
     uid, tok = token
     r = client.get("/api/client/history/invalid", headers={"X-Token": tok})
-    # 自定义异常处理器将 HTTPException 转为 200 + plain text
-    assert r.status_code == 200
-    assert "无效类型" in r.text or "有效类型" in r.text
+    assert r.status_code == 422
+    data = r.json()
+    assert data["ok"] is False
 
 
 def test_history_no_token(client: TestClient):
-    """无 token 返回验证错误提示"""
+    """无 token 返回 422 验证错误"""
     r = client.get("/api/client/history/messages")
-    # 自定义异常处理器将 ValidationError 转为 200 + plain text
-    assert r.status_code == 200
-    assert "X-Token" in r.text or "请求格式" in r.text or "错误" in r.text
+    assert r.status_code == 422
+    data = r.json()
+    assert data["ok"] is False
 
 
 # ─── /api/world/homepage ───────────────────────────────────────────────────
