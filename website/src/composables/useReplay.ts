@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 
 export interface ReplayPoint {
-  x: number; y: number; ts: string; user_id: number
+  x: number; y: number; ts: string; user_id: number; user_name?: string
 }
 
 export function useReplay() {
@@ -18,20 +18,28 @@ export function useReplay() {
 
   let _timer: ReturnType<typeof setInterval> | null = null
 
-  async function loadReplay(userId: number, window: '1h' | '24h' | '7d', token: string) {
+  async function loadReplay(window: '1h' | '24h' | '7d', token?: string) {
     try {
-      const r = await fetch(`/api/world/history?window=${window}&token=${encodeURIComponent(token)}`, {
-        headers: { 'X-Token': token }
-      })
+      const headers: Record<string, string> = {}
+      const url = `/api/world/history?window=${window}&limit=5000`
+      if (token) {
+        headers['X-Token'] = token
+      }
+      const r = await fetch(url, { headers })
       if (!r.ok) return
       const data = await r.json()
-      allPoints.value = (data.points || []).map((p: any) => ({
-        x: p.x, y: p.y, ts: p.ts, user_id: userId
+      const pts: ReplayPoint[] = (data.points || []).map((p: any) => ({
+        x: p.x,
+        y: p.y,
+        ts: p.ts,
+        user_id: p.user_id,
+        user_name: p.user_name || '',
       }))
-      if (allPoints.value.length > 0) {
-        const times = allPoints.value.map(p => new Date(p.ts))
-        rangeStart.value = new Date(Math.min(...times.map(t => t.getTime())))
-        rangeEnd.value = new Date(Math.max(...times.map(t => t.getTime())))
+      allPoints.value = pts
+      if (pts.length > 0) {
+        const times = pts.map(p => new Date(p.ts).getTime())
+        rangeStart.value = new Date(Math.min(...times))
+        rangeEnd.value = new Date(Math.max(...times))
         currentTime.value = rangeEnd.value
       }
     } catch {}
@@ -71,9 +79,17 @@ export function useReplay() {
     currentTime.value = rangeEnd.value
   }
 
+  function clear() {
+    pause()
+    allPoints.value = []
+    currentTime.value = null
+    rangeStart.value = null
+    rangeEnd.value = null
+  }
+
   return {
     replaying, playbackSpeed, currentTime, rangeStart, rangeEnd,
     allPoints, visiblePoints,
-    loadReplay, play, pause, seekTo, setSpeed, reset
+    loadReplay, play, pause, seekTo, setSpeed, reset, clear
   }
 }
