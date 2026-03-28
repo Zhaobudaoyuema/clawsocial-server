@@ -3,7 +3,23 @@ import { worldToCanvas } from './viewport'
 const LOBSTER_RED_HOVER = '#D4542B'
 const OWNER_GOLD = '#F4C430'
 
-// Generate consistent color from name hash
+// Desaturate an HSL color string by reducing saturation
+function desaturateColor(color: string): string {
+  const match = color.match(/hsl\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)%?,\s*(\d+(?:\.\d+)?)%?\)/)
+  if (!match) return color
+  const h = parseFloat(match[1])
+  const s = Math.max(30, parseFloat(match[2]) * 0.4)  // reduce saturation to 40%, min 30
+  const l = parseFloat(match[3])
+  return `hsl(${h}, ${s}%, ${l}%)`
+}
+
+// Get crawfish color, desaturated when not live
+function getCrawfishColor(name: string, isLive: boolean): string {
+  const base = nameToColor(name)
+  return isLive ? base : desaturateColor(base)
+}
+
+// Generate consistent color from name hash (exported for external use)
 export function nameToColor(name: string): string {
   let hash = 0
   for (let i = 0; i < name.length; i++) {
@@ -22,12 +38,14 @@ export function nameToInitial(name: string): string {
 export function drawDot(
   ctx: CanvasRenderingContext2D,
   wx: number, wy: number,
-  color: string,
+  name: string,
   vp: import('./viewport').Viewport,
-  isHovered = false
+  isHovered = false,
+  isLive = true,
 ) {
   const pt = worldToCanvas(wx, wy, vp)
   const r = isHovered ? 9 : 6
+  const color = getCrawfishColor(name, isLive)
   ctx.shadowColor = color
   ctx.shadowBlur = isHovered ? 12 : 5
   ctx.beginPath()
@@ -48,13 +66,14 @@ export function drawAvatar(
   isOwner: boolean,
   isHovered: boolean,
   vp: import('./viewport').Viewport,
-  frame: number = 0  // for animation
+  frame: number = 0,  // for animation
+  isLive = true,
 ) {
   const pt = worldToCanvas(wx, wy, vp)
   const size = isHovered ? 36 : 28
 
   // Background circle
-  const bgColor = nameToColor(name)
+  const bgColor = getCrawfishColor(name, isLive)
   ctx.beginPath()
   ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2)
   ctx.fillStyle = bgColor
@@ -110,12 +129,13 @@ export function drawCrawfish(
   isOwner: boolean,
   isHovered: boolean,
   vp: import('./viewport').Viewport,
-  frame: number = 0
+  frame: number = 0,
+  isLive = true,
 ) {
   const threshold = 0.08  // scale threshold for switching
   if (vp.scale >= threshold) {
-    drawAvatar(ctx, wx, wy, name, isOwner, isHovered, vp, frame)
+    drawAvatar(ctx, wx, wy, name, isOwner, isHovered, vp, frame, isLive)
   } else {
-    drawDot(ctx, wx, wy, nameToColor(name), vp, isHovered)
+    drawDot(ctx, wx, wy, name, vp, isHovered, isLive)
   }
 }

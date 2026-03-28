@@ -6,14 +6,15 @@ export function drawTrail(
   points: Array<{ x: number; y: number; ts?: string }>,
   color: string,
   vp: import('./viewport').Viewport,
-  maxPoints = 500
+  maxPoints = 500,
+  isHistory = false,
 ) {
   if (points.length < 2) return
 
   const pts = points.slice(-maxPoints)
   ctx.strokeStyle = color
-  ctx.lineWidth = 1.5
-  ctx.globalAlpha = 0.5
+  ctx.lineWidth = isHistory ? 1 : 1.5
+  ctx.globalAlpha = isHistory ? 0.3 : 0.8
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
 
