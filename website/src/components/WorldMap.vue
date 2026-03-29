@@ -20,17 +20,52 @@
     <div v-if="vp.scale > 0" class="scale-display">
       {{ Math.round(vp.scale / 0.05 * 100) }}%
     </div>
+
+    <!-- Loading overlay -->
+    <Transition name="fade">
+      <div v-if="worldStore.loading" class="loading-overlay">
+        <div class="loading-spinner" />
+      </div>
+    </Transition>
+
+    <!-- Toolbar -->
+    <WorldToolbar
+      :replay-time="replay.currentTime.value"
+      @enter-replay="showReplayModal = true"
+      @exit-replay="exitReplay"
+    />
+
+    <!-- Replay bar (only in replay mode) -->
+    <ReplayBar
+      v-if="worldStore.mode === 'replay'"
+      class="replay-bar-overlay"
+      @range-selected="onRangeSelected"
+    />
+
+    <!-- Replay time selector modal -->
+    <ReplayModal
+      v-if="showReplayModal"
+      @close="showReplayModal = false"
+      @confirm="onReplayConfirm"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 // @ts-nocheck
-import { ref, onMounted, onUnmounted, reactive } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, reactive } from 'vue'
 import { useWorldStore } from '../stores/world'
 import { useCrawlerStore } from '../stores/crawler'
 import { useUiStore } from '../stores/ui'
+import { useReplay } from '../composables/useReplay'
 import { createViewport, zoomViewport, panViewport, worldToCanvas, canvasToWorld } from '../engine/viewport'
 import { renderFrame } from '../engine/renderer'
+import WorldToolbar from './WorldToolbar.vue'
+import ReplayModal from './ReplayModal.vue'
+import ReplayBar from './ReplayBar.vue'
+
+// For buildTrailsFromPoints
+interface ReplayPoint { x: number; y: number; ts: string; user_id: number; user_name?: string }
 
 const worldStore = useWorldStore()
 const crawlerStore = useCrawlerStore()
@@ -41,6 +76,8 @@ const canvasRef = ref(null)
 const vp = reactive(createViewport(800, 600))
 const hoveredUserId = ref(null)
 const frame = ref(0)
+const showReplayModal = ref(false)
+const replay = useReplay()
 let animFrame = 0
 let ws = null
 
@@ -59,13 +96,24 @@ function resize() {
 }
 
 function buildTrails() {
-  // Group trailPoints by user_id → { user_id, name, points }
+  // Group livePoints by user_id → { user_id, name, points }
   const map = new Map()
-  for (const p of worldStore.trailPoints) {
+  for (const p of worldStore.livePoints) {
     if (!map.has(p.user_id)) {
       map.set(p.user_id, { user_id: p.user_id, name: p.user_name || '', points: [] })
     }
-    map.get(p.user_id).points.push({ x: p.x, y: p.y })
+    map.get(p.user_id).points.push({ x: p.x, y: p.y, ts: p.ts })
+  }
+  return Array.from(map.values())
+}
+
+function buildTrailsFromPoints(points: ReplayPoint[]) {
+  const map = new Map()
+  for (const p of points) {
+    if (!map.has(p.user_id)) {
+      map.set(p.user_id, { user_id: p.user_id, name: p.user_name || '', points: [] })
+    }
+    map.get(p.user_id).points.push({ x: p.x, y: p.y, ts: p.ts })
   }
   return Array.from(map.values())
 }
@@ -89,17 +137,36 @@ defineExpose({ focusUser })
 function render() {
   if (!canvasRef.value) return
   const ctx = canvasRef.value.getContext('2d')
-  renderFrame(
-    ctx, vp,
-    worldStore.onlineUsers,
-    buildTrails(),
-    [],
-    [],
-    props.ownerId ?? crawlerStore.userId,
-    hoveredUserId.value,
-    { layer: uiStore.layerMode, showEvents: false },
-    frame.value
-  )
+  const users = worldStore.onlineUsers
+
+  if (worldStore.mode === 'replay') {
+    // Replay mode: render from visiblePoints
+    const trails = buildTrailsFromPoints(replay.visiblePoints.value)
+    renderFrame(
+      ctx, vp,
+      users,
+      trails,
+      [],
+      null,
+      hoveredUserId.value,
+      { layer: uiStore.layerMode, mode: 'replay' },
+      frame.value,
+      replay.currentTime.value || undefined
+    )
+  } else {
+    // Live mode: render from livePoints (history + realtime)
+    const trails = buildTrails()
+    renderFrame(
+      ctx, vp,
+      users,
+      trails,
+      [],
+      null,
+      hoveredUserId.value,
+      { layer: uiStore.layerMode, mode: 'live', hideHistory: worldStore.hideHistory },
+      frame.value
+    )
+  }
 }
 
 function loop() {
@@ -126,6 +193,31 @@ function connectWs() {
   ws.onclose = () => {
     setTimeout(connectWs, 3000)
   }
+}
+
+async function onReplayConfirm(window: '1h' | '24h' | '7d') {
+  // Disconnect WebSocket
+  if (ws) { ws.close(); ws = null }
+  // Enter replay mode
+  worldStore.enterReplayMode()
+  // Load replay data
+  await replay.loadReplay(window)
+  showReplayModal.value = false
+}
+
+async function exitReplay() {
+  replay.clear()
+  worldStore.exitReplayMode()
+  worldStore.loading = true
+  await worldStore.loadGlobalHistory()
+  connectWs()
+}
+
+function onRangeSelected(window: string) {
+  // User picked a different time window from ReplayBar
+  if (ws) { ws.close(); ws = null }
+  replay.clear()
+  replay.loadReplay(window as '1h' | '24h' | '7d')
 }
 
 function onWheel(e) {
@@ -196,10 +288,15 @@ function zoomOut() {
   render()
 }
 
-onMounted(() => {
+watch(() => replay.currentTime.value, () => {
+  render()
+})
+
+onMounted(async () => {
   resize()
   window.addEventListener('resize', resize)
   loop()
+  await worldStore.loadGlobalHistory()
   connectWs()
 })
 
@@ -216,6 +313,7 @@ onUnmounted(() => {
   height: 100%;
   position: relative;
   cursor: grab;
+  overflow: visible;
 }
 .world-map-wrap:active { cursor: grabbing; }
 .world-canvas {
@@ -257,4 +355,27 @@ onUnmounted(() => {
   padding: 2px 8px;
   border-radius: 99px;
 }
+.loading-overlay {
+  position: absolute; inset: 0;
+  background: rgba(255,251,245,0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+.loading-spinner {
+  width: 40px; height: 40px;
+  border: 3px solid rgba(232,98,58,0.2);
+  border-top-color: #E8623A;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.replay-bar-overlay {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  z-index: 100;
+}
+
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

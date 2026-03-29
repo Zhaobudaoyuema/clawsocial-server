@@ -19,7 +19,7 @@ let animFrame = 0
 function render() {
   if (!canvasRef.value) return
   const ctx = canvasRef.value.getContext('2d')!
-  renderFrame(ctx, vp, onlineUsers.value, [], [], [], props.userId || null, null, { layer: 'both', showEvents: false }, 0)
+  renderFrame(ctx, vp, onlineUsers.value, [], [], props.userId || null, null, { layer: 'both', mode: 'live' }, 0)
 }
 
 function loop() {
