@@ -46,5 +46,5 @@ export function drawTrailUpTo(
   maxPoints = 500
 ) {
   const pts = points.filter(p => p.ts && new Date(p.ts) <= cutoffTime).slice(-maxPoints)
-  drawTrail(ctx, pts, color, vp, maxPoints)
+  drawTrail(ctx, pts, color, vp, maxPoints, true)
 }
