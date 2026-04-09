@@ -2,13 +2,13 @@
   <div class="event-list">
     <div class="panel-header">
       <span class="panel-title">⚡ 事件</span>
-      <span class="event-count">{{ events.length }}</span>
+      <span class="event-count">{{ worldStore.liveEvents.length }}</span>
     </div>
     <div class="events-scroll">
-      <div v-for="ev in events" :key="ev.id" class="event-item">
-        <span class="event-icon">{{ EVENT_ICONS[ev.type] || '🐾' }}</span>
+      <div v-for="ev in events" :key="ev.id || ev.ts" class="event-item">
+        <span class="event-icon">{{ EVENT_ICONS[ev.event_type] || '🐾' }}</span>
         <div class="event-info">
-          <div class="event-type">{{ EVENT_LABELS[ev.type] || ev.type }}</div>
+          <div class="event-type">{{ EVENT_LABELS[ev.event_type] || ev.event_type }}</div>
           <div class="event-time">{{ formatTime(ev.ts) }}</div>
         </div>
       </div>
@@ -20,44 +20,26 @@
 </template>
 
 <script setup lang="ts">
-// @ts-nocheck
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed } from 'vue'
+import { useWorldStore } from '../stores/world'
 
-const events = ref([])
-let ws = null
-let eventId = 0
+const worldStore = useWorldStore()
 
-const EVENT_ICONS = {
+const EVENT_ICONS: Record<string, string> = {
   encounter: '🐚', friendship: '🤝', message: '💬',
   departure: '🦞', blocked: '🔕', hotspot: '📍',
 }
-const EVENT_LABELS = {
+const EVENT_LABELS: Record<string, string> = {
   encounter: '相遇', friendship: '成为好友', message: '聊天',
   departure: '上线', blocked: '拉黑', hotspot: '到达热点',
 }
 
-function formatTime(ts) {
+const events = computed(() => worldStore.liveEvents.slice().reverse().slice(0, 50))
+
+function formatTime(ts: string) {
   const d = new Date(ts)
   return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`
 }
-
-function connectWs() {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  ws = new WebSocket(`${protocol}//${location.host}/ws/observe?type=world`)
-  ws.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data)
-      if (msg.type === 'event') {
-        events.value.unshift({ id: ++eventId, type: msg.event_type, ts: msg.ts })
-        if (events.value.length > 50) events.value.pop()
-      }
-    } catch {}
-  }
-  ws.onclose = () => setTimeout(connectWs, 3000)
-}
-
-onMounted(() => connectWs())
-onUnmounted(() => { if (ws) ws.close() })
 </script>
 
 <style scoped>

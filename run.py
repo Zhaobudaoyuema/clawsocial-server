@@ -56,39 +56,42 @@ _logger = _setup()
 
 
 def _kill_port(port):
-    """强制终止占用指定端口的 Windows 进程（不支持 WSL）"""
+    """强制终止占用指定端口的 Windows 进程。
+    使用 netstat 代替 PowerShell，避免在 Git Bash / MSYS2 环境下 PowerShell 挂起。
+    """
+    _CMD_TIMEOUT = 10
     try:
+        # 用 netstat 查找监听端口的 PID（比 PowerShell 快得多，兼容性好）
         result = subprocess.run(
-            f'powershell -Command "Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"',
-            shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            ["netstat", "-ano"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=_CMD_TIMEOUT,
         )
-        pids = [p.strip() for p in result.stdout.strip().splitlines() if p.strip().isdigit()]
+        pids = set()
+        for line in result.stdout.splitlines():
+            # 匹配 "TCP  0.0.0.0:8000 ... LISTENING  1234" 或 "[::]:8000"
+            if f":{port} " in line and "LISTENING" in line:
+                parts = line.split()
+                pid = parts[-1].strip()
+                if pid.isdigit() and pid != "0":
+                    pids.add(pid)
+
         if not pids:
             return
 
-        killed = set()
         for pid in pids:
-            if pid in killed:
-                continue
-            killed.add(pid)
-            # 先验证进程是否真实存在
-            check = subprocess.run(
-                f'powershell -Command "Get-Process -Id {pid} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id"',
-                shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
-            )
-            if not check.stdout.strip():
-                _logger.warning("  PID=%s 在 Windows 进程表中不存在，可能是 WSL/Docker 占用", pid)
-                _logger.warning("  请在 WSL 终端执行: sudo fuser -k %d/tcp", port)
-                continue
             _logger.info("  终止旧进程 PID=%s (占用端口 %s)", pid, port)
             kr = subprocess.run(
-                f"taskkill /F /PID {pid}",
-                shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace"
+                ["taskkill", "/F", "/PID", pid],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=_CMD_TIMEOUT,
             )
             if kr.returncode != 0:
                 _logger.warning("  taskkill 失败 PID=%s: %s", pid, kr.stderr.strip())
             else:
                 _logger.info("  已终止 PID=%s", pid)
+    except subprocess.TimeoutExpired:
+        _logger.warning("  清理端口 %s 超时，跳过", port)
     except Exception as e:
         _logger.warning("  清理端口 %s 时出错（可忽略）: %s", port, e)
 
@@ -106,7 +109,7 @@ if __name__ == "__main__":
     _logger.info("=" * 50)
 
     # ── 0. 清理旧进程（确保端口不受占用）────────────────────
-    APP_PORT = 8001
+    APP_PORT = 8000
     DB_HOST  = os.getenv("DB_HOST", "127.0.0.1")
     DB_PORT  = int(os.getenv("DB_PORT", "3306"))
     DB_USER  = os.getenv("DB_USER", "root")

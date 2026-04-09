@@ -1,9 +1,12 @@
 """
 WebSocket unified endpoint for human-facing clients.
 
-/ws/observe           → world mode (anonymous, public)
-/ws/observe?type=world→ world mode (explicit)
-/ws/observe?type=crawler&token=xxx → personal mode (auth required)
+路由: /ws/observe
+
+  不带 token  → 匿名全局观测，snapshot 含所有用户位置，无 isMe 标记
+  带 token   → 认证观测，snapshot 中对应条目标记 isMe=true
+
+推送频率: 每 2 秒一次（snapshot + 新增事件）
 """
 
 import asyncio
@@ -23,8 +26,8 @@ router = APIRouter()
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_users_with_name(all_states):
-    """Query DB for user names, then build user list with name attached."""
+def _get_users_with_name(all_states, my_user_id=None):
+    """Query DB for user names, then build user list with isMe flag."""
     if not all_states:
         return []
     user_ids = [s.user_id for s in all_states]
@@ -35,27 +38,78 @@ def _get_users_with_name(all_states):
     finally:
         db.close()
     return [
-        {"user_id": s.user_id, "name": name_map.get(s.user_id, ""), "x": s.x, "y": s.y}
+        {
+            "user_id": s.user_id,
+            "name": name_map.get(s.user_id, ""),
+            "x": s.x,
+            "y": s.y,
+            "isMe": s.user_id == my_user_id if my_user_id is not None else False,
+        }
         for s in all_states
     ]
 
 
-def _auth_by_token(token: str, db):
-    """
-    Resolve a token to a (user_id, user_name, is_owner, is_share, speed) tuple.
-    Returns None if the token is invalid.
-    """
-    user = db.query(User).filter(User.token == token).first()
-    if user:
-        return (user.id, user.name, True, False, 1)
+def _query_recent_events(last_event_ts: datetime) -> list[dict]:
+    """Query social events newer than last_event_ts, with user names."""
+    db = SessionLocal()
+    try:
+        events = (
+            db.query(SocialEvent)
+            .filter(SocialEvent.created_at > last_event_ts)
+            .order_by(SocialEvent.created_at.asc())
+            .all()
+        )
+        if not events:
+            return []
 
-    st = db.query(ShareToken).filter(ShareToken.token == token).first()
-    if not st:
+        # 批量查询用户名
+        all_user_ids = set([e.user_id for e in events])
+        all_user_ids.update(e.other_user_id for e in events if e.other_user_id)
+        name_rows = db.query(User.id, User.name).filter(User.id.in_(all_user_ids)).all()
+        name_map = {uid: name for uid, name in name_rows}
+
+        result = []
+        for e in events:
+            item = {
+                "id": e.id,
+                "user_id": e.user_id,
+                "user_name": name_map.get(e.user_id, ""),
+                "other_user_id": e.other_user_id,
+                "event_type": e.event_type,
+                "x": e.x or 0,
+                "y": e.y or 0,
+                "ts": e.created_at.isoformat(),
+            }
+            if e.event_metadata:
+                try:
+                    import json
+                    item["metadata"] = json.loads(e.event_metadata)
+                except Exception:
+                    pass
+            result.append(item)
+        return result
+    finally:
+        db.close()
+
+
+def _resolve_token(token: str):
+    """Resolve token to user_id, or None if invalid/empty."""
+    if not token:
         return None
-    user = db.query(User).filter(User.id == st.crawfish_id).first()
-    if not user:
+    token = token.strip()
+    if not token:
         return None
-    return (user.id, user.name, False, True, st.speed)
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.token == token).first()
+        if user:
+            return user.id
+        st = db.query(ShareToken).filter(ShareToken.token == token).first()
+        if st:
+            return st.crawfish_id
+        return None
+    finally:
+        db.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,24 +117,12 @@ def _auth_by_token(token: str, db):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.websocket("/ws/observe")
-async def ws_observe(
-    ws: WebSocket,
-    type: str = Query(default="world"),
-    token: str = Query(default=""),
-):
+async def ws_observe(ws: WebSocket, token: str = Query(default="")):
     """
-    Unified WebSocket endpoint.
+    统一观测通道。
 
-    World mode (type=world, default):
-        Anonymous global world snapshot. No auth required.
-        Pushes every 2 seconds:
-            {"type":"snapshot", "ts":"...", "online_count":N, "users":[...]}
-
-    Crawler mode (type=crawler):
-        Token-authenticated personal crawfish stream.
-        Pushes every 5 seconds:
-            {"type":"crawler", "ts":"...", "user_id":N, "x":N, "y":N,
-             "online_count":N, "events":[...]}
+    不带 token → 匿名全局观测
+    带 token   → 认证观测，snapshot 含 isMe 标记
     """
     await ws.accept()
 
@@ -89,111 +131,44 @@ async def ws_observe(
         await ws.close(code=1011, reason="World not initialized")
         return
 
-    # ── World mode ──────────────────────────────────────────────────────────
-    if type == "world":
+    # 解析 token（失败不拒绝连接，只是没有 isMe 标记）
+    my_user_id = _resolve_token(token)
 
-        async def push_loop():
-            while True:
-                await asyncio.sleep(2)
-                try:
-                    all_users = await asyncio.to_thread(world_state.get_all)
-                    users_with_name = _get_users_with_name(all_users)
-                    await ws.send_json({
-                        "type": "snapshot",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "online_count": len(all_users),
-                        "users": users_with_name,
-                    })
-                except WebSocketDisconnect:
-                    break
-                except Exception as e:
-                    logger.warning(f"World observe push failed: {e}")
-                    break
+    async def push_loop():
+        last_event_ts = datetime(1970, 1, 1, tzinfo=timezone.utc)  # 初始化为极早时间
 
-        try:
-            await push_loop()
-        except WebSocketDisconnect:
-            pass
-        return
+        while True:
+            await asyncio.sleep(2)
+            try:
+                # 1. 全局位置快照
+                all_users = await asyncio.to_thread(world_state.get_all)
+                users_with_name = _get_users_with_name(all_users, my_user_id)
 
-    # ── Crawler mode ────────────────────────────────────────────────────────
-    if type == "crawler":
-        token = token.strip()
-        if not token:
-            await ws.close(code=4001, reason="Token required")
-            return
+                # 2. 查询新增事件
+                now = datetime.now(timezone.utc)
+                new_events = _query_recent_events(last_event_ts)
+                if new_events:
+                    last_event_ts = now  # 更新游标
 
-        db = SessionLocal()
-        try:
-            auth = _auth_by_token(token, db)
-            if auth is None:
-                await ws.close(code=4001, reason="Invalid token")
-                return
-            user_id, user_name, is_owner, is_share, speed = auth
-        finally:
-            db.close()
+                # 3. 推送
+                payload = {
+                    "type": "snapshot",
+                    "ts": now.isoformat(),
+                    "online_count": len(all_users),
+                    "users": users_with_name,
+                }
+                if new_events:
+                    payload["events"] = new_events
 
-        await ws.send_json({
-            "type": "ready",
-            "user": {"id": user_id, "name": user_name},
-            "is_owner": is_owner,
-            "is_share": is_share,
-        })
+                await ws.send_json(payload)
 
-        async def push_loop():
-            while True:
-                await asyncio.sleep(5)
-                try:
-                    all_users = await asyncio.to_thread(world_state.get_all)
-                    my_pos = next((u for u in all_users if u.user_id == user_id), None)
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.warning(f"[WS] World observe push failed: {e}")
+                break
 
-                    db: Session = SessionLocal()
-                    try:
-                        cutoff = datetime.now(timezone.utc).replace(
-                            hour=0, minute=0, second=0, microsecond=0
-                        )
-                        events = (
-                            db.query(SocialEvent)
-                            .filter(
-                                SocialEvent.user_id == user_id,
-                                SocialEvent.created_at >= cutoff,
-                            )
-                            .order_by(SocialEvent.created_at.desc())
-                            .limit(20)
-                            .all()
-                        )
-                        event_list = [
-                            {
-                                "type": e.event_type,
-                                "other_user_id": e.other_user_id,
-                                "x": e.x,
-                                "y": e.y,
-                                "ts": e.created_at.isoformat(),
-                            }
-                            for e in events
-                        ]
-                    finally:
-                        db.close()
-
-                    await ws.send_json({
-                        "type": "crawler",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                        "user_id": user_id,
-                        "x": my_pos.x if my_pos else 0,
-                        "y": my_pos.y if my_pos else 0,
-                        "online_count": len(all_users),
-                        "events": event_list,
-                    })
-                except WebSocketDisconnect:
-                    break
-                except Exception as e:
-                    logger.debug(f"Crawler observe push error: {e}")
-
-        try:
-            await push_loop()
-        except WebSocketDisconnect:
-            pass
-        return
-
-    # Unknown type — reject gracefully
-    await ws.close(code=4002, reason="Unknown type")
+    try:
+        await push_loop()
+    except WebSocketDisconnect:
+        pass

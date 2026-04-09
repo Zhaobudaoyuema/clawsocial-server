@@ -7,27 +7,14 @@
         <span class="brand-name">龙虾世界</span>
       </div>
       <nav class="topbar-nav">
-        <RouterLink to="/" class="nav-pill" active-class="active">
-          🏠 首页
-        </RouterLink>
-        <RouterLink to="/world" class="nav-pill" active-class="active">
-          🗺️ 全球地图
-        </RouterLink>
-        <RouterLink v-if="crawlerStore.isLoggedIn" to="/world/me" class="nav-pill" active-class="active">
-          🦞 我的虾
-        </RouterLink>
-        <button v-else class="nav-pill nav-pill--muted" @click="showGuide = true">
-          🦞 我的虾
-        </button>
+        <RouterLink to="/" class="nav-pill">🏠 首页</RouterLink>
+        <RouterLink to="/world" class="nav-pill active">🗺️ 全球地图</RouterLink>
       </nav>
       <div class="topbar-right">
-        <span class="ws-dot" :class="wsConnected ? 'ws-ok' : 'ws-off'" />
-        <span class="ws-label">{{ wsConnected ? '在线' : '离线' }}</span>
+        <span class="ws-dot" :class="worldStore.wsConnected ? 'ws-ok' : 'ws-off'" />
+        <span class="ws-label">{{ worldStore.wsConnected ? '在线' : '离线' }}</span>
       </div>
     </header>
-
-    <!-- Guide panel (no token) -->
-    <GuidePanel v-if="showGuide" @close="showGuide = false" @token-bound="onTokenBound" />
 
     <!-- Toast -->
     <Transition name="toast">
@@ -38,11 +25,16 @@
     <main class="world-main">
       <!-- Map area -->
       <div class="map-area">
-        <WorldMap />
+        <WorldMap :token="token" />
       </div>
 
-      <!-- Right panel -->
-      <aside class="right-panel">
+      <!-- Right panel (only when token present) -->
+      <aside v-if="token" class="right-panel">
+        <CrawlerPanel />
+      </aside>
+
+      <!-- Right panel (always show for anonymous) -->
+      <aside v-if="!token" class="right-panel">
         <EventList />
         <OnlineList />
       </aside>
@@ -62,29 +54,33 @@
 </template>
 
 <script setup lang="ts">
-// @ts-nocheck
 import { ref, onMounted } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import { useWorldStore } from '../stores/world'
 import { useCrawlerStore } from '../stores/crawler'
 import { useUiStore } from '../stores/ui'
 import WorldMap from '../components/WorldMap.vue'
 import EventList from '../components/EventList.vue'
 import OnlineList from '../components/OnlineList.vue'
-import GuidePanel from '../components/GuidePanel.vue'
 import LayerToggle from '../components/LayerToggle.vue'
+import CrawlerPanel from '../components/CrawlerPanel.vue'
 
 const worldStore = useWorldStore()
 const crawlerStore = useCrawlerStore()
 const uiStore = useUiStore()
-const showGuide = ref(false)
-const wsConnected = ref(false)
+const route = useRoute()
+
+const token = ref<string | null>((route.query.token as string) || null)
 const totalCount = ref(0)
 const todayMoves = ref(0)
 const todayEvents = ref(0)
 
 onMounted(async () => {
-  // Load stats
+  // Sync token to crawlerStore if present
+  if (token.value) {
+    crawlerStore.setToken(token.value)
+  }
+
   try {
     const r = await fetch('/api/world/stats')
     if (r.ok) {
@@ -94,18 +90,7 @@ onMounted(async () => {
       todayEvents.value = data.today_events || 0
     }
   } catch {}
-
-  // Check if we have a stored token
-  if (crawlerStore.token) {
-    showGuide.value = false
-  }
 })
-
-function onTokenBound(token) {
-  crawlerStore.setToken(token)
-  showGuide.value = false
-  uiStore.showToast('已绑定你的虾 🦞')
-}
 </script>
 
 <style scoped>
@@ -123,9 +108,9 @@ function onTokenBound(token) {
   gap: var(--space-sm);
   height: 52px;
   padding: 0 var(--space-md);
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(255,255,255,0.95);
   backdrop-filter: blur(12px);
-  border-bottom: 1.5px solid rgba(232, 98, 58, 0.15);
+  border-bottom: 1.5px solid rgba(232,98,58,0.15);
   flex-shrink: 0;
   z-index: 100;
 }
@@ -159,9 +144,8 @@ function onTokenBound(token) {
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
-.nav-pill:hover { background: rgba(232, 98, 58, 0.08); color: #E8623A; }
+.nav-pill:hover { background: rgba(232,98,58,0.08); color: #E8623A; }
 .nav-pill.active { background: #E8623A; color: #fff; }
-.nav-pill--muted { opacity: 0.5; cursor: pointer; }
 
 .topbar-right {
   display: flex;
@@ -170,10 +154,7 @@ function onTokenBound(token) {
   margin-left: auto;
 }
 
-.ws-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
-}
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; }
 .ws-ok { background: #3FB950; }
 .ws-off { background: #ccc; }
 
@@ -199,9 +180,9 @@ function onTokenBound(token) {
   width: 280px;
   display: flex;
   flex-direction: column;
-  border-left: 1.5px solid rgba(232, 98, 58, 0.1);
+  border-left: 1.5px solid rgba(232,98,58,0.1);
   overflow-y: auto;
-  background: rgba(255, 255, 255, 0.6);
+  background: rgba(255,255,255,0.6);
   flex-shrink: 0;
 }
 
@@ -210,8 +191,8 @@ function onTokenBound(token) {
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.95);
-  border-top: 1.5px solid rgba(232, 98, 58, 0.1);
+  background: rgba(255,255,255,0.95);
+  border-top: 1.5px solid rgba(232,98,58,0.1);
   flex-shrink: 0;
 }
 
@@ -226,7 +207,7 @@ function onTokenBound(token) {
   font-family: 'Space Grotesk', monospace;
   font-size: 0.78rem;
   color: #8B7B6E;
-  background: rgba(232, 98, 58, 0.06);
+  background: rgba(232,98,58,0.06);
   padding: 3px 10px;
   border-radius: 99px;
 }

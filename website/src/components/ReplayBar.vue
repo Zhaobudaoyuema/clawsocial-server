@@ -11,30 +11,34 @@
 
     <!-- Slider -->
     <div class="slider-wrap">
-      <span class="time-label">{{ formatTs(rangeStart) }}</span>
+      <span class="time-label">{{ fmtTime(store.rangeStart) }}</span>
       <input
         type="range"
         class="replay-slider"
-        :min="rangeStart ? rangeStart.getTime() : 0"
-        :max="rangeEnd ? rangeEnd.getTime() : 1"
-        :value="currentTime ? currentTime.getTime() : 0"
+        :min="sliderMin"
+        :max="sliderMax"
+        :value="sliderValue"
         @input="onSliderInput"
       />
-      <span class="time-label">{{ formatTs(rangeEnd) }}</span>
+      <span class="time-label">{{ fmtTime(store.rangeEnd) }}</span>
     </div>
+
+    <!-- Current time display -->
+    <div class="current-time">{{ fmtTime(store.currentTime) }}</div>
 
     <!-- Playback controls -->
     <div class="playback-controls">
+      <button class="ctrl-btn" @click="store.reset()" title="重置到开始">⏮</button>
       <button class="play-btn" @click="togglePlay">
-        {{ replaying ? '⏸' : '▶' }}
+        {{ store.replaying ? '⏸' : '▶' }}
       </button>
     </div>
 
     <!-- Speed buttons -->
     <div class="speed-btns">
       <button v-for="s in speeds" :key="s"
-        class="speed-btn" :class="{ active: playbackSpeed === s }"
-        @click="setSpeed(s)">
+        class="speed-btn" :class="{ active: store.playbackSpeed === s }"
+        @click="store.setSpeed(s)">
         {{ s }}x
       </button>
     </div>
@@ -42,15 +46,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { useReplay } from '../composables/useReplay'
+import { ref, computed } from 'vue'
+import { useReplayStore } from '../stores/replay'
 
-const {
-  replaying, playbackSpeed, currentTime, rangeStart, rangeEnd,
-  play, pause, seekTo, setSpeed, loadReplay
-} = useReplay()
+const store = useReplayStore()
 
 const emit = defineEmits<{ rangeSelected: [window: string] }>()
+
+const sliderMin = computed<number>(() => store.rangeStart ? store.rangeStart.getTime() : 0)
+const sliderMax = computed<number>(() => store.rangeEnd ? store.rangeEnd.getTime() : 1)
+const sliderValue = computed<number>(() => store.currentTime ? store.currentTime.getTime() : 0)
 
 const timeRanges = [
   { key: '1h', label: '1h' },
@@ -58,16 +63,16 @@ const timeRanges = [
   { key: '7d', label: '7d' },
 ]
 const speeds = [1, 2, 5, 10]
-const activeRange = ref('7d')
+const activeRange = ref('24h')
 
 function togglePlay() {
-  if (replaying.value) pause()
-  else play()
+  if (store.replaying) store.pause()
+  else store.play()
 }
 
 function onSliderInput(e: Event) {
   const val = Number((e.target as HTMLInputElement).value)
-  seekTo(new Date(val))
+  store.seekTo(new Date(val))
 }
 
 function selectRange(key: string) {
@@ -75,13 +80,11 @@ function selectRange(key: string) {
   emit('rangeSelected', key)
 }
 
-function formatTs(d: Date | null): string {
+function fmtTime(d: Date | null | undefined): string {
   if (!d) return '—'
-  return `${d.getMonth()+1}/${d.getDate()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  return `${d.getMonth()+1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
-
-// Expose for parent
-defineExpose({ loadReplay })
 </script>
 
 <style scoped>
@@ -90,80 +93,68 @@ defineExpose({ loadReplay })
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.97);
-  border-top: 1.5px solid rgba(232, 98, 58, 0.12);
+  background: rgba(255,255,255,0.97);
+  border-top: 1.5px solid rgba(232,98,58,0.12);
 }
 .time-btns { display: flex; gap: 4px; }
 .time-btn {
-  padding: 3px 10px;
-  border-radius: 8px;
-  border: 1.5px solid rgba(232, 98, 58, 0.2);
-  background: none;
-  color: #8B7B6E;
-  font-family: 'Space Grotesk', monospace;
-  font-size: 0.78rem;
-  cursor: pointer;
-  transition: all 0.15s;
+  padding: 3px 10px; border-radius: 8px;
+  border: 1.5px solid rgba(232,98,58,0.2); background: none;
+  color: #8B7B6E; font-family: 'Space Grotesk', monospace;
+  font-size: 0.78rem; cursor: pointer; transition: all 0.15s;
 }
 .time-btn.active { background: #E8623A; color: #fff; border-color: #E8623A; }
 .time-btn:hover:not(.active) { border-color: #E8623A; color: #E8623A; }
 
-.slider-wrap {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+.slider-wrap { flex: 1; display: flex; align-items: center; gap: 8px; }
 .replay-slider {
-  flex: 1;
-  -webkit-appearance: none;
-  height: 4px;
-  border-radius: 2px;
-  background: rgba(232, 98, 58, 0.2);
-  outline: none;
+  flex: 1; -webkit-appearance: none; height: 4px;
+  border-radius: 2px; background: rgba(232,98,58,0.2); outline: none;
 }
 .replay-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #E8623A;
-  cursor: pointer;
+  -webkit-appearance: none; width: 14px; height: 14px;
+  border-radius: 50%; background: #E8623A; cursor: pointer;
 }
 .time-label {
-  font-family: 'Space Grotesk', monospace;
-  font-size: 0.7rem;
-  color: #8B7B6E;
-  white-space: nowrap;
+  font-family: 'Space Grotesk', monospace; font-size: 0.7rem;
+  color: #8B7B6E; white-space: nowrap;
 }
 
-.playback-controls { display: flex; }
+.playback-controls { display: flex; gap: 4px; }
+.ctrl-btn {
+  width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid rgba(232,98,58,0.3);
+  background: rgba(255,255,255,0.9); color: #E8623A; font-size: 0.75rem;
+  cursor: pointer; display: flex; align-items: center;
+  justify-content: center; transition: all 0.1s;
+}
+.ctrl-btn:hover { background: rgba(232,98,58,0.1); }
 .play-btn {
-  width: 32px; height: 32px;
-  border-radius: 50%;
-  border: none;
-  background: #E8623A;
-  color: #fff;
-  font-size: 0.85rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform 0.1s;
+  width: 32px; height: 32px; border-radius: 50%; border: none;
+  background: #E8623A; color: #fff; font-size: 0.85rem;
+  cursor: pointer; display: flex; align-items: center;
+  justify-content: center; transition: transform 0.1s;
 }
 .play-btn:hover { transform: scale(1.1); }
 
 .speed-btns { display: flex; gap: 2px; }
 .speed-btn {
-  padding: 3px 8px;
-  border-radius: 6px;
-  border: 1px solid rgba(232, 98, 58, 0.2);
-  background: none;
-  color: #8B7B6E;
+  padding: 3px 8px; border-radius: 6px;
+  border: 1px solid rgba(232,98,58,0.2); background: none;
+  color: #8B7B6E; font-family: 'Space Grotesk', monospace;
+  font-size: 0.72rem; cursor: pointer; transition: all 0.15s;
+}
+.speed-btn.active { background: rgba(232,98,58,0.12); color: #E8623A; border-color: #E8623A; }
+
+.current-time {
   font-family: 'Space Grotesk', monospace;
   font-size: 0.72rem;
-  cursor: pointer;
-  transition: all 0.15s;
+  color: #e65100;
+  background: rgba(255,243,224,0.9);
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(230,81,0,0.15);
+  white-space: nowrap;
+  min-width: 120px;
+  text-align: center;
 }
-.speed-btn.active { background: rgba(232, 98, 58, 0.12); color: #E8623A; border-color: #E8623A; }
 </style>

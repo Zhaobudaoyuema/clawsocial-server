@@ -2,15 +2,23 @@ import { worldToCanvas } from './viewport'
 
 const LOBSTER_RED_HOVER = '#D4542B'
 const OWNER_GOLD = '#F4C430'
+const ME_CYAN = '#4ECDC4'
 
 // Desaturate an HSL color string by reducing saturation
 function desaturateColor(color: string): string {
   const match = color.match(/hsl\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)%?,\s*(\d+(?:\.\d+)?)%?\)/)
   if (!match) return color
   const h = parseFloat(match[1])
-  const s = Math.max(30, parseFloat(match[2]) * 0.4)  // reduce saturation to 40%, min 30
+  const s = Math.max(30, parseFloat(match[2]) * 0.4)
   const l = parseFloat(match[3])
   return `hsl(${h}, ${s}%, ${l}%)`
+}
+
+// isMe visual: gold pulse for self, cyan ring for related users
+function getBorderColor(isMe: boolean, isRelated: boolean): string {
+  if (isMe) return OWNER_GOLD
+  if (isRelated) return ME_CYAN
+  return ''
 }
 
 // Get crawfish color, desaturated when not live
@@ -58,15 +66,16 @@ export function drawDot(
   ctx.stroke()
 }
 
-// Draw crawfish as avatar (for zoomed-in view, level 5)
+// Draw crawfish as avatar (for zoomed-in view)
 export function drawAvatar(
   ctx: CanvasRenderingContext2D,
   wx: number, wy: number,
   name: string,
-  isOwner: boolean,
+  isMe: boolean,
+  isRelated: boolean,
   isHovered: boolean,
   vp: import('./viewport').Viewport,
-  frame: number = 0,  // for animation
+  frame: number = 0,
   isLive = true,
 ) {
   const pt = worldToCanvas(wx, wy, vp)
@@ -79,22 +88,22 @@ export function drawAvatar(
   ctx.fillStyle = bgColor
   ctx.fill()
 
-  // Owner gold ring with pulse
-  if (isOwner) {
-    const pulse = 1 + Math.sin(frame * 0.08) * 0.1
+  // isMe gold pulse / related cyan ring
+  const borderColor = getBorderColor(isMe, isRelated)
+  if (borderColor) {
+    const pulse = isMe ? (1 + Math.sin(frame * 0.08) * 0.1) : 1
     ctx.beginPath()
     ctx.arc(pt.x, pt.y, size + 4, 0, Math.PI * 2)
-    ctx.strokeStyle = OWNER_GOLD
-    ctx.lineWidth = 2.5 * pulse
+    ctx.strokeStyle = borderColor
+    ctx.lineWidth = (isMe ? 2.5 : 2) * pulse
     ctx.stroke()
   }
 
-  // Draw lobster SVG-like shape (simplified crab silhouette)
+  // Lobster silhouette (simplified)
   ctx.save()
   ctx.translate(pt.x - size * 0.7, pt.y - size * 0.7)
   ctx.scale(size / 28, size / 28)
 
-  // Simple lobster body (ellipse)
   ctx.beginPath()
   ctx.ellipse(10, 14, 7, 9, 0, 0, Math.PI * 2)
   ctx.fillStyle = '#fff'
@@ -102,7 +111,6 @@ export function drawAvatar(
   ctx.fill()
   ctx.globalAlpha = 1
 
-  // Claws
   ctx.beginPath()
   ctx.ellipse(2, 8, 4, 3, -0.5, 0, Math.PI * 2)
   ctx.ellipse(18, 8, 4, 3, 0.5, 0, Math.PI * 2)
@@ -126,15 +134,16 @@ export function drawCrawfish(
   ctx: CanvasRenderingContext2D,
   wx: number, wy: number,
   name: string,
-  isOwner: boolean,
+  isMe: boolean,
+  isRelated: boolean,
   isHovered: boolean,
   vp: import('./viewport').Viewport,
   frame: number = 0,
   isLive = true,
 ) {
-  const threshold = 0.08  // scale threshold for switching
+  const threshold = 0.08
   if (vp.scale >= threshold) {
-    drawAvatar(ctx, wx, wy, name, isOwner, isHovered, vp, frame, isLive)
+    drawAvatar(ctx, wx, wy, name, isMe, isRelated, isHovered, vp, frame, isLive)
   } else {
     drawDot(ctx, wx, wy, name, vp, isHovered, isLive)
   }

@@ -1,30 +1,31 @@
 <template>
   <div class="world-toolbar">
-    <!-- Replay mode: badge with exit button -->
-    <div v-if="mode === 'replay'" class="mode-badge replay-badge">
-      <span>🔄 回放模式</span>
-      <button class="exit-btn" @click="$emit('exit-replay')" title="退出回放">✕</button>
-    </div>
+    <!-- Replay mode: badge with exit button + filter -->
+    <template v-if="isReplay">
+      <div class="mode-badge replay-badge">
+        <span>🔄 回放模式</span>
+        <button class="exit-btn" @click="$emit('exit-replay')" title="退出回放">✕</button>
+      </div>
+      <button
+        v-if="hasToken"
+        class="tool-btn" :class="{ active: filterMyOnly }"
+        @click="toggleMyOnly"
+        title="只看我的虾"
+      >
+        🦞 我的虾
+      </button>
+    </template>
 
     <!-- Live mode toolbar -->
     <template v-else>
-      <!-- 只看实时 toggle -->
-      <button
-        class="tool-btn" :class="{ active: hideHistory }"
-        @click="onToggleHistory"
-        :title="hideHistory ? '显示历史轨迹' : '隐藏历史轨迹'"
-      >
-        {{ hideHistory ? '👁️ 实时' : '📜 全量' }}
-      </button>
-
       <!-- 进入回放 button -->
       <button class="tool-btn replay-btn" @click="$emit('enter-replay')">
         ⏪ 回放
       </button>
     </template>
 
-    <!-- Replay time clock (shows in replay mode) -->
-    <div v-if="mode === 'replay' && replayTime" class="replay-clock">
+    <!-- Replay time clock -->
+    <div v-if="isReplay && replayTime" class="replay-clock">
       {{ formatTime(replayTime) }}
     </div>
   </div>
@@ -33,23 +34,19 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useWorldStore } from '../stores/world'
+import { useReplayStore } from '../stores/replay'
 
 const worldStore = useWorldStore()
+const replayStore = useReplayStore()
 
-const mode = computed(() => worldStore.mode)
-const hideHistory = computed(() => worldStore.hideHistory)
+const isReplay = computed(() => replayStore.mode === 'replay')
+const hasToken = computed(() => !!worldStore.myUserId)
+const filterMyOnly = computed(() => replayStore.filterMyOnly)
 
-const props = defineProps<{
-  replayTime?: Date | null
-}>()
+defineProps<{ replayTime?: Date | null }>()
 
-const emit = defineEmits<{
-  'enter-replay': []
-  'exit-replay': []
-}>()
-
-function onToggleHistory() {
-  worldStore.setHideHistory(!worldStore.hideHistory)
+function toggleMyOnly() {
+  replayStore.setFilterMyOnly(!filterMyOnly.value)
 }
 
 function formatTime(d: Date): string {

@@ -58,226 +58,15 @@ def test_register_validation(client: TestClient):
         assert "错误" in r.text or "格式" in r.text
 
 
-# ─── Messages (require X-Token) ──────────────────────────────────────────────
-
-def test_messages_route_removed(client: TestClient):
-    """GET /messages 已删除（WS-only 化），应返回 404。"""
-    r = client.get("/messages")
-    assert r.status_code == 404
-
-
-def test_messages_route_removed_with_token(client: TestClient, token):
-    """GET /messages 已删除，有 token 也返回 404。"""
-    _id, tok = token
-    r = client.get("/messages", headers={"X-Token": tok})
-    assert r.status_code == 404
-
-
-def test_send_self(client: TestClient, token):
-    uid, tok = token
-    r = client.post(
-        "/send",
-        headers={"X-Token": tok},
-        json={"to_id": uid, "content": "no"},
-    )
-    assert r.status_code in (200, 400)
-    if r.status_code == 200:
-        assert "错误" in r.text or "自己" in r.text
-
-
-def test_send_to_nonexistent(client: TestClient, token):
-    _uid, tok = token
-    r = client.post(
-        "/send",
-        headers={"X-Token": tok},
-        json={"to_id": 99999, "content": "hi"},
-    )
-    assert r.status_code in (200, 404)
-    if r.status_code == 200:
-        assert "错误" in r.text or "用户" in r.text
-
-
-def test_send_ok_first_contact(client: TestClient, two_users):
-    """首次发送陌生人 → friend_request，DB 写入成功。"""
-    id_a, tok_a, id_b, tok_b = two_users
-    r = client.post(
-        "/send",
-        headers={"X-Token": tok_a},
-        json={"to_id": id_b, "content": "friend request"},
-    )
-    assert r.status_code == 200
-    assert len(r.text) > 0
-
-
-def test_send_reply_accepts_friendship(client: TestClient, two_users):
-    id_a, tok_a, id_b, tok_b = two_users
-    client.post("/send", headers={"X-Token": tok_a}, json={"to_id": id_b, "content": "hi"})
-    r = client.post("/send", headers={"X-Token": tok_b}, json={"to_id": id_a, "content": "hello"})
-    assert r.status_code == 200
-    assert len(r.text) > 0
-
-
-def test_send_file_ok(client: TestClient, two_users):
-    """发送带附件的消息。仅验证接口可调用且返回非 5xx。"""
-    id_a, tok_a, id_b, tok_b = two_users
-    r = client.post(
-        "/send/file",
-        headers={"X-Token": tok_a},
-        data={"to_id": str(id_b), "content": "see attachment"},
-        files={"file": ("test.txt", b"hello file content", "text/plain")},
-    )
-    assert r.status_code == 200
-    # 成功或业务错误（如限流、好友申请已发出）均返回 200
-    assert "请求格式错误" not in r.text
-
-
-# ─── Users & Friends ────────────────────────────────────────────────────────
-
-def test_users_discover_no_token(client: TestClient):
-    r = client.get("/users")
-    assert r.status_code in (200, 422)
-    if r.status_code == 200:
-        assert "请求格式错误" in r.text or "错误" in r.text
-
-
-def test_users_discover_ok(client: TestClient, token):
-    _id, tok = token
-    r = client.get("/users", headers={"X-Token": tok})
-    assert r.status_code == 200
-    # may be empty or include self-excluded list
-    assert "text/plain" in r.headers.get("content-type", "")
-
-
-def test_users_get_me(client: TestClient, token):
-    uid, tok = token
-    r = client.get(f"/users/{uid}", headers={"X-Token": tok})
-    assert r.status_code == 200
-
-
-def test_users_get_nonexistent(client: TestClient, token):
-    _uid, tok = token
-    r = client.get("/users/99999", headers={"X-Token": tok})
-    assert r.status_code in (200, 404)
-    if r.status_code == 200:
-        assert "错误" in r.text or "用户" in r.text
-
-
-def test_friends_empty(client: TestClient, token):
-    _id, tok = token
-    r = client.get("/friends", headers={"X-Token": tok})
-    assert r.status_code == 200
-    # Empty list: "暂无好友" or list with "好友"
-    assert len(r.text) > 0
-
-
-def test_friends_after_accept(client: TestClient, two_users):
-    """A 发申请 → B 回复 → 验证两次发送均成功。状态码 200 即表示消息已写入 DB。"""
-    id_a, tok_a, id_b, tok_b = two_users
-    r1 = client.post("/send", headers={"X-Token": tok_a}, json={"to_id": id_b, "content": "hi"})
-    assert r1.status_code == 200
-
-    r2 = client.post("/send", headers={"X-Token": tok_b}, json={"to_id": id_a, "content": "ok"})
-    assert r2.status_code == 200
-
-
-def test_me_patch_status(client: TestClient, token):
-    _id, tok = token
-    r = client.patch("/me", headers={"X-Token": tok}, json={"status": "friends_only"})
-    assert r.status_code == 200
-    assert len(r.text) > 0
-
-
-def test_block_not_friend(client: TestClient, two_users):
-    id_a, tok_a, id_b, _ = two_users
-    r = client.post(f"/block/{id_b}", headers={"X-Token": tok_a})
-    assert r.status_code in (200, 403)
-    if r.status_code == 200:
-        assert "错误" in r.text or "拉黑" in r.text
-
-
-def test_block_and_unblock(client: TestClient, two_users):
-    id_a, tok_a, id_b, tok_b = two_users
-    client.post("/send", headers={"X-Token": tok_a}, json={"to_id": id_b, "content": "hi"})
-    client.post("/send", headers={"X-Token": tok_b}, json={"to_id": id_a, "content": "ok"})
-    r = client.post(f"/block/{id_b}", headers={"X-Token": tok_a})
-    assert r.status_code == 200
-    assert len(r.text) > 0
-    r2 = client.post(f"/unblock/{id_b}", headers={"X-Token": tok_a})
-    assert r2.status_code == 200
-    assert len(r2.text) > 0
-
-
-# ─── Homepage ────────────────────────────────────────────────────────────────
-
-def test_homepage_upload_and_view(client: TestClient, token):
-    """上传主页并访问。"""
-    uid, tok = token
-    html = "<html><body><h1>Hello</h1></body></html>"
-    r = client.put(
-        "/homepage",
-        headers={"X-Token": tok},
-        content=html,
-    )
-    assert r.status_code == 200
-    assert "访问地址" in r.text
-    r2 = client.get(f"/homepage/{uid}")
-    assert r2.status_code == 200
-    assert "Hello" in r2.text
-
-
-def test_homepage_empty(client: TestClient, token):
-    """未设置主页时返回默认空页。"""
-    uid, tok = token
-    r = client.get(f"/homepage/{uid}")
-    assert r.status_code == 200
-    assert "尚未设置主页" in r.text
-
-
-def test_homepage_upload_multipart(client: TestClient, token):
-    """multipart 上传 HTML 文件。"""
-    uid, tok = token
-    html = "<html><body><p>My Page</p></body></html>"
-    r = client.put(
-        "/homepage",
-        headers={"X-Token": tok},
-        data={},
-        files={"file": ("index.html", html.encode("utf-8"), "text/html")},
-    )
-    assert r.status_code == 200
-    r2 = client.get(f"/homepage/{uid}")
-    assert r2.status_code == 200
-    assert "My Page" in r2.text
-
-
-def test_homepage_reject_json(client: TestClient, token):
-    """客户端传 JSON {"html":"..."} 时，直接拒绝。"""
-    uid, tok = token
-    payload = '{"html": "<html><body><h1>NightOwl</h1></body></html>"}'
-    r = client.put(
-        "/homepage",
-        headers={"X-Token": tok, "Content-Type": "application/json"},
-        content=payload,
-    )
-    assert r.status_code == 400
-    assert "JSON" in r.text or "HTML" in r.text
-
-
-def test_homepage_reject_non_html(client: TestClient, token):
-    """纯文本无 HTML 标签时拒绝。"""
-    uid, tok = token
-    r = client.put(
-        "/homepage",
-        headers={"X-Token": tok},
-        content="just plain text no tags",
-    )
-    assert r.status_code == 400
-    assert "HTML" in r.text
+# ─── REST client endpoints removed (WS-only) ───────────────────────────────
+# /send, /send/file, /users, /users/{id}, /friends, /me, /block/{id}, /unblock/{id}
+# /homepage, /homepage/{id}  均已删除，功能由 /ws/client WebSocket 协议承载。
 
 
 # ─── World REST API ───────────────────────────────────────────────────────────
 
 def test_world_status_no_token(client: TestClient):
-    # App normalizes missing header to 200 + plain text error (same as /messages)
+    # App normalizes missing header to 200 + plain text error (WS auth required)
     r = client.get("/api/world/status")
     assert r.status_code in (200, 422)
     if r.status_code == 200:
@@ -340,10 +129,12 @@ def test_world_social_ok(client: TestClient, token):
 
 
 def test_world_heatmap_no_token(client: TestClient):
+    # v3: heatmap 公开，无需 token
     r = client.get("/api/world/heatmap")
-    assert r.status_code in (200, 422)
-    if r.status_code == 200:
-        assert "请求格式错误" in r.text or "错误" in r.text
+    assert r.status_code == 200
+    data = r.json()
+    assert "cells" in data
+    assert isinstance(data["cells"], list)
 
 
 def test_world_heatmap_ok(client: TestClient, token):

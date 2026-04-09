@@ -134,25 +134,37 @@ def world_online(request: Request) -> dict[str, Any]:
 def world_stats(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
     """
     公开接口：返回全局统计数据。
-    在线数（实时）+ 注册总数 + 今日注册数。
+    在线数（实时）+ 注册总数 + 今日注册数 + 今日移动次数 + 今日事件数。
     """
     req_id = uuid.uuid4().hex[:8]
     logger.info("[REQ=%s] [anon] → GET /api/world/stats", req_id)
-    from app.models import RegistrationLog
+    from app.models import RegistrationLog, MovementEvent, SocialEvent
     ws = _world_state_from_app(request)
     online_count = ws.get_online_count()
 
     total = db.query(User).count()
-    today = datetime.now(timezone.utc).date()
-    today_reg = db.query(RegistrationLog).filter(
-        RegistrationLog.registration_date == today
-    ).count()
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    logger.info("[REQ=%s] [anon] ← 200  online=%d total=%d today_new=%d", req_id, online_count, total, today_reg)
+    today_reg = db.query(func.count(RegistrationLog.id)).filter(
+        RegistrationLog.registration_date == today_start.date()
+    ).scalar() or 0
+
+    today_moves = db.query(func.count(MovementEvent.id)).filter(
+        MovementEvent.created_at >= today_start
+    ).scalar() or 0
+
+    today_events = db.query(func.count(SocialEvent.id)).filter(
+        SocialEvent.created_at >= today_start
+    ).scalar() or 0
+
+    logger.info("[REQ=%s] [anon] ← 200  online=%d total=%d today_new=%d today_moves=%d today_events=%d",
+                req_id, online_count, total, today_reg, today_moves, today_events)
     return {
         "online": online_count,
         "total": total,
         "today_new": today_reg,
+        "today_moves": today_moves,
+        "today_events": today_events,
     }
 
 
@@ -210,7 +222,16 @@ def world_history(
         return {
             "user_id": user.id,
             "window": window,
-            "points": [{"x": e.x, "y": e.y, "ts": e.created_at.isoformat()} for e in events],
+            "points": [
+                {
+                    "user_id": user.id,
+                    "user_name": user.name or "",
+                    "x": e.x,
+                    "y": e.y,
+                    "ts": e.created_at.isoformat(),
+                }
+                for e in events
+            ],
         }
     else:
         logger.info("[REQ=%s] [anon] → GET /api/world/history  window=%s limit=%d", req_id, window, limit)
@@ -243,44 +264,109 @@ def world_history(
         }
 
 
+@router.get("/api/world/events")
+def world_events(
+    window: str = Query("7d"),
+    db: Session = Depends(get_db),
+):
+    """
+    获取全服社交事件（无需认证），用于全局地图事件标记。
+    不包含消息内容。
+    """
+    req_id = uuid.uuid4().hex[:8]
+    logger.info("[REQ=%s] [anon] → GET /api/world/events  window=%s", req_id, window)
+    delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
+    hours = delta_map.get(window, 24 * 7)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    events = (
+        db.query(SocialEvent)
+        .filter(SocialEvent.created_at >= since)
+        .order_by(SocialEvent.created_at.asc())
+        .limit(5000)
+        .all()
+    )
+    user_ids = set([e.user_id for e in events])
+    user_ids.update(e.other_user_id for e in events if e.other_user_id)
+    name_map = {}
+    if user_ids:
+        rows = db.query(User.id, User.name).filter(User.id.in_(user_ids)).all()
+        name_map = {uid: name for uid, name in rows}
+    result = []
+    for e in events:
+        item = {
+            "user_id": e.user_id,
+            "user_name": name_map.get(e.user_id, ""),
+            "event_type": e.event_type,
+            "other_user_id": e.other_user_id,
+            "x": e.x or 0,
+            "y": e.y or 0,
+            "ts": e.created_at.isoformat(),
+        }
+        result.append(item)
+    logger.info("[REQ=%s] [anon] ← 200  全服事件=%d", req_id, len(result))
+    return {"window": window, "total": len(result), "events": result}
+
+
 @router.get("/api/world/social")
 def world_social(
     window: str = Query("7d"),
     x_token: str = Header(..., alias="X-Token"),
     db: Session = Depends(get_db),
 ):
-    """获取社交事件序列"""
+    """获取个人社交事件序列（带 token），包含消息内容"""
     req_id = uuid.uuid4().hex[:8]
     user = _get_user(x_token, db)
     logger.info("[REQ=%s] [uid=%d] → GET /api/world/social  window=%s", req_id, user.id, window)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    try:
-        from app.models import SocialEvent
-    except ImportError:
-        logger.warning("[REQ=%s] [uid=%d] SocialEvent 模型未找到", req_id, user.id)
-        return {"user_id": user.id, "window": window, "events": []}
     events = (
         db.query(SocialEvent)
         .filter(SocialEvent.user_id == user.id, SocialEvent.created_at >= since)
         .order_by(SocialEvent.created_at.asc())
         .all()
     )
+
+    # 收集所有 message 类型事件的关联查询
+    msg_events = [e for e in events if e.event_type == "message"]
+    message_content_map = {}
+    if msg_events:
+        from app.models import Message
+        # 按 (from_id, to_id) 收集最近的 message
+        msg_pairs = [(e.user_id, e.other_user_id) for e in msg_events if e.other_user_id]
+        if msg_pairs:
+            min_ts = min(e.created_at for e in msg_events)
+            messages = (
+                db.query(Message)
+                .filter(
+                    Message.from_id == user.id,
+                    Message.created_at >= min_ts,
+                    Message.read_at.is_(None),
+                )
+                .order_by(Message.created_at.desc())
+                .limit(200)
+                .all()
+            )
+            # 简单关联：取同一 hour 内的最近一条消息
+            for m in messages:
+                key = (m.from_id, m.to_id)
+                if key not in message_content_map:
+                    message_content_map[key] = m.content
+
     result = []
     for e in events:
         item = {
-            "type": e.event_type,
+            "user_id": e.user_id,
+            "user_name": user.name or "",
+            "event_type": e.event_type,
             "other_user_id": e.other_user_id,
-            "x": e.x,
-            "y": e.y,
+            "x": e.x or 0,
+            "y": e.y or 0,
             "ts": e.created_at.isoformat(),
+            "content": None,
         }
-        if e.event_metadata:
-            try:
-                item["meta"] = json.loads(e.event_metadata)
-            except Exception:
-                pass
+        if e.event_type == "message" and e.other_user_id:
+            item["content"] = message_content_map.get((e.user_id, e.other_user_id)) or None
         result.append(item)
     logger.info("[REQ=%s] [uid=%d] ← 200  社交事件=%d", req_id, user.id, len(result))
     return {"user_id": user.id, "window": window, "events": result}
@@ -289,27 +375,21 @@ def world_social(
 @router.get("/api/world/heatmap")
 def world_heatmap(
     window: str = Query("7d"),
-    x_token: str = Header(..., alias="X-Token"),
     db: Session = Depends(get_db),
 ):
-    """获取热力图格子数据"""
+    """获取热力图格子数据（无需认证）"""
     req_id = uuid.uuid4().hex[:8]
-    user = _get_user(x_token, db)
-    logger.info("[REQ=%s] [uid=%d] → GET /api/world/heatmap  window=%s", req_id, user.id, window)
+    logger.info("[REQ=%s] [anon] → GET /api/world/heatmap  window=%s", req_id, window)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    try:
-        from app.models import HeatmapCell
-    except ImportError:
-        logger.warning("[REQ=%s] [uid=%d] HeatmapCell 模型未找到", req_id, user.id)
-        return {"window": window, "cells": []}
+    from app.models import HeatmapCell
     cells = db.query(HeatmapCell).filter(HeatmapCell.updated_at >= since).limit(10000).all()
-    logger.info("[REQ=%s] [uid=%d] ← 200  格子=%d", req_id, user.id, len(cells))
+    logger.info("[REQ=%s] [anon] ← 200  格子=%d", req_id, len(cells))
     return {
         "window": window,
         "cells": [
-            {"cell_x": c.cell_x, "cell_y": c.cell_y, "count": c.event_count, "ts": c.updated_at.isoformat()}
+            {"cell_x": c.cell_x, "cell_y": c.cell_y, "count": c.event_count}
             for c in cells
         ],
     }

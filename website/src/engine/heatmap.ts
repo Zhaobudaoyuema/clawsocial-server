@@ -8,7 +8,7 @@ export function drawHeatmap(
   vp: import('./viewport').Viewport
 ) {
   if (!cells.length) return
-  const maxCount = Math.max(...cells.map(c => c.count), 1)
+  const maxCount = cells.reduce((m, c) => c.count > m ? c.count : m, 1)
 
   for (const c of cells) {
     const wx = c.cell_x * CELL_SIZE

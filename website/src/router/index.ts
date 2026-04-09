@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import HomeView from '../views/HomeView.vue'
 import WorldView from '../views/WorldView.vue'
-import CrawlerView from '../views/CrawlerView.vue'
 import ShareView from '../views/ShareView.vue'
 
 const router = createRouter({
@@ -16,11 +15,6 @@ const router = createRouter({
       path: '/world',
       name: 'world',
       component: WorldView,
-    },
-    {
-      path: '/world/me',
-      name: 'crawler',
-      component: CrawlerView,
     },
     {
       path: '/world/share/:shareToken',

@@ -3,14 +3,15 @@ import { drawCrawfish } from './crawfish'
 import { drawTrail } from './trail'
 import { drawTrailUpTo } from './trail'
 import { drawHeatmap } from './heatmap'
+import { drawEventMarkers } from './eventMarker'
 
 export type MapRenderMode = 'live' | 'replay'
 export type LayerMode = 'crawfish' | 'heatmap' | 'trail' | 'both'
 
 export interface RenderState {
   layer: LayerMode
-  mode: MapRenderMode           // NEW
-  hideHistory?: boolean         // NEW
+  mode: MapRenderMode
+  hideHistory?: boolean
 }
 
 export interface TrailSource {
@@ -19,22 +20,38 @@ export interface TrailSource {
   points: Array<{ x: number; y: number; ts?: string }>
 }
 
+export interface MapUser {
+  user_id: number
+  name: string
+  x: number
+  y: number
+  isMe?: boolean
+}
+
+export interface MapEvent {
+  x: number
+  y: number
+  event_type: string
+  ts?: string
+}
+
 export function renderFrame(
   ctx: CanvasRenderingContext2D,
   vp: Viewport,
-  users: Array<{ user_id: number; name: string; x: number; y: number }>,
-  trails: Array<{ user_id: number; name: string; points: Array<{ x: number; y: number; ts?: string }> }>,
+  users: MapUser[],
+  trails: TrailSource[],
+  events: MapEvent[],
   heatmap: Array<{ cell_x: number; cell_y: number; count: number }>,
   ownerId: number | null,
   hoveredUserId: number | null,
   state: RenderState,
   frame: number,
-  replayTime?: Date,           // NEW: current replay timestamp for drawTrailUpTo
+  replayTime?: Date,
 ) {
   const w = vp.canvasW, h = vp.canvasH
   ctx.clearRect(0, 0, w, h)
 
-  // Draw grid
+  // Grid
   ctx.strokeStyle = 'rgba(232, 98, 58, 0.06)'
   ctx.lineWidth = 0.5
   const step = 30
@@ -55,26 +72,34 @@ export function renderFrame(
     for (const trail of trails) {
       const color = getComputedUserColor(trail.name)
       if (state.mode === 'replay' && replayTime) {
-        // 回放模式：只画到 replayTime 为止的点
-        drawTrailUpTo(ctx, trail.points as Array<{ x: number; y: number; ts: string }>, color, vp, replayTime)
+        drawTrailUpTo(
+          ctx,
+          trail.points as Array<{ x: number; y: number; ts: string }>,
+          color, vp, replayTime
+        )
       } else if (state.hideHistory) {
-        // 实时 + 只看实时：只画有 ts 的实时点
-        const realtimeOnly = (trail.points as Array<{ x: number; y: number; ts?: string }>)
-          .filter(p => p.ts !== undefined)
+        const realtimeOnly = trail.points.filter(p => p.ts !== undefined)
         drawTrail(ctx, realtimeOnly, color, vp, 500, false)
       } else {
-        // 实时 + 显示历史：画全量，历史部分降 opacity
-        drawTrail(ctx, trail.points, color, vp, 500, true)
+        // live 全量轨迹：isHistory=false，正常亮度显示
+        drawTrail(ctx, trail.points, color, vp, 500, false)
       }
     }
+  }
+
+  // Event markers layer
+  if ((state.layer === 'crawfish' || state.layer === 'both') && events.length > 0) {
+    drawEventMarkers(ctx, events, vp, null)
   }
 
   // Crawfish layer
   if (state.layer === 'crawfish' || state.layer === 'both') {
     for (const u of users) {
+      const isMe = !!u.isMe
+      const isRelated = false  // related is only used in "my虾" replay mode
       const isOwner = ownerId !== null && u.user_id === ownerId
       const isHovered = u.user_id === hoveredUserId
-      drawCrawfish(ctx, u.x, u.y, u.name, isOwner, isHovered, vp, frame, state.mode === 'live')
+      drawCrawfish(ctx, u.x, u.y, u.name, isMe || isOwner, isRelated, isHovered, vp, frame, state.mode === 'live')
     }
   }
 }

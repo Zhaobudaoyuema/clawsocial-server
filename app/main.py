@@ -61,7 +61,6 @@ from app import models
 from app.migrate import run_migrations
 from app.api import register, stats, world, ws_client, ws_server, share
 from app.api.client import history as client_history
-from app.crawfish.social import friends, homepage, messages
 from app.crawfish.world.state import WorldConfig, WorldState
 
 models.Base.metadata.create_all(bind=engine)
@@ -70,8 +69,7 @@ run_migrations(engine)
 
 # 限流：由 RATE_LIMIT_ENABLED 控制，QPS 20，按 user_id 或 IP 统一限流
 
-_RATE_LIMIT_EXEMPT = {"/health", "/stats", "/homepage"}
-_RATE_LIMIT_EXEMPT_PREFIX = ("/homepage/",)
+_RATE_LIMIT_EXEMPT = {"/health", "/stats"}
 _RATE_LIMIT_QPS = int(os.getenv("RATE_LIMIT_QPS", "20"))
 _RATE_LIMIT_WINDOW_SEC = 1.0
 _rate_limit_buckets: dict[str, list[float]] = {}  # key -> [timestamps]
@@ -165,7 +163,7 @@ async def rate_limit_middleware(request: Request, call_next):
     if os.getenv("TESTING"):
         return await call_next(request)
     path = request.scope.get("path", "")
-    if path in _RATE_LIMIT_EXEMPT or any(path.startswith(p) for p in _RATE_LIMIT_EXEMPT_PREFIX):
+    if path in _RATE_LIMIT_EXEMPT:
         return await call_next(request)
     enabled = getattr(request.app.state, "rate_limit_enabled", True)
     if not enabled:
@@ -182,7 +180,7 @@ _PLAIN_TEXT_ONLY_PATHS = _RATE_LIMIT_EXEMPT
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     path = request.scope.get("path", "").split("?")[0]
-    if path in _PLAIN_TEXT_ONLY_PATHS or path.startswith("/homepage"):
+    if path in _PLAIN_TEXT_ONLY_PATHS:
         return plain_text(f"错误 {exc.status_code}：{exc.detail}", status_code=exc.status_code)
     # "Not Found" is the default 404 message — pass through real status code
     return plain_text(f"错误 {exc.status_code}：{exc.detail}", status_code=404 if exc.status_code == 404 else 200)
@@ -195,7 +193,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         for e in exc.errors()
     )
     path = request.scope.get("path", "").split("?")[0]
-    if path in _PLAIN_TEXT_ONLY_PATHS or path.startswith("/homepage"):
+    if path in _PLAIN_TEXT_ONLY_PATHS:
         return plain_text(f"请求格式错误：{errors}", status_code=422)
     return plain_text(f"请求格式错误：{errors}", status_code=200)
 
@@ -207,10 +205,7 @@ def health():
 
 
 app.include_router(register.router)
-app.include_router(messages.router)
-app.include_router(friends.router)
 app.include_router(stats.router)
-app.include_router(homepage.router)
 app.include_router(world.router)
 app.include_router(ws_client.router)
 app.include_router(ws_server.router)

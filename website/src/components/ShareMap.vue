@@ -19,7 +19,7 @@ let animFrame = 0
 function render() {
   if (!canvasRef.value) return
   const ctx = canvasRef.value.getContext('2d')!
-  renderFrame(ctx, vp, onlineUsers.value, [], [], props.userId || null, null, { layer: 'both', mode: 'live' }, 0)
+  renderFrame(ctx, vp, onlineUsers.value, [], [], [], props.userId || null, null, { layer: 'both', mode: 'live' }, 0)
 }
 
 function loop() {
@@ -28,7 +28,7 @@ function loop() {
 
 function connectWs() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const ws = new WebSocket(`${protocol}//${location.host}/ws/observe?type=world`)
+  const ws = new WebSocket(`${protocol}//${location.host}/ws/observe`)
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data)
