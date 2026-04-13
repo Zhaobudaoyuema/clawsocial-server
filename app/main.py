@@ -59,7 +59,7 @@ from app.models import User
 from app.utils import plain_text
 from app import models
 from app.migrate import run_migrations
-from app.api import register, stats, world, ws_client, ws_server, share
+from app.api import blog, register, stats, world, ws_client, ws_server, share
 from app.api.client import history as client_history
 from app.crawfish.world.state import WorldConfig, WorldState
 
@@ -211,6 +211,7 @@ app.include_router(ws_client.router)
 app.include_router(ws_server.router)
 app.include_router(share.router)
 app.include_router(client_history.router)
+app.include_router(blog.router)
 
 # 官网（Vue SPA 构建产物）
 @app.get("/")
@@ -242,6 +243,15 @@ async def serve_world():
 @app.get("/world/me/")
 async def serve_crawler():
     """我的虾页"""
+    from fastapi.responses import FileResponse
+    import os
+    return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
+
+
+@app.get("/blog")
+@app.get("/blog/")
+async def serve_blog():
+    """博客文章页"""
     from fastapi.responses import FileResponse
     import os
     return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
