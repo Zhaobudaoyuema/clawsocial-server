@@ -1,0 +1,160 @@
+/* ============================================
+   Markdown 渲染样式 — ClawSocial Design System
+   Warm Adventure · Cozy Intelligence
+   ============================================ */
+
+.md-content {
+  max-width: 720px;
+  margin: 0 auto;
+  color: #3d2c24;
+  line-height: 1.8;
+  font-size: 1rem;
+}
+
+.md-content h1 {
+  font-size: 2rem;
+  color: #3d2c24;
+  margin: 0 0 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #f0e6d8;
+  font-weight: 700;
+}
+
+.md-content h2 {
+  font-size: 1.5rem;
+  color: #E8623A;
+  margin: 2rem 0 0.75rem;
+  font-weight: 600;
+}
+
+.md-content h3 {
+  font-size: 1.2rem;
+  color: #3d2c24;
+  margin: 1.5rem 0 0.5rem;
+  font-weight: 600;
+}
+
+.md-content h4,
+.md-content h5,
+.md-content h6 {
+  color: #3d2c24;
+  margin: 1rem 0 0.5rem;
+  font-weight: 600;
+}
+
+.md-content p {
+  margin: 0 0 1rem;
+}
+
+.md-content a {
+  color: #E8623A;
+  text-decoration: none;
+}
+
+.md-content a:hover {
+  text-decoration: underline;
+}
+
+/* 行内代码 */
+.md-content code:not(pre code) {
+  background: rgba(232, 98, 58, 0.08);
+  color: #E8623A;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+/* 代码块 */
+.md-content pre {
+  background: #2d2520;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  margin: 1.25rem 0;
+}
+
+.md-content pre code {
+  background: none;
+  color: #f0e6d8;
+  padding: 0;
+  font-size: 0.875rem;
+  font-family: 'Courier New', Courier, monospace;
+  border-radius: 0;
+}
+
+/* 引用块 */
+.md-content blockquote {
+  border-left: 4px solid #E8623A;
+  background: rgba(232, 98, 58, 0.05);
+  margin: 1.25rem 0;
+  padding: 0.75rem 1rem;
+  font-style: italic;
+  color: #8b7b6e;
+}
+
+.md-content blockquote p {
+  margin: 0;
+}
+
+/* 表格 */
+.md-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.25rem 0;
+}
+
+.md-content th {
+  background: rgba(232, 98, 58, 0.1);
+  color: #3d2c24;
+  font-weight: 600;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border: 1px solid #f0e6d8;
+}
+
+.md-content td {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #f0e6d8;
+}
+
+.md-content tr:nth-child(even) {
+  background: rgba(232, 98, 58, 0.03);
+}
+
+/* 图片 */
+.md-content img {
+  max-width: 100%;
+  border-radius: 8px;
+  display: block;
+  margin: 1rem auto;
+}
+
+/* 列表 */
+.md-content ul,
+.md-content ol {
+  padding-left: 1.5rem;
+  margin: 0 0 1rem;
+}
+
+.md-content li {
+  margin: 0.25rem 0;
+}
+
+.md-content hr {
+  border: none;
+  border-top: 1px solid #f0e6d8;
+  margin: 2rem 0;
+}
+
+/* highlight.js 覆盖 — 保证代码块配色和谐 */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in { color: #f4a261; }
+.hljs-string,
+.hljs-attr { color: #a8d8a8; }
+.hljs-comment { color: #8b7b6e; font-style: italic; }
+.hljs-number,
+.hljs-literal { color: #e8c3a0; }
+.hljs-title,
+.hljs-section { color: #E8623A; }
