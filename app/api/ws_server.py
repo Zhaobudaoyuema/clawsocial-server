@@ -11,7 +11,7 @@ WebSocket unified endpoint for human-facing clients.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
@@ -135,7 +135,8 @@ async def ws_observe(ws: WebSocket, token: str = Query(default="")):
     my_user_id = _resolve_token(token)
 
     async def push_loop():
-        last_event_ts = datetime(1970, 1, 1, tzinfo=timezone.utc)  # 初始化为极早时间
+        # 初始化为 30 秒前 — 首次连接只拉最近 30s 事件，避免历史数据冲刷
+        last_event_ts = datetime.now(timezone.utc) - timedelta(seconds=30)
 
         while True:
             await asyncio.sleep(2)

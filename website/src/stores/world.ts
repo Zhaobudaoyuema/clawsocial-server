@@ -9,6 +9,7 @@ export interface WorldUser {
   x: number
   y: number
   isMe?: boolean
+  isOnline?: boolean
 }
 
 export interface TrailPoint {
@@ -40,6 +41,7 @@ export const useWorldStore = defineStore('world', () => {
 
   // ── Snapshot tracking for position-change detection ────────────────────────
   const _prevUserPositions = new Map<number, { x: number; y: number }>()
+  const _prevUserIds = new Set<number>()
 
   // ── Trails ────────────────────────────────────────────────────────────────
   /** 24h history loaded from REST on mount */
@@ -48,11 +50,16 @@ export const useWorldStore = defineStore('world', () => {
   /** Realtime points: only appended when position actually changes */
   const realtimePoints = ref<TrailPoint[]>([])
 
-  /** All live points = history + realtime */
-  const livePoints = computed<TrailPoint[]>(() => [
-    ...historyPoints.value,
-    ...realtimePoints.value,
-  ])
+  /** All live points = history + realtime, filtered to online users only */
+  const livePoints = computed<TrailPoint[]>(() => {
+    const onlineIds = new Set<number>()
+    for (const u of users.value.values()) {
+      if (u.isOnline !== false) onlineIds.add(u.user_id)
+    }
+    const hist = historyPoints.value.filter(p => onlineIds.has(p.user_id))
+    const real = realtimePoints.value.filter(p => onlineIds.has(p.user_id))
+    return [...hist, ...real]
+  })
 
   // ── Live events (WS pushed) ───────────────────────────────────────────────
   const liveEvents = ref<LiveEvent[]>([])
@@ -70,6 +77,20 @@ export const useWorldStore = defineStore('world', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
+  // ── Helpers ─────────────────────────────────────────────────────────────
+
+  /**
+   * Mark all users as offline (used when WS disconnects).
+   * This keeps their last-known position visible briefly instead of flashing empty.
+   */
+  function cleanupOfflineUsers() {
+    for (const [uid, user] of users.value) {
+      users.value.set(uid, { ...user, isOnline: false })
+    }
+    _prevUserPositions.clear()
+    _prevUserIds.clear()
+  }
+
   // ── setSnapshot ─────────────────────────────────────────────────────────
 
   /**
@@ -78,8 +99,16 @@ export const useWorldStore = defineStore('world', () => {
    * - Tracks isMe flag
    * - Appends to realtimePoints only when position actually changed
    */
+  /**
+   * Called every 2s by the world WebSocket.
+   * - Replaces the users Map with isOnline=true for current snapshot
+   * - Marks previously seen users as offline (isOnline=false)
+   * - Appends to realtimePoints only for online users whose position changed
+   */
   function setSnapshot(snapshot: WorldUser[], myUid?: number | null) {
     const newMap = new Map<number, WorldUser>()
+
+    // First: mark ALL current users as online
     for (const u of snapshot) {
       newMap.set(u.user_id, {
         user_id: u.user_id,
@@ -87,6 +116,7 @@ export const useWorldStore = defineStore('world', () => {
         x: u.x,
         y: u.y,
         isMe: myUid != null && u.user_id === myUid,
+        isOnline: true,
       })
 
       // Position change detection: only append if moved
@@ -99,10 +129,17 @@ export const useWorldStore = defineStore('world', () => {
           user_name: u.name || '',
           ts: new Date().toISOString(),
         })
-        // Cap at 5000 per user would be ideal; global cap below
       }
       _prevUserPositions.set(u.user_id, { x: u.x, y: u.y })
     }
+
+    // Second: carry over previously seen users as offline
+    for (const [uid, user] of users.value) {
+      if (!newMap.has(uid)) {
+        newMap.set(uid, { ...user, isOnline: false })
+      }
+    }
+
     users.value = newMap
 
     // Cap global realtime points
@@ -147,6 +184,7 @@ export const useWorldStore = defineStore('world', () => {
     _ws.onopen = () => { wsConnected.value = true }
     _ws.onclose = () => {
       wsConnected.value = false
+      cleanupOfflineUsers()
       // Reconnect after 3s
       setTimeout(() => connect(_token), 3000)
     }
@@ -267,6 +305,7 @@ export const useWorldStore = defineStore('world', () => {
     loadGlobalHistory,
     loadHeatmap,
     clearLive,
+    cleanupOfflineUsers,
     enterReplayMode,
     exitReplayMode,
   }
