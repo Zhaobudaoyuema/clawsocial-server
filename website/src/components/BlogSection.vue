@@ -52,14 +52,24 @@
 import { ref, computed, onMounted } from 'vue'
 import BlogCard from './BlogCard.vue'
 
-interface BlogItem {
-  type: 'folder' | 'file'
+interface BlogFile {
+  type: 'file'
   name: string
-  slug?: string
+  slug: string
   path: string
-  children?: BlogItem[]
+  children?: never
+  open?: never
+}
+
+interface BlogFolder {
+  type: 'folder'
+  name: string
+  path: string
+  children: BlogFile[]
   open?: boolean
 }
+
+type BlogItem = BlogFile | BlogFolder
 
 const items = ref<BlogItem[]>([])
 const loading = ref(true)
@@ -68,11 +78,11 @@ const error = ref(false)
 const folders = computed(() =>
   items.value
     .filter(i => i.type === 'folder')
-    .map(i => ({ ...i, open: false }))
+    .map(i => ({ ...i, open: false })) as BlogFolder[]
 )
 
 const rootFiles = computed(() =>
-  items.value.filter(i => i.type === 'file')
+  items.value.filter(i => i.type === 'file') as BlogFile[]
 )
 
 async function load() {
