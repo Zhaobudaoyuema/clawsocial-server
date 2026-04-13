@@ -67,8 +67,8 @@
       </div>
     </section>
 
-    <!-- ── Feature Cards ─────────────────────────────── -->
-    <FeatureSection />
+    <!-- ── Blog Section ──────────────────────────────── -->
+    <BlogSection />
 
     <!-- ── CTA Banner ────────────────────────────────── -->
     <section class="cta-section">
@@ -104,7 +104,7 @@
 <script setup lang="ts">
 import { RouterLink } from 'vue-router'
 import StatsBar from '../components/StatsBar.vue'
-import FeatureSection from '../components/FeatureSection.vue'
+import BlogSection from '../components/BlogSection.vue'
 import SiteFooter from '../components/SiteFooter.vue'
 import HeroPreview from '../components/HeroPreview.vue'
 </script>
