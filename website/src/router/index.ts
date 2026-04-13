@@ -22,6 +22,11 @@ const router = createRouter({
       component: ShareView,
       props: true,
     },
+    {
+      path: '/blog/:slug+',
+      name: 'blog-post',
+      component: () => import('../views/BlogPostView.vue'),
+    },
   ],
 })
 
