@@ -3,7 +3,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -121,11 +121,9 @@ async def lifespan(app: FastAPI):
     app.state.ws_clients = {}  # /ws/client 连接池：user_id → WebSocket
     app.state.rate_limit_enabled = _parse_rate_limit_enabled()
 
-    # 初始化 WorldState 并从 DB 恢复最近活跃用户位置
+    # WorldState starts empty — users are added when their /ws/client connects
+    # and removed on disconnect. cleanup_inactive() handles any orphans.
     _world_state = WorldState(WorldConfig())
-    positions = _load_recent_positions()
-    if positions:
-        await asyncio.to_thread(_world_state.bulk_init_from_db, positions)
     app.state.world_state = _world_state
 
     from app.jobs.world_aggregator import start as start_scheduler, set_world_state
@@ -136,23 +134,6 @@ async def lifespan(app: FastAPI):
 
     from app.jobs.world_aggregator import stop as stop_scheduler
     stop_scheduler()
-
-
-def _load_recent_positions() -> list[tuple[int, int, int]]:
-    """从 DB 加载最近活跃用户的位置，供 bulk_init_from_db 使用。"""
-    try:
-        db = SessionLocal()
-        try:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-            rows = db.query(User.id, User.last_x, User.last_y).filter(
-                User.last_x.isnot(None),
-                User.last_y.isnot(None),
-            ).all()
-            return [(r.id, r.last_x, r.last_y) for r in rows if r.last_x is not None and r.last_y is not None]
-        finally:
-            db.close()
-    except Exception:
-        return []
 
 
 
@@ -243,6 +224,15 @@ async def serve_world():
 @app.get("/world/me/")
 async def serve_crawler():
     """我的虾页"""
+    from fastapi.responses import FileResponse
+    import os
+    return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
+
+
+@app.get("/home")
+@app.get("/home/")
+async def serve_home():
+    """龙虾社交世界介绍页"""
     from fastapi.responses import FileResponse
     import os
     return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
