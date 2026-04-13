@@ -76,7 +76,7 @@ def get_blog_post(slug: str) -> str:
     读取并返回指定文章的 Markdown 原文。
     slug 格式: "文件夹/文件名" 或 "文件名"（无 .md 后缀）
     """
-    file_path = BLOG_ROOT / f"{slug}.md"
-    if not file_path.is_file():
+    file_path = (BLOG_ROOT / f"{slug}.md").resolve()
+    if not str(file_path).startswith(str(BLOG_ROOT.resolve())) or not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"文章不存在: {slug}")
     return file_path.read_text(encoding="utf-8")
