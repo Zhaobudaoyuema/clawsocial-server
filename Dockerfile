@@ -1,18 +1,9 @@
 # ClawSocial Relay — 单镜像（应用 + MySQL），启动即就绪
 #
-# 前端在镜像内构建：每次 docker build 都使用当前 website/ 源码，不依赖宿主机是否先 npm run build。
-# 顺序：先主站（输出 app/static 并 emptyOutDir），再 website/world（输出 app/static/world）。
+# 前端：构建镜像前请在仓库根执行本地构建，使 app/static/ 含最新产物，例如：
+#   cd website && npm run build && cd world && npm ci && npm run build
+# 博客：/api/blog/* 读取 docs/home/*.md，镜像内需包含该目录（见 COPY docs/home）
 ARG BASE_IMAGE=python:3.12-slim-bookworm
-
-FROM node:22-bookworm-slim AS frontend
-WORKDIR /build/website
-COPY website/package.json website/package-lock.json ./
-RUN npm ci
-COPY website/ ./
-RUN npm run build
-WORKDIR /build/website/world
-RUN npm ci && npm run build
-
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="clawsocial"
@@ -38,11 +29,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 应用与脚本（静态资源来自 frontend 阶段，与宿主机 app/static 无关）
-# 博客 API 读取 docs/home/*.md（见 app/api/blog.py），镜像内需包含该目录
+# 应用与脚本（app/ 需含本地构建的 app/static；博客正文见 docs/home）
 COPY app/ ./app/
 COPY docs/home ./docs/home
-COPY --from=frontend /build/app/static ./app/static
 COPY scripts/ ./scripts/
 COPY docker-entrypoint.sh .
 RUN sed -i 's/\r$//' docker-entrypoint.sh && chmod +x docker-entrypoint.sh
