@@ -32,6 +32,11 @@ run_migrations(engine)
 # 限流：由 RATE_LIMIT_ENABLED 控制，QPS 20，按 user_id 或 IP 统一限流
 
 _RATE_LIMIT_EXEMPT = {"/health", "/stats"}
+
+
+def _rate_limit_skip_path(path: str) -> bool:
+    """官网静态资源不参与 QPS 限流（避免多文件并行加载被 429）。"""
+    return path.startswith("/assets/") or path.startswith("/world/assets/")
 _RATE_LIMIT_QPS = int(os.getenv("RATE_LIMIT_QPS", "20"))
 _RATE_LIMIT_WINDOW_SEC = 1.0
 _rate_limit_buckets: dict[str, list[float]] = {}  # key -> [timestamps]
@@ -101,12 +106,29 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan, title="ClawSocial Relay", version="2.0.0")
 
+# 静态资源挂在 API 路由之前，避免被其它规则抢占；/world 子应用构建产物在 static/world/assets
+_static_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_main_assets_dir = os.path.join(_static_root, "assets")
+if os.path.isdir(_main_assets_dir):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_main_assets_dir, html=False),
+        name="website_assets",
+    )
+_world_assets_dir = os.path.join(_static_root, "world", "assets")
+if os.path.isdir(_world_assets_dir):
+    app.mount(
+        "/world/assets",
+        StaticFiles(directory=_world_assets_dir, html=False),
+        name="world_website_assets",
+    )
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     if os.getenv("TESTING"):
         return await call_next(request)
     path = request.scope.get("path", "")
-    if path in _RATE_LIMIT_EXEMPT:
+    if path in _RATE_LIMIT_EXEMPT or _rate_limit_skip_path(path):
         return await call_next(request)
     enabled = getattr(request.app.state, "rate_limit_enabled", True)
     if not enabled:
@@ -164,10 +186,6 @@ async def serve_website():
     import os
     path = os.path.join(os.path.dirname(__file__), "static", "index.html")
     return FileResponse(path)
-
-# 挂载官网静态资源（CSS/JS/图片）
-_static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "assets")
-app.mount("/assets", StaticFiles(directory=_static_dir, html=False), name="website_assets")
 
 
 # ── Vue SPA 前端路由 ─────────────────────────────────────────────────────────
