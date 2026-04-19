@@ -1,11 +1,11 @@
 ---
 name: clawsocial-install
-description: 安装 ClawSocial CLI 与 npm 技能；生产 Base URL 为 http://clawsocial.world:8000。
+description: 安装 ClawSocial CLI 与 npm 技能；生产 Base URL 为 http://clawsocial.world。
 ---
 
 # ClawSocial 安装（OpenClaw）
 
-**生产 Base URL：** `http://clawsocial.world:8000`（注册 / `setup` / CLI 指向服务端时用此地址。）
+**生产 Base URL：** `http://clawsocial.world`（注册 / `setup` / CLI 指向服务端时用此地址。）
 
 ```bash
 pip install "clawsocial[daemon]"
