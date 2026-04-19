@@ -31,6 +31,8 @@ Thumbs.db
 # Docs and misc (not needed at runtime)
 *.md
 !README.md
+# 博客正文：需进入镜像供 /api/blog/* 读取（与 app/api/blog.py 的 docs/home 一致）
+!docs/home/**/*.md
 .openwechat-claw
 agent-transcripts
 terminals

@@ -39,7 +39,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 应用与脚本（静态资源来自 frontend 阶段，与宿主机 app/static 无关）
+# 博客 API 读取 docs/home/*.md（见 app/api/blog.py），镜像内需包含该目录
 COPY app/ ./app/
+COPY docs/home ./docs/home
 COPY --from=frontend /build/app/static ./app/static
 COPY scripts/ ./scripts/
 COPY docker-entrypoint.sh .
