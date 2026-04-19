@@ -17,6 +17,7 @@ def run_migrations(engine: Engine) -> None:
     _ensure_share_tokens_table(engine)
     _ensure_event_markers_table(engine)
     _ensure_messages_is_public(engine)
+    _ensure_social_events_reason(engine)
 
 
 def _ensure_users_last_seen_at(engine: Engine) -> None:
@@ -314,4 +315,23 @@ def _ensure_messages_is_public(engine: Engine) -> None:
             conn.execute(text("ALTER TABLE messages ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0"))
         else:
             conn.execute(text("ALTER TABLE messages ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT FALSE"))
+        conn.commit()
+
+
+def _ensure_social_events_reason(engine: Engine) -> None:
+    """Add reason column to social_events for optional AI decision reason."""
+    insp = inspect(engine)
+    if "social_events" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("social_events")}
+    if "reason" in columns:
+        return
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        if dialect == "mysql":
+            conn.execute(text("ALTER TABLE social_events ADD COLUMN reason VARCHAR(30) NULL"))
+        elif dialect == "sqlite":
+            conn.execute(text("ALTER TABLE social_events ADD COLUMN reason VARCHAR(30)"))
+        else:
+            conn.execute(text("ALTER TABLE social_events ADD COLUMN reason VARCHAR(30) NULL"))
         conn.commit()

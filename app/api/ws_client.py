@@ -35,6 +35,8 @@ from app.database import get_db
 from app.models import Friendship, Message, SocialEvent, User
 from app.crawfish.world.state import WorldConfig, WorldState
 from app.auth import get_current_user
+from app.logging_config import ClientLogger, new_conn_id
+from app.time_utils import now_beijing
 
 # 活跃度基础分（与 world.py 保持一致）
 _ACTIVE_WEIGHTS = {
@@ -46,38 +48,181 @@ _ACTIVE_WEIGHTS = {
     "move": 0.1,
 }
 _NEW_CRAWFISH_DAYS = 7
+_MAX_REASON_LEN = 30
+
+# 活跃分衰减参数
+DECAY_PER_DAY = 0.8              # 每天衰减 20%，约 3 天降至 50%
+ACTIVE_SCORE_LOOKBACK_DAYS = 90  # 与数据留存 TTL 一致
+
+
+def _apply_decay(rows_by_date: list, weight: float, today) -> float:
+    """
+    对按日期分组的事件计数列表应用指数衰减并返回加权总分。
+
+    rows_by_date: [(day_val, count), ...] — 来自 GROUP BY date(created_at) 查询
+    day_val 可为 datetime.date 对象（MySQL）或 'YYYY-MM-DD' 字符串（SQLite）。
+    """
+    from datetime import date as _date
+    total = 0.0
+    for day_val, cnt in rows_by_date:
+        if isinstance(day_val, str):
+            d = _date.fromisoformat(day_val)
+        elif isinstance(day_val, datetime):
+            d = day_val.date()
+        else:
+            d = day_val  # 已是 date 对象
+        days_ago = max(0, (today - d).days)
+        total += cnt * weight * (DECAY_PER_DAY ** days_ago)
+    return total
+
+
+def _batch_decayed_scores(user_ids: list[int], db, now) -> dict[int, float]:
+    """
+    批量计算多个用户的衰减活跃分，返回 {user_id: score}。
+
+    使用 GROUP BY (user_id, date) 查询各维度，在 Python 层按天应用
+    指数衰减后求和，避免在多处重复内联 batch score 逻辑。
+    好友数（当前状态）不做衰减，仍用 COUNT。
+    """
+    if not user_ids:
+        return {}
+    from collections import defaultdict
+    from app.models import Friendship, Message, MovementEvent, SocialEvent
+
+    cutoff = now - timedelta(days=ACTIVE_SCORE_LOOKBACK_DAYS)
+    today = now.date()
+
+    # ── messages sent ──────────────────────────────────────────────
+    sent_rows = (
+        db.query(Message.from_id, func.date(Message.created_at), func.count(Message.id))
+        .filter(Message.from_id.in_(user_ids), Message.created_at >= cutoff)
+        .group_by(Message.from_id, func.date(Message.created_at))
+        .all()
+    )
+    # ── messages received ──────────────────────────────────────────
+    recv_rows = (
+        db.query(Message.to_id, func.date(Message.created_at), func.count(Message.id))
+        .filter(Message.to_id.in_(user_ids), Message.created_at >= cutoff)
+        .group_by(Message.to_id, func.date(Message.created_at))
+        .all()
+    )
+    # ── encounters ─────────────────────────────────────────────────
+    enc_rows = (
+        db.query(SocialEvent.user_id, func.date(SocialEvent.created_at), func.count(SocialEvent.id))
+        .filter(
+            SocialEvent.user_id.in_(user_ids),
+            SocialEvent.event_type == "encounter",
+            SocialEvent.created_at >= cutoff,
+        )
+        .group_by(SocialEvent.user_id, func.date(SocialEvent.created_at))
+        .all()
+    )
+    # ── moves ──────────────────────────────────────────────────────
+    move_rows = (
+        db.query(MovementEvent.user_id, func.date(MovementEvent.created_at), func.count(MovementEvent.id))
+        .filter(MovementEvent.user_id.in_(user_ids), MovementEvent.created_at >= cutoff)
+        .group_by(MovementEvent.user_id, func.date(MovementEvent.created_at))
+        .all()
+    )
+    # ── friends count (current state, no decay) ────────────────────
+    friend_cnt_map: dict[int, int] = {uid: 0 for uid in user_ids}
+    friend_rows = (
+        db.query(
+            func.coalesce(Friendship.user_a_id, Friendship.user_b_id).label("uid"),
+            func.count(Friendship.id).label("cnt"),
+        )
+        .filter(
+            sql_or(Friendship.user_a_id.in_(user_ids), Friendship.user_b_id.in_(user_ids)),
+            Friendship.status == "accepted",
+        )
+        .group_by(func.coalesce(Friendship.user_a_id, Friendship.user_b_id))
+        .all()
+    )
+    for r in friend_rows:
+        friend_cnt_map[r.uid] = r.cnt
+
+    # ── aggregate per user ────────────────────────────────────────
+    # Bucket rows: {uid: [(day_val, cnt), ...]}
+    def _bucket(rows, id_col_idx=0):
+        d: dict[int, list] = defaultdict(list)
+        for row in rows:
+            d[row[id_col_idx]].append((row[1], row[2]))
+        return d
+
+    sent_map  = _bucket(sent_rows)
+    recv_map  = _bucket(recv_rows)
+    enc_map   = _bucket(enc_rows)
+    move_map  = _bucket(move_rows)
+
+    scores: dict[int, float] = {}
+    for uid in user_ids:
+        score = (
+            _apply_decay(sent_map.get(uid, []),  _ACTIVE_WEIGHTS["message_sent"],     today)
+            + _apply_decay(recv_map.get(uid, []),  _ACTIVE_WEIGHTS["message_received"], today)
+            + _apply_decay(enc_map.get(uid, []),   _ACTIVE_WEIGHTS["encounter"],        today)
+            + _apply_decay(move_map.get(uid, []),  _ACTIVE_WEIGHTS["move"],             today)
+            + friend_cnt_map.get(uid, 0) * _ACTIVE_WEIGHTS["friendship"]
+        )
+        scores[uid] = round(score, 1)
+    return scores
 
 
 def _calc_active_score(user_id: int, db=None) -> float:
-    """计算用户实时活跃度（综合事件分，无时间衰减，用于实时感知）。"""
+    """计算用户实时活跃度（含指数衰减：每天 × DECAY_PER_DAY，好友数不衰减）。"""
     from sqlalchemy import func, or_ as sql_or
     from app.models import Friendship, Message, MovementEvent, SocialEvent
     own_db = db is None
     if own_db:
         db = next(get_db())
     try:
-        msg_sent = db.query(func.count(Message.id)).filter(
-            Message.from_id == user_id).scalar() or 0
-        msg_recv = db.query(func.count(Message.id)).filter(
-            Message.to_id == user_id).scalar() or 0
-        encounters = db.query(func.count(SocialEvent.id)).filter(
-            SocialEvent.user_id == user_id,
-            SocialEvent.event_type == "encounter",
-        ).scalar() or 0
-        moves = db.query(func.count(MovementEvent.id)).filter(
-            MovementEvent.user_id == user_id).scalar() or 0
-        friends = db.query(func.count(Friendship.id)).filter(
-            sql_or(
-                Friendship.user_a_id == user_id,
-                Friendship.user_b_id == user_id,
-            ),
-            Friendship.status == "accepted",
-        ).scalar() or 0
+        now = now_beijing()
+        cutoff = now - timedelta(days=ACTIVE_SCORE_LOOKBACK_DAYS)
+        today = now.date()
+
+        msg_sent_rows = (
+            db.query(func.date(Message.created_at), func.count(Message.id))
+            .filter(Message.from_id == user_id, Message.created_at >= cutoff)
+            .group_by(func.date(Message.created_at))
+            .all()
+        )
+        msg_recv_rows = (
+            db.query(func.date(Message.created_at), func.count(Message.id))
+            .filter(Message.to_id == user_id, Message.created_at >= cutoff)
+            .group_by(func.date(Message.created_at))
+            .all()
+        )
+        enc_rows = (
+            db.query(func.date(SocialEvent.created_at), func.count(SocialEvent.id))
+            .filter(
+                SocialEvent.user_id == user_id,
+                SocialEvent.event_type == "encounter",
+                SocialEvent.created_at >= cutoff,
+            )
+            .group_by(func.date(SocialEvent.created_at))
+            .all()
+        )
+        move_rows = (
+            db.query(func.date(MovementEvent.created_at), func.count(MovementEvent.id))
+            .filter(MovementEvent.user_id == user_id, MovementEvent.created_at >= cutoff)
+            .group_by(func.date(MovementEvent.created_at))
+            .all()
+        )
+        friends = (
+            db.query(func.count(Friendship.id))
+            .filter(
+                sql_or(
+                    Friendship.user_a_id == user_id,
+                    Friendship.user_b_id == user_id,
+                ),
+                Friendship.status == "accepted",
+            )
+            .scalar() or 0
+        )
         score = (
-            msg_sent * _ACTIVE_WEIGHTS["message_sent"]
-            + msg_recv * _ACTIVE_WEIGHTS["message_received"]
-            + encounters * _ACTIVE_WEIGHTS["encounter"]
-            + moves * _ACTIVE_WEIGHTS["move"]
+            _apply_decay(msg_sent_rows, _ACTIVE_WEIGHTS["message_sent"],     today)
+            + _apply_decay(msg_recv_rows, _ACTIVE_WEIGHTS["message_received"], today)
+            + _apply_decay(enc_rows,      _ACTIVE_WEIGHTS["encounter"],        today)
+            + _apply_decay(move_rows,     _ACTIVE_WEIGHTS["move"],             today)
             + friends * _ACTIVE_WEIGHTS["friendship"]
         )
         return round(score, 1)
@@ -102,9 +247,21 @@ def _ensure_aware(dt: datetime) -> datetime:
 
 def _is_new(created_at: datetime) -> bool:
     """判断用户是否为新虾（注册7天内）。"""
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
     delta = now - _ensure_aware(created_at)
     return delta.days <= _NEW_CRAWFISH_DAYS
+
+
+def _normalize_reason(value: Any) -> str | None:
+    """Normalize optional reason field from client messages."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    reason = value.strip()
+    if not reason:
+        return None
+    return reason[:_MAX_REASON_LEN]
 
 
 def _record_social_event(
@@ -114,6 +271,7 @@ def _record_social_event(
     x: int | None = None,
     y: int | None = None,
     metadata: dict | None = None,
+    reason: str | None = None,
 ) -> None:
     """
     将社交事件写入 social_events 表（静默失败，不影响主流程）。
@@ -123,13 +281,14 @@ def _record_social_event(
     try:
         db = next(get_db())
         try:
-            now = datetime.now(timezone.utc)
+            now = now_beijing()
             event = SocialEvent(
                 user_id=user_id,
                 other_user_id=other_user_id,
                 event_type=event_type,
                 x=x,
                 y=y,
+                reason=reason,
                 event_metadata=json.dumps(metadata) if metadata else None,
                 created_at=now,
             )
@@ -347,7 +506,7 @@ def _build_step_context(
 
     try:
         user_id = user.id
-        now = datetime.now(timezone.utc)
+        now = now_beijing()
         radius = ws_state.config.view_radius
         world_size = ws_state.config.world_size
 
@@ -485,58 +644,8 @@ def _build_step_context(
             )
             for row in last_msgs:
                 last_msg_map[row.other_id] = row.last_at
-        # Compute active scores in batch via a single aggregated query
-        score_map: dict[int, float] = {}
-        if visible_ids:
-            msg_sent_map = {
-                r[0]: r[1] for r in
-                db.query(Message.from_id, func.count(Message.id))
-                .filter(Message.from_id.in_(visible_ids))
-                .group_by(Message.from_id).all()
-            }
-            msg_recv_map = {
-                r[0]: r[1] for r in
-                db.query(Message.to_id, func.count(Message.id))
-                .filter(Message.to_id.in_(visible_ids))
-                .group_by(Message.to_id).all()
-            }
-            encounter_map = {
-                r[0]: r[1] for r in
-                db.query(SocialEvent.user_id, func.count(SocialEvent.id))
-                .filter(
-                    SocialEvent.user_id.in_(visible_ids),
-                    SocialEvent.event_type == "encounter",
-                )
-                .group_by(SocialEvent.user_id).all()
-            }
-            move_map = {
-                r[0]: r[1] for r in
-                db.query(MovementEvent.user_id, func.count(MovementEvent.id))
-                .filter(MovementEvent.user_id.in_(visible_ids))
-                .group_by(MovementEvent.user_id).all()
-            }
-            friend_count_map = {
-                r[0]: r[1] for r in
-                db.query(
-                    func.coalesce(Friendship.user_a_id, Friendship.user_b_id).label("uid"),
-                    func.count(Friendship.id).label("cnt"),
-                )
-                .filter(
-                    sql_or(Friendship.user_a_id.in_(visible_ids), Friendship.user_b_id.in_(visible_ids)),
-                    Friendship.status == "accepted",
-                )
-                .group_by(func.coalesce(Friendship.user_a_id, Friendship.user_b_id))
-                .all()
-            }
-            for uid in visible_ids:
-                s = (
-                    msg_sent_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_sent"]
-                    + msg_recv_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_received"]
-                    + encounter_map.get(uid, 0) * _ACTIVE_WEIGHTS["encounter"]
-                    + move_map.get(uid, 0) * _ACTIVE_WEIGHTS["move"]
-                    + friend_count_map.get(uid, 0) * _ACTIVE_WEIGHTS["friendship"]
-                )
-                score_map[uid] = round(s, 1)
+        # Compute active scores in batch via decayed scoring
+        score_map: dict[int, float] = _batch_decayed_scores(visible_ids, db, now) if visible_ids else {}
         visible_users = []
         for s in visible:
             if s.user_id == user_id:
@@ -704,6 +813,8 @@ def _build_step_context(
             else:
                 time_str = f"{int(delta.total_seconds() / 3600)}h ago"
             item = {"type": e.event_type, "time": time_str}
+            if e.reason:
+                item["reason"] = e.reason
             if e.other_user_id:
                 eu = event_other_map.get(e.other_user_id)
                 item["user_id"] = e.other_user_id
@@ -847,12 +958,12 @@ def _build_step_context_compact(
         return s[:maxlen]
 
     def _sec_ago(dt: datetime) -> str:
-        delta = datetime.now(timezone.utc) - _ensure_aware(dt)
+        delta = now_beijing() - _ensure_aware(dt)
         return str(int(delta.total_seconds()))
 
     try:
         user_id = user.id
-        now = datetime.now(timezone.utc)
+        now = now_beijing()
         world_size = ws_state.config.world_size
 
         # ── S: self ──────────────────────────────────────────────
@@ -1204,35 +1315,31 @@ async def ws_client(websocket: WebSocket):
        friends_list / discover_ack / block_ack / unblock_ack / status_ack / error
     """
     await websocket.accept()
-    logger.info("[ws/client] 客户端连接 client=%s", websocket.client)
-    # FastAPI's Header() dependency doesn't populate WS handler params from HTTP headers,
-    # so we try: 1) query param x_token  2) HTTP header x-token  3) body auth message
-    header_token = websocket.headers.get("x-token", "").strip()
-    query_token = websocket.query_params.get("x_token", "").strip()
-    token = query_token or header_token
+    client_addr = f"{websocket.client.host}:{websocket.client.port}"
+    conn_id = new_conn_id()
+    logger.info("[ws/client] 客户端连接 addr=%s conn_id=%s", client_addr, conn_id)
 
     # ── Auth ─────────────────────────────────────────────────────────
+    header_token = websocket.headers.get("x-token", "").strip()
+    query_token  = websocket.query_params.get("x_token", "").strip()
+    token        = query_token or header_token
+
     if not token:
-        logger.debug("[ws/client] 无 header token，等待 auth 消息")
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=5)
         except (asyncio.TimeoutError, WebSocketDisconnect):
-            logger.warning("[ws/client] auth timeout，关闭连接")
+            logger.warning("[ws/client] conn_id=%s auth timeout", conn_id)
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
         try:
             init = json.loads(raw)
         except json.JSONDecodeError:
-            logger.warning("[ws/client] auth JSON 解析失败")
+            logger.warning("[ws/client] conn_id=%s auth JSON 解析失败: %s", conn_id, raw[:80])
             await websocket.send_json({"type": "error", "code": "INVALID_JSON", "message": "invalid JSON"})
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
-        if (
-            not isinstance(init, dict)
-            or init.get("type") != "auth"
-            or not isinstance(init.get("token"), str)
-        ):
-            logger.warning("[ws/client] auth 格式错误（期望 type=auth, token=str）")
+        if not isinstance(init, dict) or init.get("type") != "auth" or not isinstance(init.get("token"), str):
+            logger.warning("[ws/client] conn_id=%s auth 格式错误", conn_id)
             await websocket.send_json({"type": "error", "code": "AUTH_FORMAT", "message": "auth 格式错误"})
             await websocket.close(code=CLOSE_POLICY_VIOLATION)
             return
@@ -1240,44 +1347,58 @@ async def ws_client(websocket: WebSocket):
 
     try:
         user = get_current_user(token)
-        logger.info("[ws/client] 鉴权成功 user_id=%d name=%s", user.id, user.name)
     except ValueError:
-        logger.warning("[ws/client] Token 无效")
+        logger.warning("[ws/client] conn_id=%s Token 无效", conn_id)
         await websocket.send_json({"type": "error", "code": "TOKEN_INVALID", "message": "Token 无效"})
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         return
     except Exception as exc:
-        logger.warning("[ws/client] auth exception: %s", exc)
+        logger.warning("[ws/client] conn_id=%s auth exception: %s", conn_id, exc)
         await websocket.send_json({"type": "error", "code": "AUTH_FAILED", "message": "鉴权失败"})
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         return
 
-    app = websocket.app
+    # ── 创建 ClientLogger ─────────────────────────────────────────────
+    cl = ClientLogger(user.id, user.name, conn_id, client_addr)
+
+    app      = websocket.app
     ws_state = _world_state_from_app(app)
 
     # ── Spawn into world ────────────────────────────────────────────
     last_x = getattr(user, "last_x", None)
     last_y = getattr(user, "last_y", None)
-    logger.debug("[ws/client] user_id=%d spawn last_x=%s last_y=%s", user.id, last_x, last_y)
     try:
-        state = await asyncio.to_thread(
-            ws_state.spawn_user, user.id, last_x, last_y
-        )
-        logger.info("[ws/client] user_id=%d spawn 成功 x=%d y=%d", user.id, state.x, state.y)
+        state = await asyncio.to_thread(ws_state.spawn_user, user.id, last_x, last_y)
+        cl.app_log(f"spawn 成功 x={state.x} y={state.y}")
     except ValueError as exc:
-        logger.error("[ws/client] user_id=%d spawn 失败: %s", user.id, exc)
+        cl.app_log(f"spawn 失败: {exc}", "ERROR")
         await websocket.send_json({"type": "error", "code": "WORLD_FULL", "message": str(exc)})
         await websocket.close(code=CLOSE_TRY_AGAIN_LATER)
+        cl.close(reason="spawn_failed")
         return
 
     world_base = os.getenv("WORLD_BASE_URL", "").rstrip("/")
-
-    await websocket.send_json({
+    ready_payload = {
         "type": "ready",
         "me": _state_dict(state, user.id),
         "radius": ws_state.config.view_radius,
         "world_url": f"{world_base}/world" if world_base else "/world",
-    })
+    }
+    try:
+        await websocket.send_json(ready_payload)
+        cl.push("ready", ready_payload)
+    except (WebSocketDisconnect, Exception) as exc:
+        cl.app_log(f"send ready failed: {exc}", "WARNING")
+        # 必须清理 world_state 里已 spawn 的 user，否则变成孤魂野鬼
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(ws_state.remove_user, user.id)
+        asyncio.create_task(asyncio.to_thread(
+            _record_social_event,
+            user.id, "departure", None, state.x, state.y,
+            {"name": user.name, "reason": "send_ready_failed"},
+        ))
+        cl.close(reason="send_ready_failed")
+        return
 
     # ── Register connection ────────────────────────────────────────
     ws_clients: dict = getattr(app.state, "ws_clients", {})
@@ -1292,11 +1413,10 @@ async def ws_client(websocket: WebSocket):
         "user_name": user.name,
         "x": state.x,
         "y": state.y,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": now_beijing().isoformat(),
     }))
 
     # ── Background: push step_context periodically ─────────────────
-    # Track known users in this session (for encounter detection)
     _known_user_ids: set[int] = set()
     _step_count: int = 0
 
@@ -1312,7 +1432,7 @@ async def ws_client(websocket: WebSocket):
                     visible = await asyncio.to_thread(ws_state.get_visible, user.id)
                     visible_ids = {s.user_id for s in visible}
 
-                    # 检测新进入视野的用户 → encounter 事件（即时推送，重要！）
+                    # 检测新进入视野的用户 → encounter 事件
                     new_encounters = []
                     for s in visible:
                         if s.user_id != user.id and s.user_id not in _known_user_ids:
@@ -1329,11 +1449,11 @@ async def ws_client(websocket: WebSocket):
                                     "y": s.y,
                                     "active_score": round(score, 1),
                                     "is_new": new_flag,
-                                    "ts": datetime.now(timezone.utc).isoformat(),
+                                    "ts": now_beijing().isoformat(),
                                 }
                                 await websocket.send_json(event)
+                                cl.push("encounter", event)
                                 new_encounters.append(event)
-                                # 写入 social_events（对双方都记录）
                                 asyncio.create_task(asyncio.to_thread(
                                     _record_social_event,
                                     user.id, "encounter", s.user_id,
@@ -1348,10 +1468,8 @@ async def ws_client(websocket: WebSocket):
                                 ))
                     _known_user_ids = visible_ids
 
-                    # 步骤计数
                     _step_count += 1
 
-                    # 构建完整上下文并推送
                     ctx = _build_step_context_compact(
                         user, me_state, visible, ws_state,
                         step=_step_count, op="", ok=1,
@@ -1361,9 +1479,10 @@ async def ws_client(websocket: WebSocket):
                         for e in new_encounters
                     ]
                     await websocket.send_json(ctx)
+                    cl.push("step_context", ctx)
 
                 except Exception as exc:
-                    logger.warning("[uid=%d] snapshot_loop 异常: %s", user.id, exc)
+                    cl.app_log(f"snapshot_loop 异常: {exc}", "WARNING")
         except asyncio.CancelledError:
             pass
 
@@ -1376,56 +1495,62 @@ async def ws_client(websocket: WebSocket):
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
-                logger.warning("[ws/client] user_id=%d 收到无效 JSON: %s", user.id, raw[:100])
-                await websocket.send_json({"type": "error", "code": "INVALID_JSON", "message": "invalid_json"})
+                err_payload = {"type": "error", "code": "INVALID_JSON", "message": "invalid_json"}
+                await websocket.send_json(err_payload)
+                cl.recv("INVALID_JSON", {"raw": raw[:100]})
+                cl.send("error", err_payload)
                 continue
 
-            t = msg.get("type")
+            t          = msg.get("type")
             request_id = msg.get("request_id")
-            logger.debug("[ws/client] user_id=%d 收到消息 type=%s request_id=%s", user.id, t, request_id)
+            cl.recv(t, msg)
+
             if t == "move":
-                await _client_move(websocket, user.id, user.name, msg, ws_state, app)
+                await _client_move(websocket, user.id, user.name, msg, ws_state, app, cl)
             elif t == "send":
-                await _client_send(websocket, user, msg, app)
+                await _client_send(websocket, user, msg, app, cl)
             elif t == "ack":
                 await _client_ack(user.id, msg, app)
             elif t == "get_friends":
-                await _client_get_friends(websocket, user.id, request_id)
+                await _client_get_friends(websocket, user.id, request_id, cl=cl)
             elif t == "discover":
-                await _client_discover(websocket, user.id, msg.get("keyword"), request_id)
+                await _client_discover(websocket, user.id, msg.get("keyword"), request_id, cl=cl)
             elif t == "block":
-                await _client_block(websocket, user.id, msg.get("user_id"), request_id)
+                await _client_block(websocket, user.id, msg.get("user_id"), request_id, cl=cl)
             elif t == "unblock":
-                await _client_unblock(websocket, user.id, msg.get("user_id"), request_id)
+                await _client_unblock(websocket, user.id, msg.get("user_id"), request_id, cl=cl)
             elif t == "update_status":
-                await _client_update_status(websocket, user, msg.get("status"), request_id)
+                await _client_update_status(websocket, user, msg.get("status"), request_id, cl=cl)
             else:
-                await websocket.send_json({"type": "error", "code": "UNKNOWN_TYPE", "message": f"unknown type: {t}", "request_id": request_id})
+                err_payload = {"type": "error", "code": "UNKNOWN_TYPE", "message": f"unknown type: {t}", "request_id": request_id}
+                await websocket.send_json(err_payload)
+                cl.send("error", err_payload)
     except WebSocketDisconnect:
-        logger.info("[ws/client] user_id=%d WebSocket 断开", user.id)
+        cl.app_log("WebSocket 断开")
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
         ws_clients.pop(user.id, None)
-        # 从 WorldState 移除用户（防止断线后仍占位）
+        me_state = ws_state.users.get(user.id)
+        if me_state is not None:
+            x, y = me_state.x, me_state.y
+        else:
+            x = getattr(user, "last_x", None)
+            y = getattr(user, "last_y", None)
         asyncio.create_task(asyncio.to_thread(ws_state.remove_user, user.id))
-        # 记录下线事件
-        me_state = getattr(user, '_ws_state', None)
-        x, y = (me_state.x, me_state.y) if me_state else (None, None)
         asyncio.create_task(asyncio.to_thread(
             _record_social_event,
             user.id, "departure", None, x, y,
             {"name": user.name},
         ))
-        # 广播给好友：我下线了
         asyncio.create_task(_broadcast(app, user.id, {
             "type": "friend_offline",
             "user_id": user.id,
             "user_name": user.name,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": now_beijing().isoformat(),
         }))
-        logger.info("[ws/client] user_id=%d 连接清理完成，已从 ws_clients 移除", user.id)
+        cl.close(reason="disconnect")
 
 
 # ─── Client command handlers ─────────────────────────────────────────
@@ -1437,48 +1562,68 @@ async def _client_move(
     msg: dict,
     ws_state: WorldState,
     app,
+    cl: ClientLogger,
 ):
     x, y = msg.get("x"), msg.get("y")
-    logger.debug("[move] user_id=%d move to (%d,%d)", user_id, x, y)
+    reason = _normalize_reason(msg.get("reason"))
     if not isinstance(x, int) or not isinstance(y, int):
-        logger.warning("[move] user_id=%d 参数类型错误 x=%s y=%s", user_id, type(x).__name__, type(y).__name__)
-        await ws.send_json({"type": "move_ack", "ok": False, "error": "x_y_must_be_int"})
+        payload = {"type": "move_ack", "ok": False, "error": "x_y_must_be_int"}
+        await ws.send_json(payload)
+        cl.send("move_ack", payload)
         return
     if not ws_state._in_bounds(x, y):
-        logger.debug("[move] user_id=%d 超出边界 (%d,%d)", user_id, x, y)
-        await ws.send_json({"type": "move_ack", "ok": False, "x": x, "y": y, "error": "out_of_bounds"})
+        payload = {"type": "move_ack", "ok": False, "x": x, "y": y, "error": "out_of_bounds"}
+        await ws.send_json(payload)
+        cl.send("move_ack", payload)
         return
     ok = await asyncio.to_thread(ws_state.move_user, user_id, x, y)
     if not ok:
-        logger.debug("[move] user_id=%d 目标位置被占用 (%d,%d)", user_id, x, y)
-        await ws.send_json({"type": "move_ack", "ok": False, "x": x, "y": y, "error": "occupied"})
+        payload = {"type": "move_ack", "ok": False, "x": x, "y": y, "error": "occupied"}
+        await ws.send_json(payload)
+        cl.send("move_ack", payload)
         return
-    logger.info("[move] user_id=%d 移动成功 (%d,%d)", user_id, x, y)
+    cl.app_log(f"移动成功 ({x},{y})")
+    if reason:
+        asyncio.create_task(asyncio.to_thread(
+            _record_social_event,
+            user_id, "move", None, x, y, None, reason,
+        ))
     asyncio.create_task(_bg_persist_move(user_id, x, y))
     asyncio.create_task(_bg_update_user_xy(user_id, x, y))
-    # 广播给好友：我移动了
-    asyncio.create_task(_broadcast(app, user_id, {
+    friend_move_payload = {
         "type": "friend_moved",
         "user_id": user_id,
         "user_name": user_name,
         "x": x,
         "y": y,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }))
-    await ws.send_json({"type": "move_ack", "ok": True, "x": x, "y": y})
+        "ts": now_beijing().isoformat(),
+    }
+    if reason:
+        friend_move_payload["reason"] = reason
+    asyncio.create_task(_broadcast(app, user_id, friend_move_payload))
+    payload = {"type": "move_ack", "ok": True, "x": x, "y": y}
+    if reason:
+        payload["reason"] = reason
+    await ws.send_json(payload)
+    cl.send("move_ack", payload)
 
 
-async def _client_send(ws: WebSocket, user: User, msg: dict, app):
-    to_id = msg.get("to_id")
+async def _client_send(ws: WebSocket, user: User, msg: dict, app, cl: ClientLogger):
+    to_id   = msg.get("to_id")
     content = str(msg.get("content", ""))
-    logger.debug("[send] user_id=%d 发送消息 to_id=%d len=%d", user.id, to_id, len(content))
+    reason = _normalize_reason(msg.get("reason"))
     if not isinstance(to_id, int):
-        logger.warning("[send] user_id=%d to_id 类型错误: %s", user.id, type(to_id).__name__)
-        await ws.send_json({"type": "send_ack", "ok": False, "error": "to_id_must_be_int"})
+        payload = {"type": "send_ack", "ok": False, "error": "to_id_must_be_int"}
+        await ws.send_json(payload)
+        cl.send("send_ack", payload)
         return
-    ok, detail, msg_id = await asyncio.to_thread(_do_send_sync, user.id, to_id, content, app)
-    logger.info("[send] user_id=%d to_id=%d ok=%s msg_id=%s detail=%s", user.id, to_id, ok, msg_id, detail)
-    await ws.send_json({"type": "send_ack", "ok": ok, "detail": detail, "msg_id": msg_id})
+    ok, detail, msg_id = await asyncio.to_thread(_do_send_sync, user.id, to_id, content, app, reason)
+    cl.app_log(f"send to={to_id} msg_id={msg_id} ok={ok} detail={detail}")
+    payload = {"type": "send_ack", "ok": ok, "detail": detail, "msg_id": msg_id}
+    if reason:
+        payload["reason"] = reason
+    await ws.send_json(payload)
+    cl.send("send_ack", payload)
 
 
 async def _client_ack(user_id: int, msg: dict, app):
@@ -1489,95 +1634,94 @@ async def _client_ack(user_id: int, msg: dict, app):
 
 # ─── Social WS handlers (new) ───────────────────────────────────────
 
-async def _client_get_friends(ws: WebSocket, user_id: int, request_id: str | None, db_session=None):
+async def _client_get_friends(ws: WebSocket, user_id: int, request_id: str | None, cl: ClientLogger, db_session=None):
     """Return the friend list for user_id as a JSON dict."""
     try:
         friends, total = await asyncio.to_thread(_query_friends, user_id, db_session)
     except Exception as exc:
-        logger.warning("[uid=%d] get_friends 失败  request_id=%s  exc=%s", user_id, request_id, exc)
-        await ws.send_json({
-            "type": "friends_list", "request_id": request_id,
-            "friends": [], "total": 0, "error": str(exc),
-        })
+        payload = {"type": "friends_list", "request_id": request_id, "friends": [], "total": 0, "error": str(exc)}
+        await ws.send_json(payload)
+        cl.send("friends_list", payload)
         return
-    logger.info("[uid=%d] ← friends_list  request_id=%s  total=%d", user_id, request_id, total)
-    await ws.send_json({
-        "type": "friends_list", "request_id": request_id,
-        "friends": friends, "total": total,
-    })
+    payload = {"type": "friends_list", "request_id": request_id, "friends": friends, "total": total}
+    await ws.send_json(payload)
+    cl.send("friends_list", payload)
 
 
-async def _client_discover(ws: WebSocket, user_id: int, keyword: str | None, request_id: str | None, db_session=None):
+async def _client_discover(ws: WebSocket, user_id: int, keyword: str | None, request_id: str | None, cl: ClientLogger, db_session=None):
     """Return a list of open-status users (excluding self), optionally filtered by keyword."""
-    logger.info("[uid=%d] discover  keyword=%s  request_id=%s", user_id, repr(keyword), request_id)
     try:
         users, total = await asyncio.to_thread(_query_open_users, user_id, keyword, db_session)
     except Exception as exc:
-        logger.warning("[uid=%d] discover 失败  request_id=%s  exc=%s", user_id, request_id, exc)
-        await ws.send_json({
-            "type": "discover_ack", "request_id": request_id,
-            "users": [], "total": 0, "error": str(exc),
-        })
+        payload = {"type": "discover_ack", "request_id": request_id, "users": [], "total": 0, "error": str(exc)}
+        await ws.send_json(payload)
+        cl.send("discover_ack", payload)
         return
-    logger.info("[uid=%d] ← discover_ack  request_id=%s  返回=%d  total=%d", user_id, request_id, len(users), total)
-    await ws.send_json({
-        "type": "discover_ack", "request_id": request_id,
-        "users": users, "total": total,
-    })
+    payload = {"type": "discover_ack", "request_id": request_id, "users": users, "total": total}
+    await ws.send_json(payload)
+    cl.send("discover_ack", payload)
 
 
-async def _client_block(ws: WebSocket, user_id: int, target_id: int | None, request_id: str | None, db_session=None):
+async def _client_block(ws: WebSocket, user_id: int, target_id: int | None, request_id: str | None, cl: ClientLogger, db_session=None):
     """Block target_id (must be an accepted friend)."""
-    logger.info("[uid=%d] block  target_id=%s  request_id=%s", user_id, target_id, request_id)
     if not isinstance(target_id, int):
-        await ws.send_json({"type": "block_ack", "ok": False, "error": "user_id_must_be_int", "request_id": request_id})
+        payload = {"type": "block_ack", "ok": False, "error": "user_id_must_be_int", "request_id": request_id}
+        await ws.send_json(payload)
+        cl.send("block_ack", payload)
         return
     try:
         detail, ok = await asyncio.to_thread(_do_block, user_id, target_id, db_session)
     except Exception as exc:
-        logger.warning("[uid=%d] block 失败  target_id=%s  exc=%s", user_id, target_id, exc)
-        await ws.send_json({"type": "block_ack", "ok": False, "error": str(exc), "request_id": request_id})
+        payload = {"type": "block_ack", "ok": False, "error": str(exc), "request_id": request_id}
+        await ws.send_json(payload)
+        cl.send("block_ack", payload)
         return
-    logger.info("[uid=%d] ← block_ack  ok=%s  target_id=%s  detail=%s", user_id, ok, target_id, detail)
-    await ws.send_json({"type": "block_ack", "ok": ok, "detail": detail, "request_id": request_id})
+    payload = {"type": "block_ack", "ok": ok, "detail": detail, "request_id": request_id}
+    await ws.send_json(payload)
+    cl.send("block_ack", payload)
 
 
-async def _client_unblock(ws: WebSocket, user_id: int, target_id: int | None, request_id: str | None, db_session=None):
+async def _client_unblock(ws: WebSocket, user_id: int, target_id: int | None, request_id: str | None, cl: ClientLogger, db_session=None):
     """Unblock target_id."""
-    logger.info("[uid=%d] unblock  target_id=%s  request_id=%s", user_id, target_id, request_id)
     if not isinstance(target_id, int):
-        await ws.send_json({"type": "unblock_ack", "ok": False, "error": "user_id_must_be_int", "request_id": request_id})
+        payload = {"type": "unblock_ack", "ok": False, "error": "user_id_must_be_int", "request_id": request_id}
+        await ws.send_json(payload)
+        cl.send("unblock_ack", payload)
         return
     try:
         detail, ok = await asyncio.to_thread(_do_unblock, user_id, target_id, db_session)
     except Exception as exc:
-        logger.warning("[uid=%d] unblock 失败  target_id=%s  exc=%s", user_id, target_id, exc)
-        await ws.send_json({"type": "unblock_ack", "ok": False, "error": str(exc), "request_id": request_id})
+        payload = {"type": "unblock_ack", "ok": False, "error": str(exc), "request_id": request_id}
+        await ws.send_json(payload)
+        cl.send("unblock_ack", payload)
         return
-    logger.info("[uid=%d] ← unblock_ack  ok=%s  target_id=%s  detail=%s", user_id, ok, target_id, detail)
-    await ws.send_json({"type": "unblock_ack", "ok": ok, "detail": detail, "request_id": request_id})
+    payload = {"type": "unblock_ack", "ok": ok, "detail": detail, "request_id": request_id}
+    await ws.send_json(payload)
+    cl.send("unblock_ack", payload)
 
 
-async def _client_update_status(ws: WebSocket, user, status: str | None, request_id: str | None, db_session=None):
+async def _client_update_status(ws: WebSocket, user, status: str | None, request_id: str | None, cl: ClientLogger, db_session=None):
     """Update the authenticated user's status (open / friends_only / do_not_disturb)."""
     VALID_STATUSES = {"open", "friends_only", "do_not_disturb"}
-    logger.info("[uid=%d] update_status  status=%s  request_id=%s", user.id, status, request_id)
     if status not in VALID_STATUSES:
-        logger.warning("[uid=%d] update_status 失败  无效 status=%s", user.id, status)
-        await ws.send_json({
+        payload = {
             "type": "status_ack", "ok": False,
             "error": f"invalid_status: must be one of {sorted(VALID_STATUSES)}",
             "request_id": request_id,
-        })
+        }
+        await ws.send_json(payload)
+        cl.send("status_ack", payload)
         return
     try:
         await asyncio.to_thread(_do_update_status, user.id, status, db_session)
     except Exception as exc:
-        logger.warning("[uid=%d] update_status 失败  status=%s  exc=%s", user.id, status, exc)
-        await ws.send_json({"type": "status_ack", "ok": False, "error": str(exc), "request_id": request_id})
+        payload = {"type": "status_ack", "ok": False, "error": str(exc), "request_id": request_id}
+        await ws.send_json(payload)
+        cl.send("status_ack", payload)
         return
-    logger.info("[uid=%d] ← status_ack  ok=True  status=%s", user.id, status)
-    await ws.send_json({"type": "status_ack", "ok": True, "status": status, "request_id": request_id})
+    payload = {"type": "status_ack", "ok": True, "status": status, "request_id": request_id}
+    await ws.send_json(payload)
+    cl.send("status_ack", payload)
 
 
 # ─── Social query helpers (sync, run in asyncio.to_thread) ───────────
@@ -1601,7 +1745,6 @@ def _query_open_users(user_id: int, keyword: str | None, _db=None) -> tuple[list
     Returns (users_list, total_count). Uses batch query to avoid N+1.
     """
     from sqlalchemy import or_ as sql_or
-    from app.models import Friendship, Message, MovementEvent, SocialEvent
 
     own_db = False
     if _db is None:
@@ -1626,47 +1769,9 @@ def _query_open_users(user_id: int, keyword: str | None, _db=None) -> tuple[list
         )
         if not users:
             return [], total
-        # Batch-compute active scores to avoid N DB sessions
+        # Batch-compute active scores with time-decay
         uid_list = [u.id for u in users]
-        msg_sent_map = {r[0]: r[1] for r in
-            db.query(Message.from_id, func.count(Message.id))
-            .filter(Message.from_id.in_(uid_list))
-            .group_by(Message.from_id).all()}
-        msg_recv_map = {r[0]: r[1] for r in
-            db.query(Message.to_id, func.count(Message.id))
-            .filter(Message.to_id.in_(uid_list))
-            .group_by(Message.to_id).all()}
-        enc_map = {r[0]: r[1] for r in
-            db.query(SocialEvent.user_id, func.count(SocialEvent.id))
-            .filter(SocialEvent.user_id.in_(uid_list), SocialEvent.event_type == "encounter")
-            .group_by(SocialEvent.user_id).all()}
-        move_map = {r[0]: r[1] for r in
-            db.query(MovementEvent.user_id, func.count(MovementEvent.id))
-            .filter(MovementEvent.user_id.in_(uid_list))
-            .group_by(MovementEvent.user_id).all()}
-        friend_cnt_map = {
-            r[0]: r[1] for r in
-            db.query(
-                func.coalesce(Friendship.user_a_id, Friendship.user_b_id).label("uid"),
-                func.count(Friendship.id).label("cnt"),
-            )
-            .filter(
-                sql_or(Friendship.user_a_id.in_(uid_list), Friendship.user_b_id.in_(uid_list)),
-                Friendship.status == "accepted",
-            )
-            .group_by(func.coalesce(Friendship.user_a_id, Friendship.user_b_id))
-            .all()
-        }
-        score_map = {}
-        for uid in uid_list:
-            s = (
-                msg_sent_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_sent"]
-                + msg_recv_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_received"]
-                + enc_map.get(uid, 0) * _ACTIVE_WEIGHTS["encounter"]
-                + move_map.get(uid, 0) * _ACTIVE_WEIGHTS["move"]
-                + friend_cnt_map.get(uid, 0) * _ACTIVE_WEIGHTS["friendship"]
-            )
-            score_map[uid] = round(s, 1)
+        score_map = _batch_decayed_scores(uid_list, db, now_beijing())
         return [_user_dict(u, score_map.get(u.id)) for u in users], total
     finally:
         if own_db:
@@ -1679,7 +1784,7 @@ def _query_friends(user_id: int, _db=None) -> tuple[list[dict], int]:
     Returns (friends_list, total_count). Uses batch query to avoid N+1.
     """
     from sqlalchemy import and_, or_ as sql_or
-    from app.models import Friendship, Message, MovementEvent, SocialEvent
+    from app.models import Friendship
 
     own_db = False
     if _db is None:
@@ -1705,46 +1810,8 @@ def _query_friends(user_id: int, _db=None) -> tuple[list[dict], int]:
             return [], 0
         friend_ids = [fid for fid, _ in pairs]
         friend_map = {u.id: u for u in db.query(User).filter(User.id.in_(friend_ids)).all()}
-        # Batch-compute active scores to avoid N DB sessions
-        msg_sent_map = {r[0]: r[1] for r in
-            db.query(Message.from_id, func.count(Message.id))
-            .filter(Message.from_id.in_(friend_ids))
-            .group_by(Message.from_id).all()}
-        msg_recv_map = {r[0]: r[1] for r in
-            db.query(Message.to_id, func.count(Message.id))
-            .filter(Message.to_id.in_(friend_ids))
-            .group_by(Message.to_id).all()}
-        enc_map = {r[0]: r[1] for r in
-            db.query(SocialEvent.user_id, func.count(SocialEvent.id))
-            .filter(SocialEvent.user_id.in_(friend_ids), SocialEvent.event_type == "encounter")
-            .group_by(SocialEvent.user_id).all()}
-        move_map = {r[0]: r[1] for r in
-            db.query(MovementEvent.user_id, func.count(MovementEvent.id))
-            .filter(MovementEvent.user_id.in_(friend_ids))
-            .group_by(MovementEvent.user_id).all()}
-        friend_cnt_map = {
-            r[0]: r[1] for r in
-            db.query(
-                func.coalesce(Friendship.user_a_id, Friendship.user_b_id).label("uid"),
-                func.count(Friendship.id).label("cnt"),
-            )
-            .filter(
-                sql_or(Friendship.user_a_id.in_(friend_ids), Friendship.user_b_id.in_(friend_ids)),
-                Friendship.status == "accepted",
-            )
-            .group_by(func.coalesce(Friendship.user_a_id, Friendship.user_b_id))
-            .all()
-        }
-        score_map = {}
-        for uid in friend_ids:
-            s = (
-                msg_sent_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_sent"]
-                + msg_recv_map.get(uid, 0) * _ACTIVE_WEIGHTS["message_received"]
-                + enc_map.get(uid, 0) * _ACTIVE_WEIGHTS["encounter"]
-                + move_map.get(uid, 0) * _ACTIVE_WEIGHTS["move"]
-                + friend_cnt_map.get(uid, 0) * _ACTIVE_WEIGHTS["friendship"]
-            )
-            score_map[uid] = round(s, 1)
+        # Batch-compute active scores with time-decay
+        score_map = _batch_decayed_scores(friend_ids, db, now_beijing())
         friends = []
         for fid, row in pairs:
             u = friend_map.get(fid)
@@ -1846,7 +1913,7 @@ def _do_update_status(user_id: int, status: str, _db=None) -> None:
 # ─── Sync helpers ────────────────────────────────────────────────────
 
 def _do_send_sync(
-    from_id: int, to_id: int, content: str, app
+    from_id: int, to_id: int, content: str, app, reason: str | None = None
 ) -> tuple[bool, str, str | None]:
     """发送消息并推送给目标用户的 ws_client（如果在线）。"""
     db = next(get_db())
@@ -1858,13 +1925,7 @@ def _do_send_sync(
         if not recipient:
             return False, "user not found", None
 
-        # 隐私检查（与 messages.py 保持一致）
-        if recipient.status == "do_not_disturb":
-            return False, "recipient do_not_disturb", None
-        if recipient.status == "friends_only" and (not friendship or friendship.status != "accepted"):
-            return False, "recipient friends_only", None
-
-        now = datetime.now(timezone.utc)
+        now = now_beijing()
         msg_type = "chat"
         friendship = (
             db.query(Friendship)
@@ -1874,6 +1935,11 @@ def _do_send_sync(
             )
             .first()
         )
+        # 隐私检查（与 messages.py 保持一致）
+        if recipient.status == "do_not_disturb":
+            return False, "recipient do_not_disturb", None
+        if recipient.status == "friends_only" and (not friendship or friendship.status != "accepted"):
+            return False, "recipient friends_only", None
         if not friendship or friendship.status == "pending":
             msg_type = "friend_request"
         elif friendship.status == "blocked":
@@ -1891,12 +1957,20 @@ def _do_send_sync(
         db.refresh(msg_record)
         msg_id = f"msg_{msg_record.id}"
 
+        # Prefer in-memory world coordinates; fallback to persisted last_x/last_y.
+        from_xy = _world_xy_from_app(app, from_id) or (getattr(sender, "last_x", None), getattr(sender, "last_y", None))
+        to_xy = _world_xy_from_app(app, to_id) or (getattr(recipient, "last_x", None), getattr(recipient, "last_y", None))
+        # If receiver has no known coordinates (offline/new user), place its mirrored
+        # social event at sender's location so observe map bubbles remain visible.
+        if to_xy[0] is None or to_xy[1] is None:
+            to_xy = from_xy
+
         # 写入 social_events（双方都记录 message 事件）
-        _record_social_event(from_id, "message", to_id, metadata={
-            "msg_id": msg_record.id, "msg_type": msg_type,
+        _record_social_event(from_id, "message", to_id, x=from_xy[0], y=from_xy[1], reason=reason, metadata={
+            "msg_id": msg_record.id, "msg_type": msg_type, "content": content,
         })
-        _record_social_event(to_id, "message", from_id, metadata={
-            "msg_id": msg_record.id, "msg_type": msg_type,
+        _record_social_event(to_id, "message", from_id, x=to_xy[0], y=to_xy[1], reason=reason, metadata={
+            "msg_id": msg_record.id, "msg_type": msg_type, "content": content,
         })
 
         # 推送给目标用户的 ws_client（如果在线）
@@ -1909,6 +1983,8 @@ def _do_send_sync(
             "msg_type": msg_type,
             "ts": now.isoformat(),
         }
+        if reason:
+            ws_payload["reason"] = reason
         push_to_ws_client_sync(app, to_id, ws_payload)
 
         return True, "ok", msg_id
@@ -1928,6 +2004,20 @@ def _load_user(user_id: int) -> User | None:
         return None
     finally:
         db.close()
+
+
+def _world_xy_from_app(app, user_id: int) -> tuple[int | None, int | None] | None:
+    """Try to read live user coordinates from in-memory WorldState."""
+    try:
+        ws_state = getattr(app.state, "world_state", None) if app else None
+        if not ws_state:
+            return None
+        state = ws_state.users.get(user_id)
+        if not state:
+            return None
+        return state.x, state.y
+    except Exception:
+        return None
 
 
 def _friends_of(user_id: int) -> list[int]:
@@ -2032,7 +2122,7 @@ async def _bg_persist_move(user_id: int, x: int, y: int):
         return
     db = next(get_db())
     try:
-        db.add(MovementEvent(user_id=user_id, x=x, y=y, created_at=datetime.now(timezone.utc)))
+        db.add(MovementEvent(user_id=user_id, x=x, y=y, created_at=now_beijing()))
         db.commit()
     except Exception as exc:
         logger.warning("[uid=%d] persist_move 失败  x=%d y=%d  exc=%s", user_id, x, y, exc)
@@ -2073,7 +2163,7 @@ async def _bg_delete_acked(user_id: int, acked_ids: list, app):
         if not id_nums:
             return
 
-        now = datetime.now(timezone.utc)
+        now = now_beijing()
 
         # 1. 找出这些消息的发送方（用于通知他们）
         from app.models import Message

@@ -18,7 +18,8 @@ interface SocialEvent {
   x: number | null
   y: number | null
   ts: string
-  content?: string
+  content?: string | null
+  reason?: string | null
 }
 
 export function useCrawlerWs() {
@@ -83,6 +84,8 @@ export function useCrawlerWs() {
             x: e.x as number | null,
             y: e.y as number | null,
             ts: e.ts as string,
+            content: (e.content ?? null) as string | null,
+            reason: (e.reason ?? null) as string | null,
           }))
         }
       } catch {

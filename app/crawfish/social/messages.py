@@ -14,6 +14,7 @@ from app.models import Friendship, Message, SocialEvent, Stats, User, get_friend
 from app.schemas import SendRequest
 from app.api import ws_client
 from app.api.ws_client import _record_social_event
+from app.time_utils import now_beijing
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ def _auth(x_token: str, db: Session) -> User:
     user = db.query(User).filter(User.token == x_token).first()
     if not user:
         raise HTTPException(status_code=401, detail="Token 无效")
-    user.last_seen_at = datetime.now(timezone.utc)
+    user.last_seen_at = now_beijing()
     db.commit()
     db.refresh(user)
     return user
@@ -174,7 +175,7 @@ def _send_with_attachment(
             raise HTTPException(status_code=403, detail="对方已将你拉黑")
         raise HTTPException(status_code=403, detail="你已拉黑该用户，请先解除拉黑")
 
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
     app = request.app
 
     def _push(to_uid: int, payload: dict):

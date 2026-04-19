@@ -57,6 +57,44 @@
       @close="showReplayModal = false"
       @confirm="onReplayConfirm"
     />
+
+    <!-- Heatmap cell hover tooltip — hidden when crawfish is hovered -->
+    <Teleport to="body">
+      <div v-if="hoveredHeatCell && !hoveredUser" class="heatmap-tooltip"
+           :style="{ left: tooltipPos.x + 'px', top: tooltipPos.y + 'px' }">
+        <span class="ht-title">🔥 热力格子</span>
+        <span class="ht-count">{{ hoveredHeatCell.count }} 次移动</span>
+        <span class="ht-meta">
+          统计穿越此 30×30 区域的移动轨迹点<br>
+          每5分钟聚合 · 3天不活跃归零
+        </span>
+      </div>
+    </Teleport>
+
+    <!-- Crawfish hover tooltip -->
+    <Teleport to="body">
+      <div v-if="hoveredUser && !homepageModalUser" class="crawfish-tooltip"
+           :style="{ left: crawfishTooltipPos.x + 'px', top: crawfishTooltipPos.y + 'px' }">
+        <div class="ct-name">🦞 {{ hoveredUser.name }}</div>
+        <div v-if="hoveredUser.description" class="ct-desc">{{ hoveredUser.description }}</div>
+        <button v-if="hoveredUser.homepage" class="ct-homepage-btn"
+                @click.stop="homepageModalUser = hoveredUser">查看主页</button>
+        <div v-else class="ct-no-homepage">暂无主页</div>
+      </div>
+    </Teleport>
+
+    <!-- Homepage modal -->
+    <Teleport to="body">
+      <div v-if="homepageModalUser" class="homepage-overlay" @click.self="homepageModalUser = null">
+        <div class="homepage-card">
+          <div class="homepage-header">
+            <span class="homepage-title">🦞 {{ homepageModalUser.name }} 的主页</span>
+            <button class="homepage-close" @click="homepageModalUser = null">✕</button>
+          </div>
+          <div class="homepage-body" v-html="homepageModalUser.homepage" />
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -66,10 +104,16 @@ import { useWorldStore } from '../stores/world'
 import { useReplayStore } from '../stores/replay'
 import { useUiStore } from '../stores/ui'
 import { createViewport, zoomViewport, panViewport, worldToCanvas } from '../engine/viewport'
+import type { HeatmapCell } from '../stores/world'
 import { renderFrame } from '../engine/renderer'
 import WorldToolbar from './WorldToolbar.vue'
 import ReplayModal from './ReplayModal.vue'
 import ReplayBar from './ReplayBar.vue'
+import { formatBeijingDateTime } from '../utils/time'
+
+// Inline SVG cursor as data URL — more reliable than ?url import for CSS cursor property
+const _clawSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><path d="M10 20 Q8 14 12 9 Q14 6 17 5 Q19 4.5 18 7 Q16 8 15 10 Q13 14 14 19" fill="#E8623A" stroke="#b84020" stroke-width="0.8"/><path d="M14 20 Q12 15 14 11 Q15 8 18 7 Q20 6.5 19 9 Q17 10 16 13 Q15 16 16 20" fill="#E8623A" stroke="#b84020" stroke-width="0.8"/><ellipse cx="14" cy="21" rx="4" ry="3.5" fill="#E8623A" stroke="#b84020" stroke-width="0.8"/><rect x="11" y="23" width="6" height="7" rx="3" fill="#c84e28" stroke="#b84020" stroke-width="0.8"/><circle cx="17.5" cy="6" r="1.2" fill="#ff8c5a"/><circle cx="18.5" cy="8.5" r="0.8" fill="#ff8c5a"/></svg>`
+const clawCursorUrl = `data:image/svg+xml,${encodeURIComponent(_clawSvg)}`
 
 const worldStore = useWorldStore()
 const uiStore = useUiStore()
@@ -83,16 +127,26 @@ const isReplayMode = computed<boolean>(() => replayStore.mode === 'replay')
 
 function fmtReplayClock(d: Date | null): string {
   if (!d) return ''
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  return formatBeijingDateTime(d)
 }
 
 const wrapRef = ref<HTMLElement | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const vp = reactive(createViewport(800, 600))
 const hoveredUserId = ref<number | null>(null)
+const hoveredHeatCell = ref<(HeatmapCell & { maxCount: number }) | null>(null)
+const tooltipPos = ref({ x: 0, y: 0 })
+// Crawfish hover tooltip
+const crawfishTooltipPos = ref({ x: 0, y: 0 })
+const hoveredUser = computed<import('../stores/world').WorldUser | null>(() => {
+  if (hoveredUserId.value === null) return null
+  return worldStore.onlineUsers.find(u => u.user_id === hoveredUserId.value) ?? null
+})
+// Homepage modal
+const homepageModalUser = ref<import('../stores/world').WorldUser | null>(null)
 const showReplayModal = ref(false)
 let animFrame = 0
+let canvasDpr = 1
 
 // ── Props ───────────────────────────────────────────────────────────────────
 
@@ -109,10 +163,20 @@ let lastX = 0, lastY = 0
 function resize() {
   if (!canvasRef.value || !wrapRef.value) return
   const rect = wrapRef.value.getBoundingClientRect()
-  canvasRef.value.width = rect.width
-  canvasRef.value.height = rect.height
-  vp.canvasW = rect.width
-  vp.canvasH = rect.height
+  const cssW = Math.max(1, Math.floor(rect.width))
+  const cssH = Math.max(1, Math.floor(rect.height))
+  canvasDpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
+  canvasRef.value.width = Math.round(cssW * canvasDpr)
+  canvasRef.value.height = Math.round(cssH * canvasDpr)
+  canvasRef.value.style.width = `${cssW}px`
+  canvasRef.value.style.height = `${cssH}px`
+  // Keep the same world point at canvas center when resizing
+  const worldCx = (vp.canvasW / 2 - vp.offsetX) / vp.scale
+  const worldCy = (vp.canvasH / 2 - vp.offsetY) / vp.scale
+  vp.canvasW = cssW
+  vp.canvasH = cssH
+  vp.offsetX = cssW / 2 - worldCx * vp.scale
+  vp.offsetY = cssH / 2 - worldCy * vp.scale
   render()
 }
 
@@ -148,6 +212,7 @@ function buildTrailsFromLive() {
 function render() {
   if (!canvasRef.value) return
   const ctx = canvasRef.value.getContext('2d')!
+  ctx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0)
   const isReplay = isReplayMode.value
 
   // Declare at function scope so both branches can assign
@@ -165,7 +230,16 @@ function render() {
       trails = buildTrailsFromPoints(replayStore.visiblePoints)
       rawEvents = replayStore.visibleEvents
     }
-    const events = rawEvents.map((e: any) => ({ x: e.x, y: e.y, event_type: e.event_type, ts: e.ts }))
+    const events = rawEvents.map((e: any) => ({
+      x: e.x,
+      y: e.y,
+      event_type: e.event_type,
+      ts: e.ts,
+      reason: e.reason ?? null,
+      content: e.content ?? null,
+      user_id: e.user_id,
+      user_name: e.user_name,
+    }))
 
     renderFrame(
       ctx, vp,
@@ -184,7 +258,19 @@ function render() {
     worldStore.purgeExpiredEvents()
     const liveTrails = buildTrailsFromLive()
     const liveUsers = worldStore.onlineUsers
-    const liveEvts = worldStore.liveEvents.map((e: any) => ({ x: e.x, y: e.y, event_type: e.event_type, ts: e.ts }))
+    const now = Date.now()
+    const liveEvts = worldStore.liveEvents
+      .filter((e: any) => (e.expireAt ?? 0) > now)
+      .map((e: any) => ({
+      x: e.x,
+      y: e.y,
+      event_type: e.event_type,
+      ts: e.ts,
+      reason: e.reason ?? null,
+      content: e.content ?? null,
+      user_id: e.user_id,
+      user_name: e.user_name,
+      }))
 
     renderFrame(
       ctx, vp,
@@ -244,7 +330,8 @@ function onWheel(e: WheelEvent) {
   const rect = wrapRef.value!.getBoundingClientRect()
   const cx = e.clientX - rect.left
   const cy = e.clientY - rect.top
-  Object.assign(vp, zoomViewport(vp, e.deltaY, cx, cy))
+  // scroll up (deltaY < 0) = zoom in, scroll down = zoom out
+  Object.assign(vp, zoomViewport(vp, -e.deltaY, cx, cy))
   render()
 }
 
@@ -253,6 +340,7 @@ function onPointerDown(e: PointerEvent) {
   lastX = e.clientX
   lastY = e.clientY
   ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+  if (wrapRef.value) wrapRef.value.style.cursor = `url('${clawCursorUrl}') 4 4, grabbing`
 }
 
 function onPointerMove(e: PointerEvent) {
@@ -265,7 +353,10 @@ function onPointerMove(e: PointerEvent) {
   render()
 }
 
-function onPointerUp() { isDragging = false }
+function onPointerUp() {
+  isDragging = false
+  if (wrapRef.value) wrapRef.value.style.cursor = `url('${clawCursorUrl}') 4 4, grab`
+}
 
 // ── Hover ──────────────────────────────────────────────────────────────────
 
@@ -286,6 +377,34 @@ function onMouseMove(e: MouseEvent) {
     hoveredUserId.value = found
     render()
   }
+  if (found !== null) {
+    crawfishTooltipPos.value = { x: e.clientX + 14, y: e.clientY + 10 }
+  }
+
+  // Heatmap cell hover detection (only when heatmap layer is active)
+  if (uiStore.layerMode === 'heatmap' || uiStore.layerMode === 'both') {
+    const cells = isReplayMode.value ? replayStore.allHeatmap : worldStore.liveHeatmap
+    const maxCount = cells.reduce((m: number, c: HeatmapCell) => c.count > m ? c.count : m, 1)
+    const CELL_SZ = 30
+    const MIN_HIT = 28  // must match heatmap.ts MIN_PX
+    let hitCell: HeatmapCell | null = null
+    for (const c of cells) {
+      const wx = c.cell_x * CELL_SZ
+      const wy = c.cell_y * CELL_SZ
+      const center = worldToCanvas(wx + CELL_SZ / 2, wy + CELL_SZ / 2, vp)
+      const pt1 = worldToCanvas(wx, wy, vp)
+      const pt2 = worldToCanvas(wx + CELL_SZ, wy + CELL_SZ, vp)
+      const hw = Math.max(Math.abs(pt2.x - pt1.x), MIN_HIT) / 2
+      const hh = Math.max(Math.abs(pt2.y - pt1.y), MIN_HIT) / 2
+      if (Math.abs(cx - center.x) <= hw && Math.abs(cy - center.y) <= hh) {
+        hitCell = c; break
+      }
+    }
+    hoveredHeatCell.value = hitCell ? { ...hitCell, maxCount } : null
+    tooltipPos.value = { x: e.clientX + 14, y: e.clientY + 10 }
+  } else {
+    hoveredHeatCell.value = null
+  }
 }
 
 function onMouseLeave() {
@@ -293,15 +412,14 @@ function onMouseLeave() {
     hoveredUserId.value = null
     render()
   }
-}
-
-function zoomIn() {
-  Object.assign(vp, zoomViewport(vp, -1, vp.canvasW / 2, vp.canvasH / 2))
+  hoveredHeatCell.value = null
+}function zoomIn() {
+  Object.assign(vp, zoomViewport(vp, 1, vp.canvasW / 2, vp.canvasH / 2))
   render()
 }
 
 function zoomOut() {
-  Object.assign(vp, zoomViewport(vp, 1, vp.canvasW / 2, vp.canvasH / 2))
+  Object.assign(vp, zoomViewport(vp, -1, vp.canvasW / 2, vp.canvasH / 2))
   render()
 }
 
@@ -324,6 +442,11 @@ defineExpose({ focusUser })
 onMounted(async () => {
   resize()
   window.addEventListener('resize', resize)
+
+  // Apply custom lobster-claw cursor
+  if (wrapRef.value) {
+    wrapRef.value.style.cursor = `url('${clawCursorUrl}') 4 4, grab`
+  }
 
   // Init myUserId from token if provided
   if (props.token) {
@@ -366,10 +489,9 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   position: relative;
-  cursor: grab;
   overflow: visible;
 }
-.world-map-wrap:active { cursor: grabbing; }
+
 .world-canvas {
   display: block;
   width: 100%;
@@ -484,4 +606,135 @@ onUnmounted(() => {
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
+
+<style>
+/* Heatmap tooltip — outside scoped so Teleport renders correctly */
+.heatmap-tooltip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 9999;
+  background: rgba(61,44,36,0.88);
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.78rem;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.22);
+  max-width: 200px;
+}
+.ht-title { font-weight: 700; font-size: 0.82rem; }
+.ht-count { font-weight: 600; font-size: 1rem; color: #ffd88a; }
+.ht-meta { opacity: 0.7; font-size: 0.68rem; line-height: 1.4; margin-top: 2px; }
+
+/* ── Crawfish hover tooltip ─────────────────────────────── */
+.crawfish-tooltip {
+  position: fixed;
+  pointer-events: auto;
+  z-index: 10000;
+  background: rgba(61,44,36,0.92);
+  color: #fff;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.28);
+  max-width: 220px;
+  min-width: 120px;
+}
+.ct-name {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+}
+.ct-desc {
+  font-size: 0.75rem;
+  opacity: 0.82;
+  line-height: 1.4;
+}
+.ct-no-homepage {
+  font-size: 0.68rem;
+  opacity: 0.45;
+  font-style: italic;
+}
+.ct-homepage-btn {
+  margin-top: 4px;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 99px;
+  background: #E8623A;
+  color: #fff;
+  font-family: 'Fredoka', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  align-self: flex-start;
+}
+.ct-homepage-btn:hover { background: #d4452b; }
+
+/* ── Homepage modal ──────────────────────────────────────── */
+.homepage-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(3px);
+}
+.homepage-card {
+  background: #fffbf5;
+  border-radius: 16px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.25);
+  width: min(90vw, 560px);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.homepage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(232,98,58,0.15);
+  background: rgba(232,98,58,0.05);
+}
+.homepage-title {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #3d2c24;
+}
+.homepage-close {
+  background: none;
+  border: none;
+  font-size: 1.1rem;
+  color: rgba(61,44,36,0.5);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.12s;
+}
+.homepage-close:hover { background: rgba(232,98,58,0.12); color: #E8623A; }
+.homepage-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  color: #3d2c24;
+}
 </style>

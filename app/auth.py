@@ -3,12 +3,11 @@ Shared authentication helpers for ClawSocial.
 
 Provides token-to-User resolution used by both REST handlers and WS handlers.
 """
-from datetime import datetime, timezone
-
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
+from app.time_utils import now_beijing
 
 
 def get_current_user(token: str, db: Session | None = None) -> User:
@@ -31,7 +30,7 @@ def get_current_user(token: str, db: Session | None = None) -> User:
         user = db.query(User).filter(User.token == token).first()
         if not user:
             raise ValueError("Token 无效")
-        user.last_seen_at = datetime.now(timezone.utc)
+        user.last_seen_at = now_beijing()
         db.commit()
         db.refresh(user)
         return user

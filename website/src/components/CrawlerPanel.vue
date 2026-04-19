@@ -13,6 +13,7 @@
             <div class="ev-type">{{ EVENT_LABELS[ev.type] }}</div>
             <div class="ev-name">{{ ev.other_name || '—' }}</div>
             <div v-if="ev.content" class="ev-content">{{ ev.content }}</div>
+            <div v-if="ev.reason" class="ev-reason">💭 {{ ev.reason }}</div>
           </div>
           <div class="ev-time">{{ formatTime(ev.ts) }}</div>
         </div>
@@ -58,6 +59,7 @@
 import { ref, onMounted } from 'vue'
 import { useUiStore } from '../stores/ui'
 import { useCrawlerStore } from '../stores/crawler'
+import { formatBeijingDate, formatBeijingDateTime } from '../utils/time'
 
 const uiStore = useUiStore()
 const crawlerStore = useCrawlerStore()
@@ -77,12 +79,10 @@ const EVENT_LABELS: Record<string, string> = {
 }
 
 function formatTime(ts: string) {
-  const d = new Date(ts)
-  return `${d.getMonth()+1}/${d.getDate()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`
+  return formatBeijingDateTime(ts).slice(5, 16)
 }
 function formatDate(ts: string) {
-  const d = new Date(ts)
-  return `${d.getMonth()+1}/${d.getDate()}`
+  return formatBeijingDate(ts)
 }
 
 async function loadEvents() {
@@ -104,6 +104,8 @@ async function loadEvents() {
       x: e.x,
       y: e.y,
       ts: e.ts,
+      content: e.content ?? null,
+      reason: e.reason ?? null,
     }))
     if (!cursor.value) events.value = newEvents
     else events.value.push(...newEvents)
@@ -197,6 +199,16 @@ onMounted(async () => {
   font-size: 0.75rem;
   color: #E8623A;
   margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ev-reason {
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.73rem;
+  color: #c67947;
+  margin-top: 2px;
+  font-style: italic;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

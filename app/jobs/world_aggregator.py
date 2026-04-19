@@ -11,7 +11,7 @@ World 热力聚合 + 数据清理 APScheduler 任务
 使用 run_migration / auto-flush 时，任务中途失败不影响数据完整性。
 """
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import func, text
@@ -19,6 +19,7 @@ from sqlalchemy import func, text
 from app.database import SessionLocal
 from app.models import MovementEvent
 from app.crawfish.world.state import WorldState
+from app.time_utils import now_beijing
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ _ws_state: "WorldState | None" = None
 
 CELL_SIZE = 30  # 与 WorldState.CELL_SIZE 保持一致
 TTL_DAYS = 90
+HEATMAP_INACTIVE_TTL_DAYS = 3  # 3 天无新移动事件写入 → event_count 归零
 
 
 def _agg_cells():
@@ -44,7 +46,7 @@ def _agg_cells():
     dialect = db.bind.dialect.name if db.bind else "mysql"
     try:
         # 聚合最近 10 分钟未处理的 movement_events
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+        cutoff = now_beijing() - timedelta(minutes=10)
         rows = (
             db.query(
                 func.floor(MovementEvent.x / CELL_SIZE).label("cell_x"),
@@ -62,7 +64,7 @@ def _agg_cells():
         if not rows:
             return 0
 
-        now = datetime.now(timezone.utc)
+        now = now_beijing()
         for row in rows:
             cx = int(row.cell_x)
             cy = int(row.cell_y)
@@ -132,7 +134,7 @@ def _cleanup_old_events():
     """
     db = SessionLocal()
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=TTL_DAYS)
+        cutoff = now_beijing() - timedelta(days=TTL_DAYS)
         batch = 5000
         total = 0
 
@@ -176,6 +178,33 @@ def _cleanup_old_events():
         db.close()
 
 
+def _decay_heatmap_cells():
+    """
+    将超过 HEATMAP_INACTIVE_TTL_DAYS 天没有新移动事件写入的热力格子 event_count 归零。
+    不删除行，保留格子结构，避免热区再次活跃时反复 INSERT。
+    """
+    db = SessionLocal()
+    try:
+        cutoff = now_beijing() - timedelta(days=HEATMAP_INACTIVE_TTL_DAYS)
+        result = db.execute(
+            text("""
+                UPDATE heatmap_cells
+                SET event_count = 0, updated_at = :now
+                WHERE updated_at < :cutoff AND event_count > 0
+            """),
+            {"now": now_beijing(), "cutoff": cutoff},
+        )
+        db.commit()
+        logger.info("heatmap decay: reset %d inactive cells (cutoff=%s)", result.rowcount, cutoff.date())
+        return result.rowcount
+    except Exception:
+        logger.exception("heatmap decay failed")
+        db.rollback()
+        return 0
+    finally:
+        db.close()
+
+
 # ─── Scheduler 启动 / 关闭 ──────────────────────────────────────────────
 
 
@@ -202,8 +231,13 @@ def start():
         id="cleanup_stale_users", replace_existing=True,
         max_instances=1,
     )
+    scheduler.add_job(
+        _decay_heatmap_cells, "cron", hour=4, minute=0,
+        id="decay_heatmap_cells", replace_existing=True,
+        max_instances=1,
+    )
     scheduler.start()
-    logger.info("world scheduler started: agg=5min, cleanup=daily@03:00, stale_users=1min")
+    logger.info("world scheduler started: agg=5min, cleanup=daily@03:00, stale_users=1min, heatmap_decay=daily@04:00")
 
 
 def stop():

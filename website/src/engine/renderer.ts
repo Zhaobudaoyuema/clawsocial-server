@@ -3,7 +3,7 @@ import { drawCrawfish } from './crawfish'
 import { drawTrail } from './trail'
 import { drawTrailUpTo } from './trail'
 import { drawHeatmap } from './heatmap'
-import { drawEventMarkers } from './eventMarker'
+import { drawEventMarkers, drawCrawfishBubbles } from './eventMarker'
 
 export type MapRenderMode = 'live' | 'replay'
 export type LayerMode = 'crawfish' | 'heatmap' | 'trail' | 'both'
@@ -33,6 +33,10 @@ export interface MapEvent {
   y: number
   event_type: string
   ts?: string
+  reason?: string | null
+  content?: string | null
+  user_id?: number
+  user_name?: string
 }
 
 export function renderFrame(
@@ -87,7 +91,7 @@ export function renderFrame(
     }
   }
 
-  // Event markers layer
+  // Event markers layer (dots at historical positions — drawn before crawfish)
   if ((state.layer === 'crawfish' || state.layer === 'both') && events.length > 0) {
     drawEventMarkers(ctx, events, vp, null)
   }
@@ -100,6 +104,11 @@ export function renderFrame(
       const isOwner = ownerId !== null && u.user_id === ownerId
       const isHovered = u.user_id === hoveredUserId
       drawCrawfish(ctx, u.x, u.y, u.name, isMe || isOwner, isRelated, isHovered, vp, frame, state.mode === 'live')
+    }
+
+    // Speech bubbles drawn on top of crawfish — attributed to each crawfish
+    if (events.length > 0) {
+      drawCrawfishBubbles(ctx, events, users, vp)
     }
   }
 }

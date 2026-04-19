@@ -1,12 +1,13 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
+from app.time_utils import now_beijing
 
 
-def _utc_now() -> datetime:
-    """Return timezone-aware UTC datetime. Use as default/onupdate callable."""
-    return datetime.now(timezone.utc)
+def _beijing_now() -> datetime:
+    """Return timezone-aware Beijing datetime. Use as default/onupdate callable."""
+    return now_beijing()
 
 
 def get_friendship_pair(user_a_id: int, user_b_id: int) -> tuple[int, int]:
@@ -30,7 +31,7 @@ class User(Base):
     # friends_only   — hidden from discovery, only accepted friends can message
     # do_not_disturb — hidden from discovery, nobody can message (even friends)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)
     # 最后活跃时间：每次带 Token 的请求会更新；用于发现/好友列表等展示
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 用户自定义主页 HTML，默认空
@@ -51,7 +52,7 @@ class MovementEvent(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     x: Mapped[int] = mapped_column(Integer, nullable=False)
     y: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now, index=True)
 
 
 class SocialEvent(Base):
@@ -72,10 +73,12 @@ class SocialEvent(Base):
     event_type: Mapped[str] = mapped_column(String(16), nullable=False)
     x: Mapped[int | None] = mapped_column(Integer, nullable=True)
     y: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 可选 AI 决策理由（最多 30 字）
+    reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
     # JSON metadata: 相遇距离、消息ID 等
     # 注：列名用 event_metadata，避免与 SQLAlchemy Base.metadata 保留字冲突
     event_metadata: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now, index=True)
 
 
 class HeatmapCell(Base):
@@ -87,7 +90,7 @@ class HeatmapCell(Base):
     cell_x: Mapped[int] = mapped_column(Integer, nullable=False)
     cell_y: Mapped[int] = mapped_column(Integer, nullable=False)
     event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now, onupdate=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now, onupdate=_beijing_now)
 
 
 class Message(Base):
@@ -111,7 +114,7 @@ class Message(Base):
     # friend_request — first message from a stranger (pending friendship)
     # system         — server-generated event notification
     msg_type: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)
     # 消息被读取时间（读取时由服务端更新，用于反馈给发送方）
     read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 是否为公开消息（发布到公共频道）
@@ -141,8 +144,8 @@ class Friendship(Base):
     initiated_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     blocked_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now, onupdate=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now, onupdate=_beijing_now)
 
 
 class Stats(Base):
@@ -163,7 +166,7 @@ class RegistrationLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ip: Mapped[str] = mapped_column(String(45), nullable=False)  # IPv6 最长 45
     registration_date: Mapped[date] = mapped_column(Date, nullable=False)  # UTC 自然日（便于按天聚合）
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)
 
 
 class ShareToken(Base):
@@ -177,7 +180,7 @@ class ShareToken(Base):
     speed: Mapped[int] = mapped_column(Integer, default=1)
     # NULL = 永不过期
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)
 
 
 class EventMarker(Base):
@@ -193,4 +196,4 @@ class EventMarker(Base):
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
     x: Mapped[int] = mapped_column(Integer, nullable=False)
     y: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)

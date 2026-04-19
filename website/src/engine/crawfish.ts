@@ -1,31 +1,6 @@
 import { worldToCanvas } from './viewport'
 
-const LOBSTER_RED_HOVER = '#D4542B'
 const OWNER_GOLD = '#F4C430'
-const ME_CYAN = '#4ECDC4'
-
-// Desaturate an HSL color string by reducing saturation
-function desaturateColor(color: string): string {
-  const match = color.match(/hsl\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)%?,\s*(\d+(?:\.\d+)?)%?\)/)
-  if (!match) return color
-  const h = parseFloat(match[1])
-  const s = Math.max(30, parseFloat(match[2]) * 0.4)
-  const l = parseFloat(match[3])
-  return `hsl(${h}, ${s}%, ${l}%)`
-}
-
-// isMe visual: gold pulse for self, cyan ring for related users
-function getBorderColor(isMe: boolean, isRelated: boolean): string {
-  if (isMe) return OWNER_GOLD
-  if (isRelated) return ME_CYAN
-  return ''
-}
-
-// Get crawfish color, desaturated when not live
-function getCrawfishColor(name: string, isLive: boolean): string {
-  const base = nameToColor(name)
-  return isLive ? base : desaturateColor(base)
-}
 
 // Generate consistent color from name hash (exported for external use)
 export function nameToColor(name: string): string {
@@ -42,7 +17,127 @@ export function nameToInitial(name: string): string {
   return (name.charAt(0) || '?').toUpperCase()
 }
 
-// Draw crawfish as dot (for zoomed-out view)
+// ── SVG lobster icon (24×24, brand orange) ──────────────────────────────────
+
+const _LOBSTER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <ellipse cx="12" cy="14" rx="5" ry="7" fill="#E8623A" stroke="#b84020" stroke-width="0.6"/>
+  <circle cx="12" cy="7" r="3.5" fill="#E8623A" stroke="#b84020" stroke-width="0.6"/>
+  <ellipse cx="6.5" cy="10" rx="3.5" ry="2" fill="#E8623A" stroke="#b84020" stroke-width="0.6" transform="rotate(-20 6.5 10)"/>
+  <ellipse cx="17.5" cy="10" rx="3.5" ry="2" fill="#E8623A" stroke="#b84020" stroke-width="0.6" transform="rotate(20 17.5 10)"/>
+  <line x1="10.5" y1="4.2" x2="7" y2="1" stroke="#b84020" stroke-width="1" stroke-linecap="round"/>
+  <line x1="13.5" y1="4.2" x2="17" y2="1" stroke="#b84020" stroke-width="1" stroke-linecap="round"/>
+  <ellipse cx="9" cy="21" rx="2.5" ry="1.5" fill="#c84e28" transform="rotate(-20 9 21)"/>
+  <ellipse cx="12" cy="22" rx="2.5" ry="1.5" fill="#c84e28"/>
+  <ellipse cx="15" cy="21" rx="2.5" ry="1.5" fill="#c84e28" transform="rotate(20 15 21)"/>
+  <ellipse cx="11" cy="12" rx="1.8" ry="2.8" fill="#ff8c5a" opacity="0.35"/>
+</svg>`
+
+// Hovered / isMe variants — same shape, different tint
+const _LOBSTER_SVG_HOVER = _LOBSTER_SVG
+  .replace(/#E8623A/g, '#D4452B')
+  .replace(/#b84020/g, '#8a2010')
+  .replace(/#c84e28/g, '#a03018')
+  .replace(/#ff8c5a/g, '#ff6a3a')
+
+function _makeImg(svg: string): HTMLImageElement {
+  const img = new Image()
+  img.src = `data:image/svg+xml,${encodeURIComponent(svg)}`
+  return img
+}
+
+const _img = _makeImg(_LOBSTER_SVG)
+const _imgHover = _makeImg(_LOBSTER_SVG_HOVER)
+
+// ── Public draw function ──────────────────────────────────────────────────────
+
+const ICON_SIZE = 22  // fixed canvas-pixel size — baseline at 100% zoom
+
+export function drawCrawfish(
+  ctx: CanvasRenderingContext2D,
+  wx: number, wy: number,
+  name: string,
+  isMe: boolean,
+  _isRelated: boolean,
+  isHovered: boolean,
+  vp: import('./viewport').Viewport,
+  frame: number = 0,
+  isLive = true,
+) {
+  const pt = worldToCanvas(wx, wy, vp)
+  const half = ICON_SIZE / 2
+
+  ctx.save()
+
+  // isMe: animated gold ring
+  if (isMe) {
+    const pulse = 1 + Math.sin(frame * 0.08) * 0.12
+    ctx.beginPath()
+    ctx.arc(pt.x, pt.y, half + 5 * pulse, 0, Math.PI * 2)
+    ctx.strokeStyle = OWNER_GOLD
+    ctx.lineWidth = 2.5
+    ctx.stroke()
+  }
+
+  // Hover: orange glow
+  if (isHovered) {
+    ctx.beginPath()
+    ctx.arc(pt.x, pt.y, half + 7, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(232,98,58,0.22)'
+    ctx.fill()
+    ctx.beginPath()
+    ctx.arc(pt.x, pt.y, half + 4, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(232,98,58,0.6)'
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+  }
+
+  // Offline: dimmed
+  ctx.globalAlpha = isLive ? 1 : 0.4
+
+  // Draw SVG icon (hover variant or normal)
+  const icon = isHovered ? _imgHover : _img
+  if (icon.complete && icon.naturalWidth > 0) {
+    ctx.drawImage(icon, pt.x - half, pt.y - half, ICON_SIZE, ICON_SIZE)
+  } else {
+    // Fallback dot while image loads
+    ctx.beginPath()
+    ctx.arc(pt.x, pt.y, isHovered ? 8 : 6, 0, Math.PI * 2)
+    ctx.fillStyle = nameToColor(name)
+    ctx.fill()
+  }
+
+  ctx.globalAlpha = 1
+
+  // Name tag below icon when hovered
+  if (isHovered) {
+    const label = name
+    const fontSize = 11
+    ctx.font = `600 ${fontSize}px "Nunito", sans-serif`
+    const tw = ctx.measureText(label).width
+    const padding = 4
+    const bw = tw + padding * 2
+    const bh = fontSize + padding * 2
+    const bx = pt.x - bw / 2
+    const by = pt.y + half + 4
+
+    // Background pill
+    ctx.fillStyle = 'rgba(61,44,36,0.85)'
+    ctx.beginPath()
+    ctx.roundRect(bx, by, bw, bh, 4)
+    ctx.fill()
+
+    // Name text
+    ctx.fillStyle = '#fff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(label, pt.x, by + bh / 2)
+  }
+
+  ctx.restore()
+}
+
+// Keep old exports referenced by renderer.ts (drawDot / drawAvatar are no longer used
+// but kept as thin wrappers to avoid import errors during transition)
 export function drawDot(
   ctx: CanvasRenderingContext2D,
   wx: number, wy: number,
@@ -51,22 +146,9 @@ export function drawDot(
   isHovered = false,
   isLive = true,
 ) {
-  const pt = worldToCanvas(wx, wy, vp)
-  const r = isHovered ? 9 : 6
-  const color = getCrawfishColor(name, isLive)
-  ctx.shadowColor = color
-  ctx.shadowBlur = isHovered ? 12 : 5
-  ctx.beginPath()
-  ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2)
-  ctx.fillStyle = isHovered ? LOBSTER_RED_HOVER : color
-  ctx.fill()
-  ctx.shadowBlur = 0
-  ctx.strokeStyle = '#fff'
-  ctx.lineWidth = 1.5
-  ctx.stroke()
+  drawCrawfish(ctx, wx, wy, name, false, false, isHovered, vp, 0, isLive)
 }
 
-// Draw crawfish as avatar (for zoomed-in view)
 export function drawAvatar(
   ctx: CanvasRenderingContext2D,
   wx: number, wy: number,
@@ -75,76 +157,8 @@ export function drawAvatar(
   isRelated: boolean,
   isHovered: boolean,
   vp: import('./viewport').Viewport,
-  frame: number = 0,
+  frame = 0,
   isLive = true,
 ) {
-  const pt = worldToCanvas(wx, wy, vp)
-  const size = isHovered ? 36 : 28
-
-  // Background circle
-  const bgColor = getCrawfishColor(name, isLive)
-  ctx.beginPath()
-  ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2)
-  ctx.fillStyle = bgColor
-  ctx.fill()
-
-  // isMe gold pulse / related cyan ring
-  const borderColor = getBorderColor(isMe, isRelated)
-  if (borderColor) {
-    const pulse = isMe ? (1 + Math.sin(frame * 0.08) * 0.1) : 1
-    ctx.beginPath()
-    ctx.arc(pt.x, pt.y, size + 4, 0, Math.PI * 2)
-    ctx.strokeStyle = borderColor
-    ctx.lineWidth = (isMe ? 2.5 : 2) * pulse
-    ctx.stroke()
-  }
-
-  // Lobster silhouette (simplified)
-  ctx.save()
-  ctx.translate(pt.x - size * 0.7, pt.y - size * 0.7)
-  ctx.scale(size / 28, size / 28)
-
-  ctx.beginPath()
-  ctx.ellipse(10, 14, 7, 9, 0, 0, Math.PI * 2)
-  ctx.fillStyle = '#fff'
-  ctx.globalAlpha = 0.85
-  ctx.fill()
-  ctx.globalAlpha = 1
-
-  ctx.beginPath()
-  ctx.ellipse(2, 8, 4, 3, -0.5, 0, Math.PI * 2)
-  ctx.ellipse(18, 8, 4, 3, 0.5, 0, Math.PI * 2)
-  ctx.fillStyle = '#fff'
-  ctx.globalAlpha = 0.85
-  ctx.fill()
-  ctx.globalAlpha = 1
-
-  ctx.restore()
-
-  // First letter overlay
-  ctx.font = `bold ${Math.round(size * 0.6)}px Fredoka, sans-serif`
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.fillStyle = '#fff'
-  ctx.fillText(nameToInitial(name), pt.x, pt.y)
-}
-
-// Draw crawfish based on zoom level (auto-switch)
-export function drawCrawfish(
-  ctx: CanvasRenderingContext2D,
-  wx: number, wy: number,
-  name: string,
-  isMe: boolean,
-  isRelated: boolean,
-  isHovered: boolean,
-  vp: import('./viewport').Viewport,
-  frame: number = 0,
-  isLive = true,
-) {
-  const threshold = 0.08
-  if (vp.scale >= threshold) {
-    drawAvatar(ctx, wx, wy, name, isMe, isRelated, isHovered, vp, frame, isLive)
-  } else {
-    drawDot(ctx, wx, wy, name, vp, isHovered, isLive)
-  }
+  drawCrawfish(ctx, wx, wy, name, isMe, isRelated, isHovered, vp, frame, isLive)
 }

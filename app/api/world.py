@@ -18,6 +18,7 @@ from app.database import get_db
 from app.models import Friendship, HeatmapCell, Message, MovementEvent, SocialEvent, User
 from app.crawfish.world.state import WorldConfig, WorldState
 from app.api.ws_client import _record_social_event, _do_send_sync as _ws_client_send, push_to_ws_client_sync
+from app.time_utils import now_beijing
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def _get_user(token: str, db: Session) -> User:
     user = db.query(User).filter(User.token == token).first()
     if not user:
         raise HTTPException(status_code=401, detail="Token 无效")
-    user.last_seen_at = datetime.now(timezone.utc)
+    user.last_seen_at = now_beijing()
     db.commit()
     return user
 
@@ -143,7 +144,7 @@ def world_stats(request: Request, db: Session = Depends(get_db)) -> dict[str, An
     online_count = ws.get_online_count()
 
     total = db.query(User).count()
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now_beijing().replace(hour=0, minute=0, second=0, microsecond=0)
 
     today_reg = db.query(func.count(RegistrationLog.id)).filter(
         RegistrationLog.registration_date == today_start.date()
@@ -206,7 +207,7 @@ def world_history(
     req_id = uuid.uuid4().hex[:8]
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24)
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    since = now_beijing() - timedelta(hours=hours)
 
     if x_token:
         user = _get_user(x_token, db)
@@ -277,7 +278,7 @@ def world_events(
     logger.info("[REQ=%s] [anon] → GET /api/world/events  window=%s", req_id, window)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    since = now_beijing() - timedelta(hours=hours)
     events = (
         db.query(SocialEvent)
         .filter(SocialEvent.created_at >= since)
@@ -301,6 +302,7 @@ def world_events(
             "x": e.x or 0,
             "y": e.y or 0,
             "ts": e.created_at.isoformat(),
+            "reason": e.reason,
         }
         result.append(item)
     logger.info("[REQ=%s] [anon] ← 200  全服事件=%d", req_id, len(result))
@@ -319,7 +321,7 @@ def world_social(
     logger.info("[REQ=%s] [uid=%d] → GET /api/world/social  window=%s", req_id, user.id, window)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    since = now_beijing() - timedelta(hours=hours)
     events = (
         db.query(SocialEvent)
         .filter(SocialEvent.user_id == user.id, SocialEvent.created_at >= since)
@@ -364,6 +366,7 @@ def world_social(
             "y": e.y or 0,
             "ts": e.created_at.isoformat(),
             "content": None,
+            "reason": e.reason,
         }
         if e.event_type == "message" and e.other_user_id:
             item["content"] = message_content_map.get((e.user_id, e.other_user_id)) or None
@@ -382,7 +385,7 @@ def world_heatmap(
     logger.info("[REQ=%s] [anon] → GET /api/world/heatmap  window=%s", req_id, window)
     delta_map = {"1h": 1, "24h": 24, "7d": 24 * 7}
     hours = delta_map.get(window, 24 * 7)
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    since = now_beijing() - timedelta(hours=hours)
     from app.models import HeatmapCell
     cells = db.query(HeatmapCell).filter(HeatmapCell.updated_at >= since).limit(10000).all()
     logger.info("[REQ=%s] [anon] ← 200  格子=%d", req_id, len(cells))
@@ -407,7 +410,7 @@ def world_share_card(
     target = me  # always return the caller's own card
     if not target:
         raise HTTPException(status_code=404, detail="用户不存在")
-    since = datetime.now(timezone.utc) - timedelta(days=7)
+    since = now_beijing() - timedelta(days=7)
     try:
         from app.models import MovementEvent, SocialEvent
         move_count = (
@@ -507,7 +510,7 @@ async def ws_world_observer(websocket: WebSocket):
         try:
             from app.database import SessionLocal
             from app.models import RegistrationLog
-            today = datetime.now(timezone.utc).date()
+            today = now_beijing().date()
             # 缓入减少 DB 查询频率（total/today_new 每 10 个周期刷新一次）
             stats_refresh_counter = 0
             cached_total = 0
@@ -558,7 +561,7 @@ async def ws_world_observer(websocket: WebSocket):
                         "total": cached_total,
                         "today_new": cached_today_new,
                     },
-                    "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
+                    "ts": int(now_beijing().timestamp() * 1000),
                 })
                 push_count += 1
                 if push_count % 30 == 0:
@@ -674,7 +677,7 @@ async def ws_world(websocket: WebSocket, x_token: str = Header(None, alias="X-To
                         "me": _state_dict(me_state, user.id),
                         "users": [_state_dict(s, user.id) for s in visible],
                         "radius": ws_state.config.view_radius,
-                        "ts": int(datetime.now(timezone.utc).timestamp() * 1000),
+                        "ts": int(now_beijing().timestamp() * 1000),
                     })
                 except Exception as exc:
                     logger.warning("[%s] [uid=%d] snapshot 异常: %s", ws_id, user.id, exc)
@@ -814,7 +817,7 @@ async def _bg_persist_move(user_id: int, x: int, y: int):
         return
     db = next(get_db())
     try:
-        db.add(MovementEvent(user_id=user_id, x=x, y=y, created_at=datetime.now(timezone.utc)))
+        db.add(MovementEvent(user_id=user_id, x=x, y=y, created_at=now_beijing()))
         db.commit()
     except Exception as exc:
         logger.warning("persist move failed: %s", exc)
@@ -884,7 +887,7 @@ def _do_send_sync(from_id: int, to_id: int, content: str) -> tuple[bool, str]:
         if not recipient:
             return False, "user not found"
 
-        now = datetime.now(timezone.utc)
+        now = now_beijing()
         msg_type = "chat"
         friendship = (
             db.query(Friendship)
@@ -936,7 +939,7 @@ _ACTIVE_LAMBDA_PER_SEC = _ACTIVE_LAMBDA / 3600
 
 def _calc_active_score(user_id: int, db: Session) -> float:
     """计算用户实时活跃度分（综合事件分 × 时间衰减）"""
-    cutoff = datetime.now(timezone.utc)
+    cutoff = now_beijing()
     score = 0.0
     hours_since = 0.0
 
@@ -1004,7 +1007,7 @@ def world_explored(
     返回当前龙虾的探索覆盖率 + 边界格子列表（探索方向建议）。
     """
     user = _get_user(x_token, db)
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    seven_days_ago = now_beijing() - timedelta(days=7)
     ws = _world_state_from_app(request)
     my_state = ws.users.get(user.id)
     my_x = my_state.x if my_state else (user.last_x or 5000)
@@ -1047,7 +1050,7 @@ def world_explored(
         "explored_cells": explored_cells,
         "frontiers": frontiers[:8],
         "my_position": {"x": my_x, "y": my_y},
-        "last_update": datetime.now(timezone.utc).isoformat(),
+        "last_update": now_beijing().isoformat(),
     }
 
 
@@ -1144,7 +1147,7 @@ def world_leaderboard(
     _get_user(x_token, db)
 
     leaderboard = []
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
     seven_days_ago = now - timedelta(days=7)
 
     for u in db.query(User).all():
@@ -1220,7 +1223,7 @@ def world_homepage_public(
     active_score = _calc_active_score(target_id, db)
 
     # 统计
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    seven_days_ago = now_beijing() - timedelta(days=7)
     moves = (
         db.query(func.count(MovementEvent.id))
         .filter(MovementEvent.user_id == target_id, MovementEvent.created_at >= seven_days_ago)
@@ -1245,7 +1248,7 @@ def world_homepage_public(
     )
 
     # 新虾判断（注册7天内）
-    days_since_created = (datetime.now(timezone.utc) - _aware(target.created_at)).days
+    days_since_created = (now_beijing() - _aware(target.created_at)).days
     is_new = days_since_created <= 7
 
     return {
@@ -1312,7 +1315,7 @@ def world_share_events(
         raise HTTPException(status_code=404, detail="用户不存在")
 
     days = 7 if window == "7d" else (1 if window == "24h" else 0)
-    since = datetime.now(timezone.utc) - timedelta(days=days) if days else datetime.min.replace(tzinfo=timezone.utc)
+    since = now_beijing() - timedelta(days=days) if days else datetime.min.replace(tzinfo=timezone.utc)
 
     events = (
         db.query(SocialEvent)
@@ -1348,7 +1351,7 @@ def world_share_stats(
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    seven_days_ago = now_beijing() - timedelta(days=7)
     move_count = (
         db.query(func.count(MovementEvent.id))
         .filter(MovementEvent.user_id == user_id, MovementEvent.created_at >= seven_days_ago)

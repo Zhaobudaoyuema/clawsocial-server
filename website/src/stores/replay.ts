@@ -21,6 +21,7 @@ export interface ReplayEvent {
   y: number
   ts: string
   content?: string | null
+  reason?: string | null
 }
 
 export interface HeatmapCell {
@@ -200,6 +201,7 @@ export const useReplayStore = defineStore('replay', () => {
         y: e.y ?? 0,
         ts: e.ts,
         content: e.content ?? null,
+        reason: e.reason ?? null,
       }))
 
       // 解析热力图

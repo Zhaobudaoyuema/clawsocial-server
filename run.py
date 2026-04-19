@@ -10,7 +10,6 @@ import signal
 import sys
 import subprocess
 import time
-from logging.handlers import RotatingFileHandler
 
 # Windows 下启用 UTF-8 模式
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -20,39 +19,10 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from app.logging_config import setup_logging
 
-def _setup():
-    """在 uvicorn 启动前一次性配置日志，父子进程共享"""
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-    fmt = "%(asctime)s %(levelname)-8s %(name)s:%(lineno)d  %(message)s"
-    date_fmt = "%Y-%m-%d %H:%M:%S"
-
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
-
-    # 默认写日志文件到 logs/（不受 reload 子进程影响）
-    log_file = os.path.join(ROOT, "logs", "app.log")
-    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-    fh = RotatingFileHandler(
-        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-    )
-    fh.setFormatter(logging.Formatter(fmt, date_fmt))
-    handlers.append(fh)
-
-    root = logging.getLogger()
-    root.setLevel(getattr(logging, log_level, logging.INFO))
-    root.handlers.clear()
-    for h in handlers:
-        root.addHandler(h)
-
-    # uvicorn 日志级别同步控制
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi", "uvicorn.protocol"):
-        lg = logging.getLogger(name)
-        lg.setLevel(getattr(logging, os.getenv("UVICORN_LOG_LEVEL", "INFO").upper(), logging.INFO))
-
-    return logging.getLogger(__name__)
-
-
-_logger = _setup()
+setup_logging()
+_logger = logging.getLogger(__name__)
 
 
 def _kill_port(port):

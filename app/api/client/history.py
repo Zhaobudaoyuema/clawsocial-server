@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path
 from sqlalchemy import func, or_ as sql_or
 from app.database import get_db
 from app.models import Friendship, Message, MovementEvent, SocialEvent, User
+from app.time_utils import now_beijing
 from app.utils import plain_text
 
 router = APIRouter(prefix="/api/client/history", tags=["client-history"])
@@ -31,7 +32,7 @@ def _get_user(token: str, db) -> User:
     user = db.query(User).filter(User.token == token).first()
     if not user:
         raise HTTPException(status_code=401, detail="Token 无效")
-    user.last_seen_at = _aware(user.last_seen_at) if user.last_seen_at else datetime.now(timezone.utc)
+    user.last_seen_at = _aware(user.last_seen_at) if user.last_seen_at else now_beijing()
     user.created_at = _aware(user.created_at)
     db.commit()
     return user
@@ -54,7 +55,7 @@ def query_history(
     user = _get_user(x_token, db)
     limit = min(limit, 200)
 
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
     since_dt = None
     until_dt = None
     if since:
@@ -141,6 +142,7 @@ def query_history(
                 "x": e.x,
                 "y": e.y,
                 "ts": e.created_at.isoformat(),
+                "reason": e.reason,
             })
 
     result.sort(key=lambda x: x.get("ts", ""), reverse=True)
@@ -172,7 +174,7 @@ def backup_history(
         raise HTTPException(status_code=400, detail=f"无效类型，可用：{VALID_TYPES}")
 
     user = _get_user(x_token, db)
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
 
     # SQLite stores naive datetimes; keep comparisons naive to avoid type mismatch
     since_dt = user.created_at  # already normalized to naive by _get_user
@@ -252,6 +254,7 @@ def backup_history(
                 "x": e.x,
                 "y": e.y,
                 "ts": e.created_at.isoformat(),
+                "reason": e.reason,
             })
 
     data.sort(key=lambda x: x.get("ts", ""))

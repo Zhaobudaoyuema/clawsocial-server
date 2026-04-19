@@ -10,6 +10,8 @@ export interface WorldUser {
   y: number
   isMe?: boolean
   isOnline?: boolean
+  description?: string | null
+  homepage?: string | null
 }
 
 export interface TrailPoint {
@@ -26,13 +28,18 @@ export interface LiveEvent {
   user_name: string
   event_type: string
   other_user_id: number | null
+  other_user_name?: string
   x: number
   y: number
   ts: string
+  reason?: string | null
+  content?: string | null
   expireAt: number  // unix ms
 }
 
 export const useWorldStore = defineStore('world', () => {
+  const MAX_LIVE_EVENTS = 300
+  const MAP_EVENT_TTL_MS = 15000
   // ── Users ─────────────────────────────────────────────────────────────────
   const users = ref<Map<number, WorldUser>>(new Map())
   const myUserId = ref<number | null>(null)
@@ -117,6 +124,8 @@ export const useWorldStore = defineStore('world', () => {
         y: u.y,
         isMe: myUid != null && u.user_id === myUid,
         isOnline: true,
+        description: u.description ?? null,
+        homepage: u.homepage ?? null,
       })
 
       // Position change detection: only append if moved
@@ -152,30 +161,80 @@ export const useWorldStore = defineStore('world', () => {
 
   /**
    * Called when WS pushes new event(s).
-   * Each event gets expireAt = now + 2s.
+   * Each event gets expireAt = now + MAP_EVENT_TTL_MS.
+   * Deduplicates by DB id (reconnect safety) AND by canonical pair-key
+   * (collapses both-sides records for message/encounter/friendship).
    */
   function appendLiveEvents(events: LiveEvent[]) {
     const now = Date.now()
-    const withExpiry: LiveEvent[] = events.map(e => ({
-      ...e,
-      expireAt: now + 2000,
-    }))
-    liveEvents.value.push(...withExpiry)
+
+    // Build canonical key for bidirectional events that generate 2 DB rows
+    const BIDIRECTIONAL = new Set(['message', 'encounter', 'encountered', 'friendship'])
+    function canonicalKey(e: LiveEvent): string | null {
+      if (!BIDIRECTIONAL.has(e.event_type)) return null
+      const uid1 = Math.min(e.user_id, e.other_user_id ?? 0)
+      const uid2 = Math.max(e.user_id, e.other_user_id ?? 0)
+      // Collapse "encounter" + "encountered" into the same bucket
+      const normalType = e.event_type === 'encountered' ? 'encounter' : e.event_type
+      return `${normalType}|${uid1}|${uid2}|${(e.ts ?? '').slice(0, 19)}`
+    }
+
+    // Seed the canonical-key set from existing events
+    const existingKeys = new Set<string>()
+    for (const ev of liveEvents.value) {
+      const k = canonicalKey(ev)
+      if (k) existingKeys.add(k)
+    }
+
+    for (const incoming of events) {
+      const nextExpireAt = now + MAP_EVENT_TTL_MS
+
+      // 1. ID-based dedup (reconnect catch-up)
+      const idx = liveEvents.value.findIndex(e => e.id === incoming.id)
+      if (idx >= 0) {
+        liveEvents.value[idx] = {
+          ...liveEvents.value[idx],
+          ...incoming,
+          expireAt: nextExpireAt,
+        }
+        continue
+      }
+
+      // 2. Canonical-key dedup (both-sides rows for same interaction)
+      const ck = canonicalKey(incoming)
+      if (ck) {
+        if (existingKeys.has(ck)) continue
+        existingKeys.add(ck)
+      }
+
+      liveEvents.value.push({
+        ...incoming,
+        expireAt: nextExpireAt,
+      })
+    }
+    // Keep a bounded recent-event list for the side panel.
+    if (liveEvents.value.length > MAX_LIVE_EVENTS) {
+      liveEvents.value.splice(0, liveEvents.value.length - MAX_LIVE_EVENTS)
+    }
   }
 
   /**
-   * Called each animation frame to purge expired events.
+   * Keep list size bounded; map marker TTL is handled in renderer.
    */
   function purgeExpiredEvents() {
-    const now = Date.now()
-    liveEvents.value = liveEvents.value.filter(e => e.expireAt > now)
+    if (liveEvents.value.length > MAX_LIVE_EVENTS) {
+      liveEvents.value.splice(0, liveEvents.value.length - MAX_LIVE_EVENTS)
+    }
   }
 
   // ── WS connection ─────────────────────────────────────────────────────────
 
-  function connect(token?: string | null) {
+  function connect(token?: string | null, isReconnect = false) {
     if (_ws) _ws.close()
     _token = token ?? null
+    if (!isReconnect) {
+      liveEvents.value = []
+    }
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const url = `${proto}//${location.host}/ws/observe${token ? `?token=${encodeURIComponent(token)}` : ''}`
@@ -186,7 +245,7 @@ export const useWorldStore = defineStore('world', () => {
       wsConnected.value = false
       cleanupOfflineUsers()
       // Reconnect after 3s
-      setTimeout(() => connect(_token), 3000)
+      setTimeout(() => connect(_token, true), 3000)
     }
     _ws.onerror = () => { _ws?.close() }
 

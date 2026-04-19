@@ -2,6 +2,7 @@
 Tests for each API endpoint. Uses in-memory SQLite + dependency_overrides.
 """
 import pytest
+from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 
 
@@ -37,18 +38,23 @@ def test_register_ok(client: TestClient):
         json={"name": "alice", "description": "hi", "status": "open"},
     )
     assert r.status_code == 200
-    assert "Token：" in r.text
-    assert "注册成功" in r.text
-    assert "alice" in r.text
+    data = r.json()
+    assert "token" in data
+    assert data["user_name"] == "alice"
+    assert data["user_id"] > 0
+    assert "world_url" in data
 
 
 def test_register_duplicate_name(client: TestClient):
     client.post("/register", json={"name": "bob", "status": "open"})
     r = client.post("/register", json={"name": "bob", "status": "open"})
-    # 409 name taken, or 429 same-IP same-day, or 200 with error message
+    # 409 name taken, or 429 same-IP same-day, or 200 with name_was_changed
     assert r.status_code in (200, 409, 429)
     if r.status_code == 200:
-        assert "错误" in r.text or "已被使用" in r.text or "仅允许" in r.text
+        data = r.json()
+        assert data.get("name_was_changed") is True
+        assert "original_name" in data
+        assert "notice" in data  # Chinese notice field present
 
 
 def test_register_validation(client: TestClient):
@@ -126,6 +132,68 @@ def test_world_social_ok(client: TestClient, token):
     assert data["user_id"] == _id
     assert "events" in data
     assert isinstance(data["events"], list)
+
+
+def test_world_social_reason_field(client: TestClient, token, db):
+    """GET /api/world/social should expose top-level reason."""
+    from app.models import SocialEvent
+
+    uid, tok = token
+    db.add_all([
+        SocialEvent(
+            id=101,
+            user_id=uid,
+            event_type="message",
+            other_user_id=None,
+            x=1,
+            y=2,
+            reason="主动打招呼",
+            created_at=datetime.now(timezone.utc),
+        ),
+        SocialEvent(
+            id=102,
+            user_id=uid,
+            event_type="encounter",
+            other_user_id=None,
+            x=3,
+            y=4,
+            reason=None,
+            created_at=datetime.now(timezone.utc),
+        ),
+    ])
+    db.commit()
+
+    r = client.get("/api/world/social", headers={"X-Token": tok})
+    assert r.status_code == 200
+    data = r.json()
+    reasons = [ev.get("reason") for ev in data["events"]]
+    assert "主动打招呼" in reasons
+    assert any(reason is None for reason in reasons)
+
+
+def test_world_events_reason_field(client: TestClient, token, db):
+    """GET /api/world/events should expose top-level reason."""
+    from app.models import SocialEvent
+
+    uid, _tok = token
+    db.add(
+        SocialEvent(
+            id=201,
+            user_id=uid,
+            event_type="encounter",
+            other_user_id=None,
+            x=10,
+            y=20,
+            reason="向东探索",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+
+    r = client.get("/api/world/events?window=24h")
+    assert r.status_code == 200
+    data = r.json()
+    assert any(ev.get("reason") == "向东探索" for ev in data["events"])
 
 
 def test_world_heatmap_no_token(client: TestClient):
@@ -364,6 +432,44 @@ def test_history_social(client: TestClient, token):
     assert r.status_code == 200
     data = r.json()
     assert data["type"] == "social"
+
+
+def test_history_social_reason_field(client: TestClient, token, db):
+    """GET /api/client/history/social should expose top-level reason."""
+    from app.models import SocialEvent
+
+    uid, tok = token
+    db.add_all([
+        SocialEvent(
+            id=301,
+            user_id=uid,
+            event_type="message",
+            other_user_id=None,
+            x=100,
+            y=200,
+            reason="测试 reason 展示",
+            created_at=datetime.now(timezone.utc),
+        ),
+        SocialEvent(
+            id=302,
+            user_id=uid,
+            event_type="departure",
+            other_user_id=None,
+            x=100,
+            y=200,
+            reason=None,
+            created_at=datetime.now(timezone.utc),
+        ),
+    ])
+    db.commit()
+
+    r = client.get("/api/client/history/social", headers={"X-Token": tok})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["type"] == "social"
+    reasons = [ev.get("reason") for ev in data["data"]]
+    assert "测试 reason 展示" in reasons
+    assert any(reason is None for reason in reasons)
 
 
 def test_history_backup(client: TestClient, token):

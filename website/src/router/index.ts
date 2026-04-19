@@ -12,6 +12,16 @@ const router = createRouter({
       component: HomeView,
     },
     {
+      path: '/journal',
+      redirect: { name: 'blog' },
+    },
+    {
+      // 分层浏览 docs/home 子文件夹（先进文件夹再看到文章；path 对应 docs/home 下相对路径）
+      path: '/journal/:pathMatch(.*)*',
+      name: 'journal-browse',
+      component: HomeView,
+    },
+    {
       path: '/home',
       name: 'home',
       component: () => import('../views/HomePage.vue'),

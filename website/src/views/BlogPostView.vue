@@ -22,8 +22,8 @@
           </div>
         </div>
         <nav class="header-nav">
-          <button class="nav-back" @click="router.push('/')">
-            ← 返回首页
+          <button class="nav-back" @click="goBackFromBlog">
+            {{ backLabel }}
           </button>
         </nav>
       </div>
@@ -40,7 +40,7 @@
       <div v-else-if="error" class="post-error">
         <h2>文章不存在</h2>
         <p>无法找到这篇文章，可能已被移除。</p>
-        <button class="back-btn" @click="router.push('/')">← 返回首页</button>
+        <button class="back-btn" @click="goBackFromBlog">{{ backLabel }}</button>
       </div>
 
       <!-- 文章内容 -->
@@ -57,7 +57,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
@@ -69,6 +69,26 @@ const route = useRoute()
 const loading = ref(true)
 const error = ref(false)
 const renderedHtml = ref('')
+
+function currentSlug(): string {
+  const s = route.params.slug
+  return Array.isArray(s) ? s.join('/') : String(s ?? '')
+}
+
+const backLabel = computed(() => {
+  const slug = currentSlug()
+  return slug.includes('/') ? '← 返回目录' : '← 返回首页'
+})
+
+function goBackFromBlog() {
+  const slug = currentSlug()
+  const i = slug.lastIndexOf('/')
+  if (i > 0) {
+    router.push({ name: 'journal-browse', params: { pathMatch: slug.slice(0, i) } })
+  } else {
+    router.push({ name: 'blog' })
+  }
+}
 
 const md = new MarkdownIt({
   html: true,

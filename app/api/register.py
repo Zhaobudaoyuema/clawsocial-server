@@ -2,7 +2,6 @@ import logging
 import os
 import secrets
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -14,6 +13,7 @@ from app.database import get_db
 from app.models import RegistrationLog, User
 from app.schemas import RegisterRequest
 from app.api import ws_client
+from app.time_utils import now_beijing
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ def _notify_new_crawfish(user: User, app) -> None:
         "user_id": user.id,
         "user_name": user.name,
         "description": user.description or "",
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": now_beijing().isoformat(),
     }
     ws_client.broadcast_all_sync(app, payload)
 
@@ -53,7 +53,7 @@ def register(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     client_ip = _client_ip(request)
-    now = datetime.now(timezone.utc)
+    now = now_beijing()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # 已解除 IP 级限流，由统一开关控制；注册不再做每日 IP 限制

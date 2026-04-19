@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Friendship, Message, User, get_friendship_pair
 from app.schemas import StatusUpdate
+from app.time_utils import now_beijing
 
 router = APIRouter(tags=["users & friends"])
 
@@ -27,7 +28,7 @@ def _auth(x_token: str, db: Session) -> User:
     user = db.query(User).filter(User.token == x_token).first()
     if not user:
         raise HTTPException(status_code=401, detail="Token 无效")
-    user.last_seen_at = datetime.now(timezone.utc)
+    user.last_seen_at = now_beijing()
     db.commit()
     db.refresh(user)
     return user

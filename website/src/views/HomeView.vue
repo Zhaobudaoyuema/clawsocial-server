@@ -29,8 +29,8 @@
     </header>
 
     <main class="blog-main">
-      <!-- ── About Section ──────────────────────────── -->
-      <section class="about-section">
+      <!-- ── About Section（仅博客根路径显示） ─────────── -->
+      <section v-if="!browsePrefix" class="about-section">
         <div class="about-inner">
           <div class="about-avatar">🦞</div>
           <div class="about-text">
@@ -42,38 +42,79 @@
         </div>
       </section>
 
-      <!-- ── Articles Section ───────────────────────── -->
+      <!-- ── Browse：文件夹分层 + 当前层文章 ───────────── -->
       <section class="articles-section">
         <div class="articles-inner">
-          <h2 class="section-title">📝 技术文章</h2>
+          <h2 class="section-title">{{ browsePrefix ? '目录' : '文章' }}</h2>
 
-          <!-- 加载中 -->
           <div v-if="loading" class="loading">加载中...</div>
 
-          <!-- 空状态 -->
-          <div v-else-if="articles.length === 0" class="empty">暂无文章</div>
+          <div v-else-if="browseInvalid" class="empty">
+            找不到该文件夹
+            <button type="button" class="back-link-btn" @click="goJournalRoot">← 返回博客首页</button>
+          </div>
 
-          <!-- 文章列表 -->
-          <div v-else class="article-list">
-            <article
-              v-for="article in articles"
-              :key="article.slug"
-              class="article-card"
-              @click="goTo(article.slug)"
-            >
-              <div class="card-meta">
-                <span class="card-date">{{ article.date }}</span>
+          <div v-else-if="currentFolders.length === 0 && currentFiles.length === 0" class="empty">
+            暂无内容
+          </div>
+
+          <div v-else class="browse-stack">
+            <!-- 面包屑：与 docs/home 设计稿 URL 分层一致，用 /journal/ 前缀浏览 -->
+            <nav v-if="breadcrumb.length" class="breadcrumb" aria-label="面包屑">
+              <button type="button" class="crumb" @click="goJournalRoot">首页</button>
+              <template v-for="(c, i) in breadcrumb" :key="c.path">
+                <span class="crumb-sep">/</span>
+                <button
+                  type="button"
+                  class="crumb"
+                  :class="{ 'crumb-current': i === breadcrumb.length - 1 }"
+                  :disabled="i === breadcrumb.length - 1"
+                  @click="goJournalPath(c.path)"
+                >
+                  {{ c.label }}
+                </button>
+              </template>
+            </nav>
+
+            <!-- 子文件夹：点击进入下一层 -->
+            <div v-if="currentFolders.length" class="folder-list">
+              <button
+                v-for="folder in currentFolders"
+                :key="folder.path"
+                type="button"
+                class="folder-row"
+                @click="enterFolder(folder.name)"
+              >
+                <span class="folder-row-icon" aria-hidden="true">📁</span>
+                <span class="folder-row-name">{{ folder.name }}</span>
+                <span class="folder-row-meta">{{ folderChildCount(folder) }} 项</span>
+                <span class="folder-row-chevron" aria-hidden="true">›</span>
+              </button>
+            </div>
+
+            <!-- 当前目录下的文章 -->
+            <div v-if="currentFiles.length" class="files-block">
+              <h3 v-if="currentFolders.length" class="files-block-title">文章</h3>
+              <div class="article-list">
+                <article
+                  v-for="file in fileRows"
+                  :key="file.slug"
+                  class="article-card"
+                  @click="goToPost(file.slug)"
+                >
+                  <h3 class="card-title">{{ file.title }}</h3>
+                  <div class="card-footer">
+                    <span v-if="file.date" class="card-date">{{ formatDate(file.date) }}</span>
+                    <span class="card-link">阅读 →</span>
+                  </div>
+                </article>
               </div>
-              <h3 class="card-title">{{ article.title }}</h3>
-              <p v-if="article.description" class="card-desc">{{ article.description }}</p>
-              <span class="card-link">阅读 →</span>
-            </article>
+            </div>
           </div>
         </div>
       </section>
     </main>
 
-    <!-- ── Footer ──────────────────────────────────── -->
     <footer class="blog-footer">
       <div class="footer-inner">
         <span>© 2026 小龙虾的 AI 日记</span>
@@ -87,64 +128,162 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 
+interface BlogFile {
+  type: 'file'
+  name: string
+  slug: string
+  path: string
+}
+
+interface BlogFolder {
+  type: 'folder'
+  name: string
+  path: string
+  children: BlogItem[]
+}
+
+type BlogItem = BlogFile | BlogFolder
+
+const route = useRoute()
 const router = useRouter()
-const articles = ref<Array<{ slug: string; title: string; date: string; description?: string }>>([])
+
+const treeItems = ref<BlogItem[]>([])
 const loading = ref(true)
 
-async function loadArticles() {
+function normalizePathMatch(raw: unknown): string {
+  if (raw == null || raw === '') return ''
+  if (Array.isArray(raw)) return raw.map(String).join('/')
+  return String(raw)
+}
+
+/** 当前浏览的 docs/home 相对路径，如「重构」或「技术/笔记」；根为空 */
+const browsePrefix = computed(() => {
+  if (route.name !== 'journal-browse') return ''
+  return normalizePathMatch(route.params.pathMatch)
+})
+
+function getChildrenAtPath(items: BlogItem[], prefix: string): BlogItem[] {
+  if (!prefix) return items
+  const segments = prefix.split('/').filter(Boolean)
+  let level = items
+  for (const seg of segments) {
+    const folder = level.find(
+      (i): i is BlogFolder => i.type === 'folder' && i.name === seg,
+    )
+    if (!folder?.children) return []
+    level = folder.children
+  }
+  return level
+}
+
+const currentLevel = computed(() => getChildrenAtPath(treeItems.value, browsePrefix.value))
+
+const currentFolders = computed(() =>
+  currentLevel.value.filter((i): i is BlogFolder => i.type === 'folder'),
+)
+
+const currentFiles = computed(() =>
+  currentLevel.value.filter((i): i is BlogFile => i.type === 'file'),
+)
+
+const browseInvalid = computed(() => {
+  if (!browsePrefix.value) return false
+  return currentLevel.value.length === 0
+})
+
+function folderChildCount(folder: BlogFolder): number {
+  return folder.children?.length ?? 0
+}
+
+const breadcrumb = computed(() => {
+  const p = browsePrefix.value
+  if (!p) return []
+  const segments = p.split('/').filter(Boolean)
+  const out: { label: string; path: string }[] = []
+  let acc = ''
+  for (const seg of segments) {
+    acc = acc ? `${acc}/${seg}` : seg
+    out.push({ label: seg, path: acc })
+  }
+  return out
+})
+
+const fileRows = computed(() =>
+  currentFiles.value.map((f) => {
+    const dateMatch = f.name.match(/^(\d{4}-\d{2}-\d{2})[-_]?/)
+    return {
+      slug: f.slug,
+      title: parseTitle(f.name),
+      date: dateMatch ? dateMatch[1] : '',
+    }
+  }),
+)
+
+function parseTitle(name: string): string {
+  const withoutDate = name.replace(/^\d{4}-\d{2}-\d{2}[-_]?/, '')
+  const withoutExt = withoutDate.replace(/\.md$/, '')
+  return withoutExt.replace(/[-_]/g, ' ').trim() || name
+}
+
+function formatDate(raw: string): string {
+  if (!raw) return ''
+  const [y, m, d] = raw.split('-')
+  return `${y} 年 ${parseInt(m)} 月 ${parseInt(d)} 日`
+}
+
+async function loadTree() {
   loading.value = true
   try {
     const res = await fetch('/api/blog/list')
     if (!res.ok) return
     const data = await res.json()
-    // 映射后端格式到前端需要的格式
-    // 文件名即标题（去掉.md后缀）
-    articles.value = (data.items ?? []).map((item: any) => {
-      if (item.type === 'file') {
-        // 从文件名提取日期（如果有）
-        const name = item.name
-        const dateMatch = name.match(/^(\d{4}-\d{2}-\d{2})[-_]?/)
-        return {
-          slug: item.slug,
-          title: name,
-          date: dateMatch ? dateMatch[1] : '',
-          description: '',
-        }
-      }
-      return null
-    }).filter(Boolean)
+    treeItems.value = data.items ?? []
   } catch {
-    // ignore
+    treeItems.value = []
   } finally {
     loading.value = false
   }
 }
 
-function goTo(slug: string) {
-  router.push({ name: 'blog-post', params: { slug } })
+function enterFolder(name: string) {
+  const next = browsePrefix.value ? `${browsePrefix.value}/${name}` : name
+  router.push({
+    name: 'journal-browse',
+    params: { pathMatch: next },
+  })
 }
 
-onMounted(loadArticles)
+function goJournalPath(path: string) {
+  router.push({ name: 'journal-browse', params: { pathMatch: path } })
+}
+
+function goJournalRoot() {
+  router.push({ name: 'blog' })
+}
+
+function goToPost(slug: string) {
+  router.push(`/blog/${slug}`)
+}
+
+onMounted(loadTree)
 </script>
 
 <style scoped>
-/* ── Base ─────────────────────────────────────────────── */
 .blog-home {
   min-height: 100vh;
   background: #faf8f5;
   display: flex;
   flex-direction: column;
-  font-family: 'Nunito', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family: 'Inter', 'Nunito', 'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
-/* ── Header ──────────────────────────────────────────── */
 .blog-header {
-  background: rgba(255, 253, 250, 0.95);
+  background: rgba(255, 253, 250, 0.97);
   backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(232, 98, 58, 0.08);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   position: sticky;
   top: 0;
   z-index: 100;
@@ -153,7 +292,7 @@ onMounted(loadArticles)
 .header-inner {
   max-width: 900px;
   margin: 0 auto;
-  padding: 18px 32px;
+  padding: 16px 32px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -163,7 +302,7 @@ onMounted(loadArticles)
 .brand {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
 }
 
 .brand-icon {
@@ -172,54 +311,55 @@ onMounted(loadArticles)
 
 .brand-name {
   font-family: 'Fredoka', 'PingFang SC', sans-serif;
-  font-size: 1.1rem;
+  font-size: 1.05rem;
   font-weight: 700;
   color: #E8623A;
   line-height: 1.2;
+  letter-spacing: -0.2px;
 }
 
 .brand-sub {
-  font-size: 0.72rem;
-  color: #b0a49a;
+  font-size: 0.7rem;
+  color: #a39e98;
   margin-top: 2px;
+  letter-spacing: 0.1px;
 }
 
 .header-nav {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
 }
 
 .nav-link {
-  font-size: 0.88rem;
-  color: #8b7b6e;
+  font-size: 0.875rem;
+  color: #615d59;
   text-decoration: none;
-  font-weight: 600;
+  font-weight: 500;
   transition: color 150ms ease;
 }
 
 .nav-link:hover {
-  color: #E8623A;
+  color: rgba(0, 0, 0, 0.9);
 }
 
 .nav-cta {
-  padding: 7px 18px;
+  padding: 6px 16px;
   background: #E8623A;
   color: #fff;
-  border-radius: 10px;
+  border-radius: 6px;
   text-decoration: none;
   font-family: 'Fredoka', sans-serif;
   font-weight: 600;
-  font-size: 0.88rem;
+  font-size: 0.875rem;
   transition: background 150ms ease, transform 100ms ease;
 }
 
 .nav-cta:hover {
-  background: #D4542B;
+  background: #d4542b;
   transform: translateY(-1px);
 }
 
-/* ── Main ─────────────────────────────────────────────── */
 .blog-main {
   flex: 1;
   max-width: 900px;
@@ -228,45 +368,44 @@ onMounted(loadArticles)
   padding: 0 32px;
 }
 
-/* ── About ───────────────────────────────────────────── */
 .about-section {
-  padding: 60px 0 40px;
-  border-bottom: 1px solid rgba(232, 98, 58, 0.08);
+  padding: 48px 0 36px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .about-inner {
   display: flex;
   align-items: center;
-  gap: 32px;
+  gap: 28px;
 }
 
 .about-avatar {
-  font-size: 4.5rem;
+  font-size: 4rem;
   flex-shrink: 0;
   line-height: 1;
-  filter: drop-shadow(0 4px 12px rgba(232, 98, 58, 0.2));
+  filter: drop-shadow(0 4px 12px rgba(232, 98, 58, 0.18));
 }
 
 .about-title {
   font-family: 'Fredoka', 'PingFang SC', sans-serif;
-  font-size: 1.6rem;
+  font-size: 1.5rem;
   font-weight: 700;
-  color: #3d2c24;
-  margin: 0 0 12px;
+  color: rgba(0, 0, 0, 0.9);
+  margin: 0 0 10px;
   line-height: 1.3;
+  letter-spacing: -0.5px;
 }
 
 .about-desc {
-  font-size: 1rem;
-  color: #7a6a5e;
-  line-height: 1.8;
+  font-size: 0.95rem;
+  color: #615d59;
+  line-height: 1.7;
   margin: 0;
-  max-width: 600px;
+  max-width: 580px;
 }
 
-/* ── Articles ────────────────────────────────────────── */
 .articles-section {
-  padding: 48px 0 80px;
+  padding: 40px 0 80px;
 }
 
 .articles-inner {
@@ -276,113 +415,206 @@ onMounted(loadArticles)
 
 .section-title {
   font-family: 'Fredoka', 'PingFang SC', sans-serif;
-  font-size: 1.2rem;
-  font-weight: 700;
-  color: #3d2c24;
-  margin: 0 0 24px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #a39e98;
+  margin: 0 0 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
 }
 
 .loading,
 .empty {
   text-align: center;
   padding: 48px;
-  color: #b0a49a;
-  font-size: 0.95rem;
+  color: #a39e98;
+  font-size: 0.9rem;
+}
+
+.back-link-btn {
+  display: block;
+  margin: 16px auto 0;
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid rgba(232, 98, 58, 0.35);
+  color: #e8623a;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.back-link-btn:hover {
+  background: rgba(232, 98, 58, 0.08);
+}
+
+.browse-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 0.85rem;
+  color: #615d59;
+}
+
+.crumb {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: #e8623a;
+  font: inherit;
+  border-radius: 4px;
+}
+
+.crumb:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.crumb:disabled,
+.crumb-current {
+  color: #3d2c24;
+  font-weight: 600;
+  cursor: default;
+  text-decoration: none;
+}
+
+.crumb-sep {
+  color: #a39e98;
+  user-select: none;
+}
+
+.folder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 18px 22px;
+  background: #fff;
+  border: none;
+  cursor: pointer;
+  transition: background 150ms ease;
+  font: inherit;
+}
+
+.folder-row:hover {
+  background: #faf8f5;
+}
+
+.folder-row-icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.folder-row-name {
+  flex: 1;
+  font-weight: 600;
+  font-size: 1rem;
+  color: rgba(0, 0, 0, 0.85);
+}
+
+.folder-row-meta {
+  font-size: 0.78rem;
+  color: #a39e98;
+}
+
+.folder-row-chevron {
+  font-size: 1.25rem;
+  color: #e8623a;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.files-block-title {
+  font-family: 'Fredoka', 'PingFang SC', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #615d59;
+  margin: 0 0 10px;
+  padding-left: 2px;
 }
 
 .article-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 1px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.04);
 }
 
-/* ── Article Card ─────────────────────────────────────── */
 .article-card {
   background: #fff;
-  border: 1px solid rgba(232, 98, 58, 0.1);
-  border-radius: 14px;
   padding: 20px 24px;
   cursor: pointer;
-  transition: box-shadow 200ms ease, transform 150ms ease, border-color 200ms ease;
-  position: relative;
-  overflow: hidden;
-}
-
-.article-card::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: #E8623A;
-  border-radius: 3px 0 0 3px;
-  opacity: 0;
-  transition: opacity 200ms ease;
+  transition: background 150ms ease;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .article-card:hover {
-  box-shadow: 0 6px 24px rgba(232, 98, 58, 0.12);
-  transform: translateY(-2px);
-  border-color: rgba(232, 98, 58, 0.3);
-}
-
-.article-card:hover::before {
-  opacity: 1;
-}
-
-.card-meta {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.card-date {
-  font-size: 0.78rem;
-  color: #b0a49a;
-  font-family: 'Space Grotesk', monospace;
+  background: #faf8f5;
 }
 
 .card-title {
-  font-family: 'Fredoka', 'PingFang SC', sans-serif;
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-weight: 600;
-  color: #3d2c24;
-  margin: 0 0 6px;
+  color: rgba(0, 0, 0, 0.85);
+  margin: 0;
   line-height: 1.4;
+  letter-spacing: -0.2px;
+  flex: 1;
 }
 
-.card-desc {
-  font-size: 0.88rem;
-  color: #8b7b6e;
-  margin: 0 0 12px;
-  line-height: 1.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+.card-footer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.card-date {
+  font-size: 0.76rem;
+  color: #a39e98;
+  font-weight: 400;
+  white-space: nowrap;
 }
 
 .card-link {
   font-size: 0.82rem;
-  color: #E8623A;
+  color: #e8623a;
   font-weight: 600;
   opacity: 0;
   transition: opacity 150ms ease;
+  white-space: nowrap;
 }
 
 .article-card:hover .card-link {
   opacity: 1;
 }
 
-/* ── Footer ───────────────────────────────────────────── */
 .blog-footer {
-  background: #3d2c24;
-  padding: 28px 32px;
+  background: #31302e;
+  padding: 24px 32px;
   text-align: center;
 }
 
@@ -394,21 +626,21 @@ onMounted(loadArticles)
   justify-content: center;
   gap: 10px;
   flex-wrap: wrap;
-  font-size: 0.82rem;
-  color: rgba(255, 255, 255, 0.45);
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.35);
 }
 
 .footer-sep {
-  opacity: 0.5;
+  opacity: 0.4;
 }
 
 .footer-link {
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(255, 255, 255, 0.35);
   text-decoration: none;
   transition: color 150ms ease;
 }
 
 .footer-link:hover {
-  color: #E8623A;
+  color: rgba(255, 255, 255, 0.7);
 }
 </style>

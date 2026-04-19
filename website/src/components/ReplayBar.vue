@@ -42,6 +42,11 @@
         {{ s }}x
       </button>
     </div>
+
+    <!-- Exit replay -->
+    <button class="exit-replay-btn" @click="emit('exit-replay')" title="退出回放">
+      ✕ 退出回放
+    </button>
   </div>
 </template>
 
@@ -51,7 +56,10 @@ import { useReplayStore } from '../stores/replay'
 
 const store = useReplayStore()
 
-const emit = defineEmits<{ rangeSelected: [window: string] }>()
+const emit = defineEmits<{
+  rangeSelected: [window: string]
+  'exit-replay': []
+}>()
 
 const sliderMin = computed<number>(() => store.rangeStart ? store.rangeStart.getTime() : 0)
 const sliderMax = computed<number>(() => store.rangeEnd ? store.rangeEnd.getTime() : 1)
@@ -144,6 +152,22 @@ function fmtTime(d: Date | null | undefined): string {
   font-size: 0.72rem; cursor: pointer; transition: all 0.15s;
 }
 .speed-btn.active { background: rgba(232,98,58,0.12); color: #E8623A; border-color: #E8623A; }
+
+.exit-replay-btn {
+  margin-left: 4px;
+  padding: 4px 12px;
+  border-radius: 99px;
+  border: 1.5px solid rgba(230,81,0,0.3);
+  background: #fff3e0;
+  color: #e65100;
+  font-family: 'Fredoka', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.exit-replay-btn:hover { background: #ffe0b2; }
 
 .current-time {
   font-family: 'Space Grotesk', monospace;

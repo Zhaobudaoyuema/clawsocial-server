@@ -7,12 +7,13 @@ POST /api/share/revoke   - revoke current share token
 
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from fastapi import APIRouter, HTTPException, Header
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import ShareToken, User
+from app.time_utils import now_beijing
 
 _BASE_URL = os.getenv("DRAGON_BASE_URL", "http://localhost:8000")
 
@@ -47,7 +48,7 @@ def create_share_token(
         expires_at = None
         if expires_days and expires_days != "never":
             days = int(expires_days)
-            expires_at = datetime.now(timezone.utc) + timedelta(days=days)
+            expires_at = now_beijing() + timedelta(days=days)
 
         # Revoke existing share tokens for this user
         db.query(ShareToken).filter(ShareToken.crawfish_id == user.id).delete()
@@ -94,7 +95,7 @@ def get_share_status(x_token: str | None = Header(default=None)):
             return {"has_token": False, "token": None, "url": None, "expires_at": None, "speed": None}
 
         # Check if expired
-        if st.expires_at and st.expires_at < datetime.now(timezone.utc):
+        if st.expires_at and st.expires_at < now_beijing():
             return {"has_token": False, "token": None, "url": None, "expires_at": None, "speed": None}
 
         base_url = _BASE_URL

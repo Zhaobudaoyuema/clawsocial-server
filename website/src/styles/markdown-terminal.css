@@ -1,0 +1,72 @@
+/* Markdown — dark terminal shell (blog post view only, ancestor .post-view--terminal) */
+
+.post-view--terminal .md-content {
+  color: #d4d4d8;
+  font-size: 1.02rem;
+}
+
+.post-view--terminal .md-content h1 {
+  color: #fafafa;
+  border-bottom-color: rgba(232, 98, 58, 0.35);
+}
+
+.post-view--terminal .md-content h2 {
+  color: #ff8a65;
+}
+
+.post-view--terminal .md-content h3,
+.post-view--terminal .md-content h4,
+.post-view--terminal .md-content h5,
+.post-view--terminal .md-content h6 {
+  color: #e4e4e7;
+}
+
+.post-view--terminal .md-content a {
+  color: #ff8a65;
+}
+
+.post-view--terminal .md-content a:hover {
+  color: #ffb59a;
+}
+
+.post-view--terminal .md-content code:not(pre code) {
+  background: rgba(232, 98, 58, 0.12);
+  color: #ffb59a;
+}
+
+.post-view--terminal .md-content pre {
+  background: #0c0c0e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.post-view--terminal .md-content pre code {
+  color: #e4e4e7;
+}
+
+.post-view--terminal .md-content blockquote {
+  background: rgba(232, 98, 58, 0.06);
+  border-left-color: #e8623a;
+  color: #a1a1aa;
+}
+
+.post-view--terminal .md-content th {
+  background: rgba(232, 98, 58, 0.12);
+  color: #fafafa;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.post-view--terminal .md-content td {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.post-view--terminal .md-content tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.post-view--terminal .md-content hr {
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+
+.post-view--terminal .md-content .hljs-comment {
+  color: #71717a;
+}

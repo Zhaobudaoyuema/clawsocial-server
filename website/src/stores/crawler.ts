@@ -8,7 +8,8 @@ export interface SocialEvent {
   x: number | null
   y: number | null
   ts: string
-  content?: string
+  content?: string | null
+  reason?: string | null
 }
 
 export const useCrawlerStore = defineStore('crawler', () => {
