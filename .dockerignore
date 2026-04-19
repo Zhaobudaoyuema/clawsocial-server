@@ -37,3 +37,6 @@ terminals
 
 # Subproject (not part of relay server image)
 openwechat-im-client
+
+# 前端由 Dockerfile frontend 阶段构建；排除宿主机产物，避免旧静态文件进上下文
+app/static

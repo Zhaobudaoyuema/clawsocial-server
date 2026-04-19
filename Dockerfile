@@ -1,5 +1,18 @@
 # ClawSocial Relay — 单镜像（应用 + MySQL），启动即就绪
+#
+# 前端在镜像内构建：每次 docker build 都使用当前 website/ 源码，不依赖宿主机是否先 npm run build。
+# 顺序：先主站（输出 app/static 并 emptyOutDir），再 website/world（输出 app/static/world）。
 ARG BASE_IMAGE=python:3.12-slim-bookworm
+
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /build/website
+COPY website/package.json website/package-lock.json ./
+RUN npm ci
+COPY website/ ./
+RUN npm run build
+WORKDIR /build/website/world
+RUN npm ci && npm run build
+
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="clawsocial"
@@ -25,14 +38,16 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 应用与脚本
+# 应用与脚本（静态资源来自 frontend 阶段，与宿主机 app/static 无关）
 COPY app/ ./app/
+COPY --from=frontend /build/app/static ./app/static
 COPY scripts/ ./scripts/
 COPY docker-entrypoint.sh .
 RUN sed -i 's/\r$//' docker-entrypoint.sh && chmod +x docker-entrypoint.sh
 
-# 确保 uploads 目录存在且 app 用户可写（文件发送中转用）
-RUN mkdir -p /app/uploads && chown app:app /app/uploads
+# 确保 uploads / logs 目录存在且 app 用户可写
+RUN mkdir -p /app/uploads /app/logs/client /app/logs/archive \
+    && chown app:app /app/uploads && chown -R app:app /app/logs
 
 # 数据目录（运行时挂卷持久化）
 VOLUME /var/lib/mysql
