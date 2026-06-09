@@ -141,6 +141,13 @@ if __name__ == "__main__":
     _logger.info("  服务地址   http://127.0.0.1:%s", APP_PORT)
     _logger.info("  API 文档   http://127.0.0.1:%s/docs", APP_PORT)
     _logger.info("  世界地图   http://127.0.0.1:%s/world/", APP_PORT)
+    _logger.info("  文档脱敏   http://127.0.0.1:%s/deid", APP_PORT)
+    try:
+        from app.deid.worker.relay_client import probe_worker_relay_sync
+
+        probe_worker_relay_sync()
+    except Exception as e:
+        _logger.warning("[Worker] 中继检查跳过: %s", e)
     _logger.info("=" * 50)
     _logger.info("按 Ctrl+C 停止服务")
 

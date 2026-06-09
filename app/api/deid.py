@@ -2,12 +2,13 @@
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.deid import service
+from app.deid.scan_events import get_scan_event_bus
 from app.deid.schemas import (
     AliasIn,
     ConfirmIn,
@@ -45,6 +46,26 @@ def list_jobs(db: Session = Depends(get_db)):
 @router.get("/jobs/{job_id}")
 def get_job(job_id: int, db: Session = Depends(get_db)):
     return service.get_job(db, job_id)
+
+
+@router.get("/jobs/{job_id}/scan-stream")
+async def scan_stream(job_id: int, db: Session = Depends(get_db)):
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+
+    bus = get_scan_event_bus()
+
+    async def event_generator():
+        try:
+            async for event in bus.subscribe(job_id):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if event.get("type") in ("done", "error"):
+                    break
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post("/jobs/{job_id}/start")
@@ -130,6 +151,8 @@ async def worker_status(request: Request):
     if relay and relay.enabled:
         status["mode"] = "relay"
         status["relay_url"] = relay.base_url
+    elif client is getattr(request.app.state, "worker_router", None):
+        status.setdefault("mode", "local")
     return status
 
 
@@ -188,12 +211,6 @@ def rerun(job_id: int, body: RunIn | None = None, db: Session = Depends(get_db))
     remember_ids = body.remember_ids if body else None
     entity_ids = body.entity_ids if body else None
     return service.rerun_job(db, job_id, entity_ids=entity_ids, remember_ids=remember_ids)
-
-
-@router.post("/jobs/{job_id}/ai-summary")
-async def ai_summary(job_id: int, request: Request, db: Session = Depends(get_db)):
-    client = get_worker_client(request.app)
-    return await service.generate_job_ai_summary(db, job_id, worker_router=client)
 
 
 @router.get("/jobs/{job_id}/export")

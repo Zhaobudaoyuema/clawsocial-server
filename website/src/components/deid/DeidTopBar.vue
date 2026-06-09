@@ -9,23 +9,22 @@ const store = useDeidStore()
 
 const workerLabel = computed(() => {
   const w = store.workerStatus
-  if (!w.online) return 'Worker 离线'
-  if (w.state === 'busy') return '忙碌'
-  if (w.state === 'ready') return '就绪'
-  return w.state
+  if (!w.online) return '智能扫描不可用'
+  if (w.state === 'busy') return '智能扫描忙碌'
+  return '智能扫描可用'
 })
 
 const workerDetail = computed(() => {
   const w = store.workerStatus
-  if (!w.online) return '智能发现不可用'
-  return w.model || '已连接'
+  if (!w.online) return '将使用已记住实体匹配'
+  return '已就绪'
 })
 
 const queueHint = computed(() => {
   const q = store.queueStatus
   const cur = (store.currentJob as { id?: number } | null)?.id
   if (!cur) return null
-  if (q.current_job_id === cur) return '扫描中'
+  if (q.current_job_id === cur) return '正在扫描'
   const idx = q.waiting_job_ids.indexOf(cur)
   if (idx >= 0) {
     const total = q.waiting_count + (q.current_job_id ? 1 : 0)
@@ -58,7 +57,24 @@ onUnmounted(() => {
         </svg>
       </button>
       <div class="brand">
-        <span class="logo" aria-hidden="true">◆</span>
+        <span class="logo" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path
+              d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linejoin="round"
+            />
+            <path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+            <path
+              d="M8 14l2.5 2.5L16 11"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </span>
         <div>
           <h1>文档脱敏</h1>
           <p class="trust">本地处理 · 数据不出服务器</p>
@@ -110,8 +126,15 @@ onUnmounted(() => {
   gap: 0.75rem;
 }
 .logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--deid-radius-sm);
+  background: var(--deid-primary-soft);
   color: var(--deid-primary);
-  font-size: 1rem;
+  flex-shrink: 0;
 }
 h1 {
   margin: 0;

@@ -38,7 +38,7 @@ function isActive(job: Record<string, unknown>) {
     <div class="sidebar-head">任务历史</div>
     <div v-if="!store.jobs.length" class="empty">
       <p class="empty-title">暂无任务</p>
-      <p class="empty-hint">上传文档开始脱敏，或查看最近 24 小时内的已完成任务</p>
+      <p class="empty-hint">上传文档开始脱敏，或查看最近 8 小时内的已完成任务</p>
       <button type="button" class="deid-btn deid-btn--primary" @click="emit('newTask')">
         上传文档
       </button>

@@ -41,11 +41,165 @@ export const useDeidStore = defineStore('deid', () => {
     message: string
     queue_position?: number
     fallback?: string
+    stats?: {
+      paragraphs?: number
+      chars?: number
+      chunks?: number
+      tables?: number
+    }
+    metrics?: {
+      elapsed_ms?: number
+      prompt_tokens?: number
+      completion_tokens?: number
+      model?: string | null
+    }
+    log_tail?: string[]
   } | null>(null)
+  const scanLive = ref({
+    stats: null as {
+      paragraphs?: number
+      chars?: number
+      chunks?: number
+      tables?: number
+    } | null,
+    metrics: null as {
+      elapsed_ms?: number
+      prompt_tokens?: number
+      completion_tokens?: number
+      model?: string | null
+    } | null,
+    logs: [] as string[],
+    entitiesFound: 0,
+    streamConnected: false,
+    startedAt: null as number | null,
+    doneSummary: null as string | null,
+    streamTail: '',
+  })
+  let scanEventSource: EventSource | null = null
+
+  function resetScanLive() {
+    scanLive.value = {
+      stats: null,
+      metrics: null,
+      logs: [],
+      entitiesFound: 0,
+      streamConnected: false,
+      startedAt: null,
+      doneSummary: null,
+      streamTail: '',
+    }
+  }
+
+  function appendScanLog(line: string) {
+    if (!line) return
+    const logs = scanLive.value.logs
+    if (logs.length > 0 && logs[logs.length - 1] === line) return
+    logs.push(line)
+    if (logs.length > 80) logs.splice(0, logs.length - 80)
+  }
+
+  function handleScanEvent(event: Record<string, unknown>) {
+    const type = event.type as string
+    if (type === 'phase') {
+      const phase = String(event.phase || '')
+      scanProgress.value = {
+        ...(scanProgress.value || { phase: 'starting', percent: 0, message: '' }),
+        phase,
+        percent: Number(event.percent ?? scanProgress.value?.percent ?? 0),
+        message: String(event.message || ''),
+      }
+      if (phase === 'extract' && !scanLive.value.stats) {
+        appendScanLog('正在解析文档…')
+      }
+    } else if (type === 'stats') {
+      scanLive.value.stats = {
+        paragraphs: event.paragraphs as number | undefined,
+        chars: event.chars as number | undefined,
+        chunks: event.chunks as number | undefined,
+        tables: event.tables as number | undefined,
+      }
+      if (scanProgress.value) scanProgress.value.stats = scanLive.value.stats
+    } else if (type === 'metrics') {
+      scanLive.value.metrics = {
+        elapsed_ms: event.elapsed_ms as number | undefined,
+        prompt_tokens: event.prompt_tokens as number | undefined,
+        completion_tokens: event.completion_tokens as number | undefined,
+        model: (event.model as string | null | undefined) ?? null,
+      }
+      if (scanProgress.value) scanProgress.value.metrics = scanLive.value.metrics
+    } else if (type === 'log') {
+      appendScanLog(String(event.line || ''))
+    } else if (type === 'token') {
+      const chunk = String(event.content || '')
+      scanLive.value.streamTail = (scanLive.value.streamTail + chunk).slice(-3000)
+    } else if (type === 'entity') {
+      scanLive.value.entitiesFound += 1
+      appendScanLog(`发现实体：${String(event.name || '')}`)
+    } else if (type === 'remembered') {
+      const count = Number(event.count ?? 0)
+      appendScanLog(`词库匹配 ${count} 个实体`)
+    } else if (type === 'chunk_start') {
+      scanLive.value.streamTail = ''
+      appendScanLog(`—— 第 ${event.index}/${event.total} 段 ——`)
+    } else if (type === 'done') {
+      const summary = event.scan_summary as Record<string, unknown> | undefined
+      if (summary) scanSummary.value = summary
+      const count = Number(event.entity_count ?? 0)
+      const ms = Number(summary?.elapsed_ms ?? scanLive.value.metrics?.elapsed_ms ?? 0)
+      const tokens =
+        Number(summary?.prompt_tokens ?? 0) + Number(summary?.completion_tokens ?? 0)
+      scanLive.value.doneSummary = `发现 ${count} 个实体 · 用时 ${formatScanDuration(ms)}${
+        tokens > 0 ? ` · Token ${tokens.toLocaleString('zh-CN')}` : ''
+      }`
+    } else if (type === 'error') {
+      appendScanLog(`错误：${String(event.message || '扫描失败')}`)
+    }
+  }
+
+  function formatScanDuration(ms: number) {
+    const sec = Math.max(0, Math.floor(ms / 1000))
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return `${m}:${String(s).padStart(2, '0')}`
+  }
+
+  function disconnectScanStream() {
+    if (scanEventSource) {
+      scanEventSource.close()
+      scanEventSource = null
+    }
+    scanLive.value.streamConnected = false
+  }
+
+  function connectScanStream(jobId: number) {
+    disconnectScanStream()
+    resetScanLive()
+    scanLive.value.startedAt = Date.now()
+    const es = new EventSource(`${API}/jobs/${jobId}/scan-stream`)
+    scanEventSource = es
+    es.onopen = () => {
+      scanLive.value.streamConnected = true
+    }
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as Record<string, unknown>
+        handleScanEvent(data)
+        if (data.type === 'done' || data.type === 'error') {
+          disconnectScanStream()
+        }
+      } catch {
+        /* ignore malformed */
+      }
+    }
+    es.onerror = () => {
+      scanLive.value.streamConnected = false
+    }
+  }
   const showConclusionView = ref(false)
   const showEntitiesPanel = ref(false)
+  /** 用户主动打开「我的实体」时，禁止异步 restore/scan 抢回结论页 */
+  const suppressAutoConclusion = ref(false)
   const entityDirty = ref(false)
-  const aiSummary = ref<string | null>(null)
   const queueStatus = ref<{
     current_job_id: number | null
     waiting_job_ids: number[]
@@ -57,15 +211,20 @@ export const useDeidStore = defineStore('deid', () => {
     model: string | null
     hostname: string | null
     version: string | null
+    mode?: string
+    relay_url?: string | null
   }>({
     online: false,
     state: 'offline',
     model: null,
     hostname: null,
     version: null,
+    mode: undefined,
+    relay_url: null,
   })
   const workerWasOffline = ref(false)
   const jobsError = ref<string | null>(null)
+  const jobsLoading = ref(false)
 
   /** Worker 在线且任务启用 Worker 时才需要结论卡 */
   function needsConclusionStep(job?: Record<string, unknown> | null): boolean {
@@ -75,7 +234,40 @@ export const useDeidStore = defineStore('deid', () => {
     return useWorker && workerStatus.value.online
   }
 
+  type WizardPhase =
+    | 'upload'
+    | 'scan-draft'
+    | 'scanning'
+    | 'confirm-detail'
+    | 'deid-running'
+    | 'done'
+
+  function wizardPhase(): WizardPhase {
+    if (showEntitiesPanel.value) return 'upload'
+    const job = currentJob.value as { status?: string } | null
+    if (!job) return 'upload'
+    if (showConclusionView.value) return 'confirm-detail'
+    const st = job.status || ''
+    if (st === 'done') return 'done'
+    if (st === 'running') return 'deid-running'
+    if (st === 'scanning' || st === 'queued') return 'scanning'
+    const sp = scanProgress.value
+    if (sp && sp.phase !== 'error' && sp.phase !== 'done') return 'scanning'
+    if (st === 'scanned' || st === 'confirmed') return 'confirm-detail'
+    if (st === 'draft') return 'scan-draft'
+    return 'upload'
+  }
+
+  function wizardStep(): 'upload' | 'scan' | 'confirm' | 'done' {
+    const phase = wizardPhase()
+    if (phase === 'upload') return 'upload'
+    if (phase === 'scan-draft' || phase === 'scanning') return 'scan'
+    if (phase === 'confirm-detail') return 'confirm'
+    return 'done'
+  }
+
   function openConclusionView() {
+    if (showEntitiesPanel.value || suppressAutoConclusion.value) return
     showConclusionView.value = true
     showEntitiesPanel.value = false
   }
@@ -85,22 +277,14 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   function openEntitiesPanel() {
+    suppressAutoConclusion.value = true
     showEntitiesPanel.value = true
     showConclusionView.value = false
   }
 
   function closeEntitiesPanel() {
     showEntitiesPanel.value = false
-  }
-
-  /** scanned 且未在结论页时显示 banner */
-  function showPendingBanner(job?: Record<string, unknown> | null): boolean {
-    const j = job ?? currentJob.value
-    if (!j) return false
-    const st = (j as { status?: string }).status
-    if (st !== 'scanned' && st !== 'confirmed') return false
-    if (showConclusionView.value) return false
-    return entities.value.length > 0 && needsConclusionStep(j)
+    suppressAutoConclusion.value = false
   }
 
   async function fetchJobSnapshot(jobId: number) {
@@ -148,6 +332,8 @@ export const useDeidStore = defineStore('deid', () => {
         model: null,
         hostname: null,
         version: null,
+        mode: undefined,
+        relay_url: null,
       }
     }
   }
@@ -158,12 +344,15 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function fetchJobs() {
     jobsError.value = null
+    jobsLoading.value = true
     try {
       const r = await fetch(`${API}/jobs`)
       jobs.value = await readJson(r)
     } catch (e) {
       jobsError.value = e instanceof Error ? e.message : '加载任务列表失败'
       jobs.value = []
+    } finally {
+      jobsLoading.value = false
     }
   }
 
@@ -187,8 +376,6 @@ export const useDeidStore = defineStore('deid', () => {
     currentJob.value = job
     const progress = job.progress as typeof scanProgress.value
     if (progress) scanProgress.value = progress
-    const summary = job.ai_summary as { text?: string } | null
-    aiSummary.value = summary?.text ?? null
     return job
   }
 
@@ -210,7 +397,7 @@ export const useDeidStore = defineStore('deid', () => {
     if (status === 'scanned' || status === 'confirmed') {
       await loadEntities(incomplete.id)
       if (needsConclusionStep(currentJob.value)) {
-        /* 刷新恢复：选项 C — 仅 banner，不自动弹结论 */
+        openConclusionView()
       } else {
         await autoRunAfterScan(incomplete.id)
       }
@@ -223,6 +410,7 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   async function selectJob(job: Record<string, unknown>) {
+    suppressAutoConclusion.value = false
     currentJob.value = job
     error.value = null
     entityDirty.value = false
@@ -241,7 +429,7 @@ export const useDeidStore = defineStore('deid', () => {
       await fetchJob(id)
       await loadEntities(id)
       if (needsConclusionStep(currentJob.value)) {
-        /* banner only unless user clicks */
+        openConclusionView()
       } else {
         await autoRunAfterScan(id)
       }
@@ -255,15 +443,17 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   async function newTask() {
+    suppressAutoConclusion.value = false
     currentJob.value = null
     entities.value = []
     previews.value = []
     error.value = null
+    disconnectScanStream()
+    resetScanLive()
     scanProgress.value = null
     showConclusionView.value = false
     showEntitiesPanel.value = false
     entityDirty.value = false
-    aiSummary.value = null
   }
 
   async function uploadJob(
@@ -284,7 +474,7 @@ export const useDeidStore = defineStore('deid', () => {
       currentJob.value = await readJson(r)
       entityDirty.value = false
       showConclusionView.value = false
-    showEntitiesPanel.value = false
+      showEntitiesPanel.value = false
       await fetchJobs()
       return currentJob.value
     } catch (e) {
@@ -296,9 +486,17 @@ export const useDeidStore = defineStore('deid', () => {
     }
   }
 
-  async function startScan(jobId: number) {
+  function beginScan(jobId: number) {
     error.value = null
-    scanProgress.value = { phase: 'starting', percent: 0, message: '提交任务…' }
+    resetScanLive()
+    scanProgress.value = { phase: 'starting', percent: 0, message: '正在提交扫描…' }
+    connectScanStream(jobId)
+    if (currentJob.value) {
+      currentJob.value = { ...currentJob.value, status: 'scanning' }
+    }
+  }
+
+  async function startScan(jobId: number) {
     const data = await readJson<{ status: string; queue_position?: number }>(
       await fetch(`${API}/jobs/${jobId}/start`, { method: 'POST' }),
     )
@@ -311,16 +509,20 @@ export const useDeidStore = defineStore('deid', () => {
         message: `排队中（第 ${data.queue_position} 位）`,
         queue_position: data.queue_position,
       }
+    } else if (scanProgress.value?.phase === 'starting') {
+      scanProgress.value = {
+        ...scanProgress.value,
+        message: '扫描已开始…',
+      }
     }
     return data
   }
 
   async function pollScanUntilDone(jobId: number) {
-    loading.value = true
     error.value = null
     try {
       for (;;) {
-        await new Promise((r) => setTimeout(r, 800))
+        await new Promise((r) => setTimeout(r, 600))
         await fetchQueueStatus()
         const job = await fetchJob(jobId)
         const status = job.status as string
@@ -328,9 +530,17 @@ export const useDeidStore = defineStore('deid', () => {
         if (progress) {
           scanProgress.value = progress
           loadingMessage.value = progress.message
+          if (progress.stats) scanLive.value.stats = progress.stats
+          if (progress.metrics) scanLive.value.metrics = progress.metrics
+          if (progress.log_tail?.length && !scanLive.value.streamConnected) {
+            for (const line of progress.log_tail) {
+              appendScanLog(line)
+            }
+          }
         }
         if (status === 'scanned') {
           await loadEntities(jobId)
+          disconnectScanStream()
           scanProgress.value = null
           if (needsConclusionStep(job)) {
             openConclusionView()
@@ -342,6 +552,7 @@ export const useDeidStore = defineStore('deid', () => {
         if (status === 'draft' && progress?.phase === 'error') {
           if (progress.fallback === 'manual') {
             await loadEntities(jobId)
+            disconnectScanStream()
             scanProgress.value = null
             if (needsConclusionStep(job)) {
               openConclusionView()
@@ -355,10 +566,10 @@ export const useDeidStore = defineStore('deid', () => {
       }
     } catch (e) {
       error.value = e instanceof Error ? e.message : '扫描失败'
+      disconnectScanStream()
       scanProgress.value = null
       throw e
     } finally {
-      loading.value = false
       loadingMessage.value = ''
     }
   }
@@ -409,6 +620,9 @@ export const useDeidStore = defineStore('deid', () => {
     error.value = null
     showConclusionView.value = false
     showEntitiesPanel.value = false
+    if (currentJob.value) {
+      currentJob.value = { ...currentJob.value, status: 'running' }
+    }
     try {
       const r = await fetch(`${API}/jobs/${jobId}/run`, {
         method: 'POST',
@@ -420,11 +634,17 @@ export const useDeidStore = defineStore('deid', () => {
         currentJob.value = { ...currentJob.value, ...data, status: data.status }
       }
       entityDirty.value = false
-      aiSummary.value = null
       await loadEntities(jobId)
       await fetchPreview(jobId)
       await fetchJobs()
       return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '脱敏失败'
+      if (currentJob.value) {
+        currentJob.value = { ...currentJob.value, status: 'scanned' }
+      }
+      openConclusionView()
+      throw e
     } finally {
       loading.value = false
       loadingMessage.value = ''
@@ -446,27 +666,14 @@ export const useDeidStore = defineStore('deid', () => {
         currentJob.value = { ...currentJob.value, ...data, status: data.status }
       }
       entityDirty.value = false
-      aiSummary.value = null
       await fetchJob(jobId)
       await loadEntities(jobId)
       await fetchPreview(jobId)
       await fetchJobs()
       return data
-    } finally {
-      loading.value = false
-      loadingMessage.value = ''
-    }
-  }
-
-  async function fetchAiSummary(jobId: number) {
-    loading.value = true
-    loadingMessage.value = 'AI 解读中…'
-    try {
-      const data = await readJson<{ text: string }>(
-        await fetch(`${API}/jobs/${jobId}/ai-summary`, { method: 'POST' }),
-      )
-      aiSummary.value = data.text
-      return data.text
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '重新脱敏失败'
+      throw e
     } finally {
       loading.value = false
       loadingMessage.value = ''
@@ -551,19 +758,22 @@ export const useDeidStore = defineStore('deid', () => {
     error,
     scanSummary,
     scanProgress,
+    scanLive,
     showConclusionView,
     showEntitiesPanel,
+    suppressAutoConclusion,
+    wizardPhase,
+    wizardStep,
     openConclusionView,
     closeConclusionView,
     openEntitiesPanel,
     closeEntitiesPanel,
-    showPendingBanner,
     entityDirty,
-    aiSummary,
     queueStatus,
     workerStatus,
     workerWasOffline,
     jobsError,
+    jobsLoading,
     clearJobsError,
     needsConclusionStep,
     fetchJobSnapshot,
@@ -580,6 +790,7 @@ export const useDeidStore = defineStore('deid', () => {
     selectJob,
     newTask,
     uploadJob,
+    beginScan,
     startScan,
     pollScanUntilDone,
     fetchPreview,
@@ -588,7 +799,6 @@ export const useDeidStore = defineStore('deid', () => {
     patchEntity,
     confirmAndRun,
     rerun,
-    fetchAiSummary,
     deleteJob,
     exportUrl,
     fetchLibrary,

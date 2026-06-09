@@ -2,11 +2,15 @@
 from app.deid.prompts import DEFAULT_SCAN_PROMPT, build_scan_system_prompt
 
 
-def test_build_scan_system_prompt_with_extra():
-    result = build_scan_system_prompt("GLOBAL", "EXTRA RULES")
-    assert "GLOBAL" in result
+def test_default_scan_prompt_uses_line_format():
+    assert "type|规范全称" in DEFAULT_SCAN_PROMPT or "type|名称" in DEFAULT_SCAN_PROMPT
+    assert "scan_v3" in DEFAULT_SCAN_PROMPT
+    assert "禁止用逗号" in DEFAULT_SCAN_PROMPT
+    assert "JSON" not in DEFAULT_SCAN_PROMPT or "不要 JSON" in DEFAULT_SCAN_PROMPT
+    result = build_scan_system_prompt("GLOBAL # scan_v2", "EXTRA RULES")
     assert "EXTRA RULES" in result
     assert "本任务补充" in result
+    assert "scan_v3" in result
 
 
 def test_get_scan_prompt_settings(client):

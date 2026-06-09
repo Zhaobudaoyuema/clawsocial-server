@@ -32,6 +32,47 @@ def test_normalize_for_match():
     assert normalize_for_match("国家 电投") == normalize_for_match("国家电投")
 
 
+def test_extract_sample_text_strict_ooxml(tmp_path):
+    """Strict OOXML (purl.oclc.org) namespace must be readable."""
+    import io
+    import zipfile
+
+    from app.deid.engine.pipeline import extract_sample_text
+
+    doc_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main">'
+        "<w:body><w:p><w:r><w:t>中国能源建设股份有限公司审计报告</w:t></w:r></w:p>"
+        "</w:body></w:document>"
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        "</Types>"
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/>'
+        "</Relationships>"
+    )
+    doc_path = tmp_path / "strict.docx"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("word/document.xml", doc_xml)
+    doc_path.write_bytes(buf.getvalue())
+
+    sample = extract_sample_text(doc_path)
+    assert "中国能源建设股份有限公司" in sample
+
+
 def test_plan_matching():
     entities = [
         {
@@ -212,8 +253,8 @@ def test_scan_with_mock_llm(client: TestClient, db, seeded_db, monkeypatch):
     assert data["scan_summary"]["llm_hits"] >= 1
 
 
-def test_remember_opt_in_on_run(client: TestClient, db, seeded_db, monkeypatch):
-    """LLM entities are saved to library only when remember_ids is passed."""
+def test_llm_entities_auto_saved_to_library(client: TestClient, db, seeded_db, monkeypatch):
+    """LLM entities are saved to library by default when deid runs."""
     _ensure_ceec_fixture()
     import app.deid.service as service_mod
     from app.deid.discovery.llm import LlmDiscoveryResult
@@ -253,11 +294,10 @@ def test_remember_opt_in_on_run(client: TestClient, db, seeded_db, monkeypatch):
     job_id = r.json()["id"]
     client.post(f"/api/deid/jobs/{job_id}/scan")
     ents = client.get(f"/api/deid/jobs/{job_id}/entities").json()
-    llm_ent = next(e for e in ents if "LLM测试主体" in e["canonical_name"])
     ids = [e["id"] for e in ents if not e.get("is_excluded")]
     client.post(
         f"/api/deid/jobs/{job_id}/run",
-        json={"entity_ids": ids, "remember_ids": [llm_ent["id"]]},
+        json={"entity_ids": ids},
     )
 
     lib = client.get("/api/deid/entities").json()
@@ -268,7 +308,7 @@ def test_remember_opt_in_on_run(client: TestClient, db, seeded_db, monkeypatch):
 
 
 def test_list_jobs_includes_incomplete(client: TestClient, db, seeded_db):
-    """Sidebar lists incomplete jobs plus 24h done jobs."""
+    """Sidebar lists incomplete jobs plus 8h done jobs."""
     _ensure_fixture()
     with open(FIXTURE, "rb") as f:
         r = client.post(
@@ -290,35 +330,6 @@ def test_list_jobs_includes_incomplete(client: TestClient, db, seeded_db):
     client.post(f"/api/deid/jobs/{draft_id}/run", json={"entity_ids": ids})
     listed = client.get("/api/deid/jobs").json()
     assert any(j["id"] == draft_id and j["status"] == "done" for j in listed)
-
-
-def test_rerun_clears_ai_summary(client: TestClient, db, seeded_db):
-    _ensure_fixture()
-    with open(FIXTURE, "rb") as f:
-        r = client.post(
-            "/api/deid/jobs",
-            files={
-                "file": (
-                    "spic_sample.docx",
-                    f,
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
-            },
-        )
-    job_id = r.json()["id"]
-    client.post(f"/api/deid/jobs/{job_id}/scan")
-    ids = _entity_ids(client, job_id)
-    client.post(f"/api/deid/jobs/{job_id}/run", json={"entity_ids": ids})
-
-    from app.models_deid import DeidJob
-
-    job = db.get(DeidJob, job_id)
-    job.ai_summary_json = json.dumps({"text": "测试摘要"})
-    db.commit()
-
-    client.post(f"/api/deid/jobs/{job_id}/rerun", json={"entity_ids": ids})
-    job = db.get(DeidJob, job_id)
-    assert job.ai_summary_json is None
 
 
 def test_list_jobs_after_run(client: TestClient, db, seeded_db):

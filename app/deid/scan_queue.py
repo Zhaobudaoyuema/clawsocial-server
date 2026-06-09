@@ -10,6 +10,7 @@ from typing import Any
 
 from app.database import SessionLocal
 from app.deid import service
+from app.deid.scan_events import get_scan_event_bus
 from app.deid.worker.client import get_worker_client
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class ScanQueue:
                 return {"status": "error", "queue_position": None, "message": "任务不存在"}
 
             needs_queue = service.job_needs_worker_queue(db, job, self._worker_client())
+            bus = get_scan_event_bus()
             if not needs_queue:
                 service.set_job_progress(
                     db,
@@ -71,6 +73,7 @@ class ScanQueue:
                 )
                 job.status = "scanning"
                 db.commit()
+                bus.emit(job_id, {"type": "log", "line": "任务已提交，开始扫描…"})
                 asyncio.create_task(self._run_scan(job_id, queued=False))
                 return {"status": "scanning", "queue_position": 0}
 
@@ -87,6 +90,7 @@ class ScanQueue:
                     )
                     job.status = "scanning"
                     db.commit()
+                    bus.emit(job_id, {"type": "log", "line": "任务已提交，开始扫描…"})
                     asyncio.create_task(self._run_scan(job_id, queued=True))
                     return {"status": "scanning", "queue_position": 0}
 
@@ -121,15 +125,19 @@ class ScanQueue:
 
             job = db.get(DeidJob, job_id)
             if job and job.status in ("scanning", "queued"):
+                msg = "扫描失败，请重试或手动添加实体"
                 payload = {
                     "phase": "error",
                     "percent": 0,
-                    "message": "扫描失败，请重试或手动添加实体",
+                    "message": msg,
                     "fallback": "manual",
                 }
                 job.progress_json = json.dumps(payload, ensure_ascii=False)
                 job.status = "draft"
                 db.commit()
+                bus = get_scan_event_bus()
+                bus.emit(job_id, {"type": "error", "message": msg})
+                bus.close(job_id)
         finally:
             db.close()
             if queued:

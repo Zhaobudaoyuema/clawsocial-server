@@ -27,7 +27,7 @@ function sourceBadge(e: Record<string, unknown>) {
   const src = (e as { source: string }).source
   const label = (e as { source_label?: string }).source_label
   if (src === 'manual') return { variant: 'manual' as const, label: label || '手动补充' }
-  if (src === 'llm') return { variant: 'llm' as const, label: label || '智能发现' }
+  if (src === 'llm') return { variant: 'llm' as const, label: 'AI 识别' }
   if (src === 'rule') return { variant: 'rule' as const, label: label || '文档规则' }
   if (src === 'pattern') return { variant: 'pattern' as const, label: label || '规则' }
   return { variant: 'preset' as const, label: label || '词库' }

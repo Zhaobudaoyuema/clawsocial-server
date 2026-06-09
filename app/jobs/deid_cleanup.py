@@ -1,4 +1,4 @@
-"""APScheduler: delete deid job files 24h after completion."""
+"""APScheduler: delete deid job files 8h after completion."""
 import logging
 import shutil
 from datetime import timedelta
@@ -6,7 +6,7 @@ from datetime import timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.database import SessionLocal
-from app.deid.storage import DEID_ROOT
+from app.deid.storage import DEID_ROOT, JOB_RETENTION_HOURS
 from app.models_deid import DeidEntityMapping, DeidJob, DeidJobEntity, DeidJobEntityAlias
 from app.time_utils import now_beijing
 
@@ -17,7 +17,7 @@ scheduler = BackgroundScheduler(timezone="UTC")
 def _cleanup_expired_jobs():
     db = SessionLocal()
     try:
-        cutoff = now_beijing() - timedelta(hours=24)
+        cutoff = now_beijing() - timedelta(hours=JOB_RETENTION_HOURS)
         jobs = (
             db.query(DeidJob)
             .filter(DeidJob.status == "done", DeidJob.completed_at < cutoff)

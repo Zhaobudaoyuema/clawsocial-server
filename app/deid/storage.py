@@ -9,6 +9,7 @@ from fastapi import HTTPException, UploadFile
 from app.uploads import UPLOADS_DIR, MAX_FILE_SIZE
 
 DEID_ROOT = UPLOADS_DIR / "deid"
+JOB_RETENTION_HOURS = 8
 
 
 def job_dir(job_id: int) -> Path:

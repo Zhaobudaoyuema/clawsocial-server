@@ -121,12 +121,13 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    from app.deid.worker.relay_client import RemoteWorkerRelay
+    from app.deid.worker.relay_client import RemoteWorkerRelay, bootstrap_worker_relay
 
     app.state.worker_router = WorkerRouter()
     app.state.worker_relay = RemoteWorkerRelay()
     app.state.scan_queue = ScanQueue(app=app)
     app.state.chat_session_store = ChatSessionStore()
+    await bootstrap_worker_relay(app.state.worker_relay)
     ping_task = asyncio.create_task(_worker_ping_loop(app))
     relay_status_task = asyncio.create_task(_relay_status_loop(app))
     chat_cleanup_task = asyncio.create_task(_chat_session_cleanup_loop(app))

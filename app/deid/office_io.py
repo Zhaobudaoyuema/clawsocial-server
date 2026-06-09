@@ -12,7 +12,13 @@ import defusedxml.minidom
 from app.deid.vendor.office.helpers import merge_runs as merge_runs_mod
 
 
-def unpack_docx(input_file: str | Path, output_directory: str | Path, *, merge: bool = True) -> None:
+def unpack_docx(
+    input_file: str | Path,
+    output_directory: str | Path,
+    *,
+    merge: bool = True,
+    fast: bool = False,
+) -> None:
     """Extract docx ZIP; optionally merge adjacent runs in document.xml."""
     input_path = Path(input_file)
     output_path = Path(output_directory)
@@ -21,8 +27,9 @@ def unpack_docx(input_file: str | Path, output_directory: str | Path, *, merge: 
     output_path.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(input_path, "r") as zf:
         zf.extractall(output_path)
-    for xml_file in list(output_path.rglob("*.xml")) + list(output_path.rglob("*.rels")):
-        _pretty_print_xml(xml_file)
+    if not fast:
+        for xml_file in list(output_path.rglob("*.xml")) + list(output_path.rglob("*.rels")):
+            _pretty_print_xml(xml_file)
     if merge:
         merge_runs_mod.merge_runs(str(output_path))
 
@@ -32,6 +39,7 @@ def pack_docx(
     output_file: str | Path,
     *,
     validate: bool = False,  # noqa: ARG001 — MVP skips heavy validators
+    fast: bool = False,
 ) -> None:
     """Repack unpacked directory into docx (no XSD validation in MVP)."""
     input_dir = Path(input_directory)
@@ -41,9 +49,10 @@ def pack_docx(
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_content = Path(temp_dir) / "content"
         shutil.copytree(input_dir, temp_content)
-        for pattern in ("*.xml", "*.rels"):
-            for xml_file in temp_content.rglob(pattern):
-                _condense_xml(xml_file)
+        if not fast:
+            for pattern in ("*.xml", "*.rels"):
+                for xml_file in temp_content.rglob(pattern):
+                    _condense_xml(xml_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in temp_content.rglob("*"):

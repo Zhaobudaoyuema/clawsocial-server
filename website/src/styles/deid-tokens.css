@@ -11,7 +11,7 @@
   /* Ink */
   --deid-ink: #37352f;
   --deid-ink-secondary: #6f6e69;
-  --deid-ink-muted: #9b9a97;
+  --deid-ink-muted: #787774;
 
   /* Brand */
   --deid-primary: #5e6ad2;
@@ -28,6 +28,11 @@
   /* Semantic */
   --deid-success: #0f766e;
   --deid-success-bg: #ecfdf5;
+
+  /* Scan live panel */
+  --deid-scan-log-bg: #f8fafc;
+  --deid-scan-log-fg: #64748b;
+  --deid-scan-entity-accent: #5e6ad2;
   --deid-success-border: #99f6e4;
   --deid-danger: #be123c;
   --deid-danger-bg: #fff1f2;
@@ -63,6 +68,10 @@
   --deid-content-max: 1180px;
   --deid-stage-pad: 2rem 2.5rem 3rem;
   --deid-drawer-z-index: 120;
+  --deid-inspector-width: min(420px, 52%);
+  --deid-entity-panel-max: min(440px, 42%);
+  --deid-row-compact: 32px;
+  --deid-progress-height: 4px;
 
   min-height: 100vh;
   background: var(--deid-bg);
@@ -244,6 +253,21 @@
 .deid-fade-leave-to {
   opacity: 0;
   transform: translateY(4px);
+}
+
+@media (min-width: 769px) {
+  .deid-fade-enter-from,
+  .deid-fade-leave-to {
+    transform: none;
+  }
+}
+
+@media (min-width: 769px) {
+  html:has(.deid-app),
+  body:has(.deid-app) {
+    overflow: hidden;
+    height: 100%;
+  }
 }
 
 @media (max-width: 768px) {

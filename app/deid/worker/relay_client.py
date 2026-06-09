@@ -39,13 +39,19 @@ class RemoteWorkerRelay:
     """Proxy WorkerRouter calls to a remote server's /api/deid/dev/worker/* endpoints."""
 
     def __init__(self) -> None:
-        self._base_url = resolve_dev_relay_url()
-        self._token = resolve_dev_relay_token()
+        self._base_url = ""
+        self._token = ""
         self._status: dict[str, Any] | None = None
         self._status_at = 0.0
+        self._sync_config()
+
+    def _sync_config(self) -> None:
+        self._base_url = resolve_dev_relay_url()
+        self._token = resolve_dev_relay_token()
 
     @property
     def enabled(self) -> bool:
+        self._sync_config()
         return bool(self._base_url and self._token)
 
     @property
@@ -239,3 +245,75 @@ async def _sleep(seconds: float) -> None:
     import asyncio
 
     await asyncio.sleep(seconds)
+
+
+async def bootstrap_worker_relay(relay: RemoteWorkerRelay) -> None:
+    """On app startup: refresh remote worker status and log how LLM will be reached."""
+    if not relay.enabled:
+        from app.deid.worker.dev_machine_token import describe_local_dev_machine
+
+        info = describe_local_dev_machine()
+        if info.get("machine_guid") and not info.get("registered"):
+            logger.warning(
+                "DEID: 本机 MachineGuid 未在白名单，Worker/LLM 不可用（仅词库+规则）"
+            )
+        else:
+            logger.info("DEID: 等待本机 Mac Worker 连接 /ws/worker")
+        return
+
+    await relay.refresh_status()
+    st = relay.status_dict()
+    if st.get("online"):
+        logger.info(
+            "DEID: 使用远程 Mac Worker → %s | %s (%s)",
+            relay.base_url,
+            st.get("model") or "?",
+            st.get("hostname") or "?",
+        )
+    else:
+        logger.warning(
+            "DEID: 远程 Worker 中继已启用 (%s)，但生产 Mac Worker 当前离线",
+            relay.base_url,
+        )
+
+
+def probe_worker_relay_sync() -> None:
+    """Sync probe for run.py startup banner (before uvicorn)."""
+    from app.deid.worker.dev_machine_token import (
+        describe_local_dev_machine,
+        resolve_dev_relay_token,
+        resolve_dev_relay_url,
+    )
+
+    info = describe_local_dev_machine()
+    if not info.get("has_token"):
+        if info.get("machine_guid") and not info.get("registered"):
+            logger.warning(
+                "[Worker] 本机 GUID 未注册，扫描无 LLM。运行: python -m scripts.show_dev_relay_token"
+            )
+        return
+
+    url = resolve_dev_relay_url()
+    logger.info("[Worker] 本地启动 → 远程中继 %s", url)
+    token = resolve_dev_relay_token()
+    try:
+        with httpx.Client(timeout=12.0) as client:
+            resp = client.get(
+                f"{url}/api/deid/dev/worker/status",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if resp.status_code != 200:
+            logger.warning("[Worker] 中继探测失败 HTTP %s", resp.status_code)
+            return
+        st = resp.json()
+        if st.get("online"):
+            logger.info(
+                "[Worker] 远程 Mac Worker 就绪: %s @ %s",
+                st.get("model") or "?",
+                st.get("hostname") or "?",
+            )
+        else:
+            logger.warning("[Worker] 远程 Mac Worker 离线 (state=%s)", st.get("state"))
+    except Exception as exc:
+        logger.warning("[Worker] 中继探测失败: %s", exc)
+

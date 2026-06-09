@@ -20,7 +20,6 @@ const emit = defineEmits<{ select: [file: File] }>()
       <span class="deid-spinner" aria-hidden="true" />
       <span>正在上传…</span>
     </div>
-    <p v-else class="hint-text">选择或拖放 .docx 文件，将自动开始上传</p>
   </div>
 </template>
 
@@ -42,12 +41,5 @@ const emit = defineEmits<{ select: [file: File] }>()
   padding: 0 1.5rem 1.25rem;
   font-size: 1rem;
   color: var(--deid-ink-secondary);
-}
-.hint-text {
-  margin: 0;
-  padding: 0 1.5rem 1.25rem;
-  text-align: center;
-  font-size: 0.9375rem;
-  color: var(--deid-ink-muted);
 }
 </style>

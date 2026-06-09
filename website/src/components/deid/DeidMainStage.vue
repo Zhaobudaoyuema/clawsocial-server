@@ -1,59 +1,62 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useDeidStore } from '../../stores/deid'
 import DeidUploadCard from './DeidUploadCard.vue'
-import DeidScanProgress from './DeidScanProgress.vue'
+import DeidScanLivePanel from './DeidScanLivePanel.vue'
 import DeidCompletionHero from './DeidCompletionHero.vue'
 import DeidReplaceSamples from './DeidReplaceSamples.vue'
 import DeidEntityList from './DeidEntityList.vue'
 import DeidConclusionView from './DeidConclusionView.vue'
 import DeidMyEntities from './DeidMyEntities.vue'
 import DeidStepper from './DeidStepper.vue'
+import DeidStepNav from './DeidStepNav.vue'
 import DeidWorkerBanner from './DeidWorkerBanner.vue'
+import DeidScanErrorPanel from './DeidScanErrorPanel.vue'
+import DeidModal from './DeidModal.vue'
 
 const store = useDeidStore()
 
 const selectedFile = ref<File | null>(null)
 const uploadError = ref<string | null>(null)
 const useWorker = ref(true)
-const overrideAck = ref(false)
 const overrideReason = ref('')
 const manualName = ref('')
 const jobsToastDismissed = ref(false)
+const showOverrideModal = ref(false)
+const modalOverrideAck = ref(false)
 
 const job = computed(() => store.currentJob)
 const jobId = computed(() => (job.value as { id?: number } | null)?.id)
 const status = computed(() => (job.value as { status?: string } | null)?.status || 'idle')
 const workerOnline = computed(() => store.workerStatus.online)
-const isScanning = computed(() => status.value === 'scanning' || status.value === 'queued')
+const isScanning = computed(
+  () =>
+    status.value === 'scanning' ||
+    status.value === 'queued' ||
+    (!!store.scanProgress && store.scanProgress.phase !== 'error'),
+)
 const isDone = computed(() => status.value === 'done')
-const isDraft = computed(() => !!job.value && status.value === 'draft')
-const isAwaitingConfirm = computed(() => {
-  if (!job.value || isDone.value) return false
-  const st = status.value
-  return st === 'scanned' || st === 'confirmed'
-})
-const isRunningDeid = computed(() => status.value === 'running')
-const hasJob = computed(() => !!job.value && !isDone.value && !isAwaitingConfirm.value && !isRunningDeid.value)
 
 const verification = computed(
   () => ((job.value as { verification?: Record<string, unknown> })?.verification) || {},
 )
-const canDownload = computed(() => verification.value.passed || overrideAck.value)
-
-const pendingCount = computed(() =>
-  store.entities.filter((e) => !(e as { is_excluded?: boolean }).is_excluded).length,
+const verificationPassed = computed(() => !!verification.value.passed)
+const verificationSummary = computed(() => (verification.value.summary as string) || '')
+const verificationResiduals = computed(
+  () => (verification.value.residuals as string[]) || [],
 )
 
-const currentStep = computed((): 'upload' | 'scan' | 'confirm' | 'done' => {
-  if (store.showEntitiesPanel) return 'upload'
-  if (isDone.value) return 'done'
-  if (store.showConclusionView) return 'confirm'
-  const st = status.value
-  if (st === 'scanned' || st === 'confirmed') return 'confirm'
-  if (st === 'scanning' || st === 'queued') return 'scan'
-  return 'upload'
-})
+const scanFailed = computed(
+  () =>
+    wizardPhase.value === 'scan-draft' &&
+    !!(uploadError.value || store.error),
+)
+
+const scanErrorMessage = computed(() => uploadError.value || store.error || '扫描失败')
+
+const currentStep = computed(() => store.wizardStep())
+
+const wizardPhase = computed(() => store.wizardPhase())
 
 const showWorkerBanner = computed(
   () => !workerOnline.value && !isDone.value && !store.showEntitiesPanel,
@@ -61,6 +64,48 @@ const showWorkerBanner = computed(
 
 const showJobsError = computed(
   () => !!store.jobsError && !jobsToastDismissed.value,
+)
+
+const showWorkerToast = computed(
+  () =>
+    store.workerWasOffline &&
+    store.workerStatus.online &&
+    !store.showConclusionView &&
+    !store.showEntitiesPanel &&
+    !isDone.value,
+)
+
+const stageBodyRef = ref<HTMLElement | null>(null)
+
+watch(
+  () =>
+    [
+      store.showConclusionView,
+      store.showEntitiesPanel,
+      wizardPhase.value,
+      jobId.value,
+    ] as const,
+  () => {
+    stageBodyRef.value?.scrollTo(0, 0)
+  },
+)
+
+watch(
+  () =>
+    [
+      status.value,
+      store.showConclusionView,
+      store.showEntitiesPanel,
+      jobId.value,
+    ] as const,
+  ([st, conclusion, entitiesPanel]) => {
+    if (entitiesPanel || store.suppressAutoConclusion) return
+    if (st !== 'scanned' && st !== 'confirmed') return
+    if (!conclusion && store.needsConclusionStep()) {
+      store.openConclusionView()
+    }
+  },
+  { immediate: true },
 )
 
 function onSelect(file: File) {
@@ -86,11 +131,17 @@ async function doUpload() {
 
 async function doScan() {
   if (!jobId.value) return
+  uploadError.value = null
+  store.beginScan(jobId.value)
   try {
     await store.startScan(jobId.value)
     await store.pollScanUntilDone(jobId.value)
   } catch {
     uploadError.value = store.error || '扫描失败'
+    if (store.currentJob && (store.currentJob as { status?: string }).status === 'scanning') {
+      store.currentJob = { ...store.currentJob, status: 'draft' }
+    }
+    store.scanProgress = null
   }
 }
 
@@ -122,12 +173,28 @@ async function retryJobs() {
   jobsToastDismissed.value = false
   await store.fetchJobs()
 }
+
+function openOverrideModal() {
+  modalOverrideAck.value = false
+  showOverrideModal.value = true
+}
+
+function confirmOverrideDownload() {
+  if (!modalOverrideAck.value || !jobId.value) return
+  const url = store.exportUrl(jobId.value, true, overrideReason.value.trim() || undefined)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = ''
+  a.click()
+  showOverrideModal.value = false
+}
 </script>
 
 <template>
   <main class="stage">
-    <div v-if="store.workerWasOffline && store.workerStatus.online" class="toast toast--ok">
-      Worker 已上线，可使用智能发现
+    <div ref="stageBodyRef" class="stage-body">
+    <div v-if="showWorkerToast" class="toast toast--ok">
+      智能扫描已恢复，可使用 AI 发现实体
       <button type="button" class="toast-x" @click="store.clearWorkerToast()">×</button>
     </div>
 
@@ -138,17 +205,39 @@ async function retryJobs() {
         <button type="button" class="toast-x" @click="jobsToastDismissed = true">×</button>
       </div>
     </div>
-
     <Transition name="deid-fade" mode="out-in">
       <!-- 我的实体 -->
       <DeidMyEntities v-if="store.showEntitiesPanel" key="entities" class="panel-fill" />
 
       <!-- 结论全屏 -->
-      <DeidConclusionView v-else-if="store.showConclusionView" key="conclusion" />
+      <DeidConclusionView v-else-if="store.showConclusionView" key="conclusion" class="panel-fill" />
 
       <!-- 完成页 -->
-      <div v-else-if="isDone && job" key="done" class="done-wrap">
-        <DeidStepper :current="currentStep" />
+      <div v-else-if="wizardPhase === 'done' && job" key="done" class="done-wrap wizard-panel">
+        <div class="wizard-toolbar">
+          <DeidStepper :current="currentStep" :finished="isDone" />
+          <DeidStepNav>
+          <a
+            v-if="verificationPassed && jobId"
+            class="deid-btn deid-btn--primary"
+            :href="store.exportUrl(jobId, false, undefined)"
+            download
+          >
+            下载文档
+          </a>
+          <button
+            v-else-if="jobId"
+            type="button"
+            class="deid-btn deid-btn--primary"
+            @click="openOverrideModal"
+          >
+            下载文档
+          </button>
+          <button v-if="store.entityDirty" type="button" class="deid-btn" @click="doRerun">
+            重新脱敏
+          </button>
+          </DeidStepNav>
+        </div>
         <DeidCompletionHero :job="job" :entities="store.entities" />
         <DeidReplaceSamples :previews="store.previews" />
         <DeidEntityList :entities="store.entities" editable @delete="onDeleteEntity" />
@@ -156,47 +245,24 @@ async function retryJobs() {
           <input v-model="manualName" class="deid-input" placeholder="添加实体后需重新脱敏" />
           <button type="button" class="deid-btn" @click="addManualDone">添加</button>
         </div>
-        <div v-if="store.aiSummary" class="ai-box">{{ store.aiSummary }}</div>
-        <div v-if="!verification.passed" class="override">
-          <label><input v-model="overrideAck" type="checkbox" /> 本人已知晓风险，仍要下载</label>
-        </div>
-        <div class="actions">
-          <a
-            v-if="canDownload && jobId"
-            class="deid-btn deid-btn--primary"
-            :href="store.exportUrl(jobId, overrideAck, overrideReason || undefined)"
-            download
-          >
-            下载文档
-          </a>
-          <button v-if="store.entityDirty" type="button" class="deid-btn" @click="doRerun">
-            重新脱敏
-          </button>
-          <button
-            v-if="store.workerStatus.online && jobId"
-            type="button"
-            class="deid-btn deid-btn--ghost"
-            @click="store.fetchAiSummary(jobId!)"
-          >
-            AI 解读
-          </button>
-        </div>
       </div>
 
       <!-- 上传 / 扫描 -->
-      <div v-else key="upload" class="upload-wrap">
-        <DeidStepper :current="currentStep" />
+      <div v-else key="upload" class="upload-wrap wizard-panel">
+        <div class="wizard-toolbar">
+          <DeidStepper :current="currentStep" :finished="isDone" />
+        </div>
 
         <DeidWorkerBanner v-if="showWorkerBanner" />
 
-        <div v-if="!hasJob && !isAwaitingConfirm && !isRunningDeid" class="upload-stage">
+        <div v-if="wizardPhase === 'upload'" class="upload-stage">
           <div class="upload-head">
             <h2 class="deid-page-title">上传 Word 文档</h2>
             <p class="deid-page-sub">选择 .docx 文件，自动上传并开始流程</p>
           </div>
           <label v-if="workerOnline" class="worker-opt">
             <input v-model="useWorker" type="checkbox" :disabled="store.loading" />
-            使用 Mac Worker 智能发现
+            使用智能扫描（AI 发现更多实体）
           </label>
           <DeidUploadCard
             :disabled="store.loading || isScanning"
@@ -206,29 +272,8 @@ async function retryJobs() {
           <p v-if="uploadError || store.error" class="err">{{ uploadError || store.error }}</p>
         </div>
 
-        <!-- 扫描完成，待确认实体 -->
-        <div v-else-if="isAwaitingConfirm && job" class="confirm-stage">
-          <h2 class="deid-page-title">{{ (job as { original_filename: string }).original_filename }}</h2>
-          <p class="deid-page-sub">
-            {{ pendingCount > 0 ? `发现 ${pendingCount} 个实体待确认` : '未发现实体，请手动添加后继续' }}
-          </p>
-          <div class="confirm-card deid-panel">
-            <div class="confirm-icon" aria-hidden="true">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
-                <path d="M9 12l2 2 4-4M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            </div>
-            <p class="confirm-text">
-              {{ pendingCount > 0 ? '请查看扫描结论，勾选要脱敏的实体' : '打开结论页手动添加实体' }}
-            </p>
-            <button type="button" class="deid-btn deid-btn--primary deid-btn--lg" @click="store.openConclusionView()">
-              查看结论
-            </button>
-          </div>
-        </div>
-
         <!-- 脱敏进行中 -->
-        <div v-else-if="isRunningDeid && job" class="job-stage">
+        <div v-else-if="wizardPhase === 'deid-running' && job" key="running" class="running-stage">
           <h2 class="deid-page-title">{{ (job as { original_filename: string }).original_filename }}</h2>
           <p class="deid-page-sub">正在脱敏，请稍候…</p>
           <div class="job-card deid-panel confirm-card">
@@ -237,22 +282,21 @@ async function retryJobs() {
           </div>
         </div>
 
-        <div v-else-if="job" class="job-stage">
+        <div v-else-if="wizardPhase === 'scan-draft'" class="job-stage">
           <h2 class="deid-page-title">{{ (job as { original_filename: string }).original_filename }}</h2>
-          <p class="deid-page-sub">
-            {{ isScanning ? '正在扫描文档…' : '确认无误后开始扫描' }}
-          </p>
+          <p class="deid-page-sub">{{ scanFailed ? '扫描遇到问题' : '确认无误后开始扫描' }}</p>
 
-          <div class="job-card deid-panel">
-            <DeidScanProgress
-              v-if="isScanning && store.scanProgress"
-              :percent="store.scanProgress.percent"
-              :message="store.scanProgress.message"
-              :phase="store.scanProgress.phase"
-              :queue-position="store.scanProgress.queue_position"
-            />
+          <DeidScanErrorPanel
+            v-if="scanFailed"
+            class="job-card"
+            :message="scanErrorMessage"
+            :has-entities="store.entities.length > 0"
+            @retry="doScan"
+            @view-conclusion="store.openConclusionView()"
+          />
 
-            <div v-else class="job-ready">
+          <div v-else class="job-card deid-panel">
+            <div class="job-ready">
               <div class="file-icon" aria-hidden="true">
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
@@ -262,9 +306,7 @@ async function retryJobs() {
               <p class="ready-text">文档已就绪，点击开始扫描</p>
             </div>
 
-            <p v-if="uploadError || store.error" class="err">{{ uploadError || store.error }}</p>
-
-            <div v-if="isDraft" class="cta">
+            <div class="cta">
               <button
                 type="button"
                 class="deid-btn deid-btn--primary deid-btn--lg"
@@ -276,8 +318,65 @@ async function retryJobs() {
             </div>
           </div>
         </div>
+
+        <div v-else-if="wizardPhase === 'scanning' && job" class="job-stage">
+          <h2 class="deid-page-title">{{ (job as { original_filename: string }).original_filename }}</h2>
+          <p class="deid-page-sub">正在扫描文档…</p>
+
+          <div class="job-card deid-panel">
+            <DeidScanLivePanel
+              v-if="store.scanProgress"
+              :percent="store.scanProgress.percent"
+              :message="store.scanProgress.message"
+              :phase="store.scanProgress.phase"
+              :queue-position="store.scanProgress.queue_position"
+              :stats="store.scanLive.stats || store.scanProgress.stats"
+              :metrics="store.scanLive.metrics || store.scanProgress.metrics"
+              :logs="store.scanLive.logs"
+              :stream-tail="store.scanLive.streamTail"
+              :entities-found="store.scanLive.entitiesFound"
+              :stream-connected="store.scanLive.streamConnected"
+              :started-at="store.scanLive.startedAt"
+            />
+          </div>
+        </div>
       </div>
     </Transition>
+    </div>
+
+    <DeidModal v-model:open="showOverrideModal" title="验证未通过，确认下载？" danger>
+      <p v-if="verificationSummary" class="override-summary">{{ verificationSummary }}</p>
+      <p v-if="verificationResiduals.length" class="override-residuals-title">
+        残留明细（共 {{ verificationResiduals.length }} 处）
+      </p>
+      <ul v-if="verificationResiduals.length" class="override-residuals">
+        <li v-for="(r, i) in verificationResiduals.slice(0, 5)" :key="i" class="deid-mono">{{ r }}</li>
+        <li v-if="verificationResiduals.length > 5" class="override-more">
+          另有 {{ verificationResiduals.length - 5 }} 处未列出
+        </li>
+      </ul>
+      <label class="override-ack">
+        <input v-model="modalOverrideAck" type="checkbox" />
+        本人已审阅残留风险，确认下载
+      </label>
+      <textarea
+        v-model="overrideReason"
+        class="deid-textarea override-reason"
+        placeholder="备注原因（可选）"
+        rows="2"
+      />
+      <template #footer>
+        <button type="button" class="deid-btn" @click="showOverrideModal = false">取消</button>
+        <button
+          type="button"
+          class="deid-btn deid-btn--primary"
+          :disabled="!modalOverrideAck"
+          @click="confirmOverrideDownload"
+        >
+          确认下载
+        </button>
+      </template>
+    </DeidModal>
   </main>
 </template>
 
@@ -288,15 +387,67 @@ async function retryJobs() {
   overflow-y: auto;
   background: var(--deid-bg);
 }
+@media (min-width: 769px) {
+  .stage {
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .stage-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .stage-body > .panel-fill {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .wizard-panel {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 1rem 2rem 1.25rem;
+  }
+  .wizard-toolbar {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 1rem 1.5rem;
+    margin-bottom: 0.75rem;
+  }
+  .wizard-toolbar :deep(.stepper) {
+    margin-bottom: 0;
+  }
+  .wizard-toolbar :deep(.step-nav) {
+    margin-bottom: 0;
+  }
+  .toast {
+    flex-shrink: 0;
+    margin: 0 2rem 0.5rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+  }
+}
 .toast {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 0.75rem;
-  margin: 1rem 2.5rem 0;
-  padding: 0.75rem 1rem;
+  margin: 0 1rem 0.5rem;
+  padding: 0.65rem 0.85rem;
   border-radius: var(--deid-radius-sm);
-  font-size: 1rem;
+  font-size: 0.9375rem;
+}
+@media (min-width: 769px) {
+  .toast {
+    margin: 0 2rem 0.5rem;
+  }
 }
 .toast--ok {
   background: var(--deid-success-bg);
@@ -335,28 +486,15 @@ async function retryJobs() {
   margin: 0 auto;
   padding: var(--deid-stage-pad);
 }
-.pending-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1.5rem;
-  background: var(--deid-preset-bg);
-  border: 1px solid var(--deid-primary-soft);
-  border-left: 4px solid var(--deid-primary);
-  border-radius: var(--deid-radius);
-  font-size: 1.0625rem;
-  font-weight: 500;
-  color: var(--deid-ink);
-  box-shadow: var(--deid-shadow-sm);
+@media (min-width: 769px) {
+  .panel-fill {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    height: 100%;
+  }
 }
-.confirm-stage {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: calc(100vh - var(--deid-topbar-height) - 12rem);
+.running-stage {
   max-width: 720px;
   margin: 0 auto;
   text-align: center;
@@ -456,24 +594,41 @@ async function retryJobs() {
   gap: 0.75rem;
   margin: 1.25rem 0;
 }
-.ai-box {
-  padding: 1.1rem 1.25rem;
-  background: var(--deid-surface);
-  border: 1px solid var(--deid-border);
-  border-radius: var(--deid-radius);
-  font-size: 1rem;
-  margin-bottom: 1.25rem;
+.override-summary {
+  margin: 0 0 0.75rem;
   color: var(--deid-ink-secondary);
-  line-height: 1.65;
 }
-.override {
-  font-size: 1rem;
-  margin-bottom: 1.25rem;
+.override-residuals-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: var(--deid-danger);
 }
-.actions {
+.override-residuals {
+  margin: 0 0 1rem;
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+  color: var(--deid-ink-secondary);
+}
+.override-more {
+  color: var(--deid-ink-muted);
+  font-style: italic;
+}
+.override-ack {
   display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.9375rem;
+  color: var(--deid-ink);
+  cursor: pointer;
+}
+.override-ack input {
+  margin-top: 0.2rem;
+  accent-color: var(--deid-primary);
+}
+.override-reason {
+  margin-top: 0.25rem;
 }
 @media (max-width: 768px) {
   .toast {

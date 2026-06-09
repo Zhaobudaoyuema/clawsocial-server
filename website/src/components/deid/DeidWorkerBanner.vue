@@ -14,7 +14,7 @@ function openEntities() {
 <template>
   <div class="worker-banner" role="status">
     <span class="msg">
-      Worker 离线：将匹配「我的实体」中已记住的实体；智能发现不可用
+      智能扫描暂不可用：将自动匹配「我的实体」中已记住的名称
     </span>
     <button type="button" class="link" @click="openEntities">
       管理实体

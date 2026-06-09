@@ -9,16 +9,24 @@ from typing import Any
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.deid.discovery.llm import discover_llm
+from app.deid.discovery.enrich import enrich_discovered_entities
+from app.deid.discovery.llm import count_llm_chunks, discover_llm
 from app.deid.discovery.merge import MergedEntity, merge_entities
-from app.deid.engine.pipeline import extract_sample_text, run_deid_pipeline
+from app.deid.engine.pipeline import extract_doc_sample_and_stats, extract_sample_text, run_deid_pipeline
 from app.deid.engine.plan import normalize_for_match
 from app.deid.prompts import build_scan_system_prompt
-from app.deid.entity_types import get_placeholder_prefix, valid_codes
+from app.deid.entity_types import get_placeholder_prefix, list_entity_types, valid_codes
 from app.deid.schemas import ManualEntityIn
+from app.deid.scan_events import get_scan_event_bus
 from app.deid.settings_store import get_scan_prompt, reset_scan_prompt, scan_prompt_meta, set_setting
 from app.deid.prompts import DEFAULT_SCAN_PROMPT, SCAN_PROMPT_SETTING_KEY
-from app.deid.storage import delete_job_files, job_dir, resolve_upload_path, save_job_docx
+from app.deid.storage import (
+    JOB_RETENTION_HOURS,
+    delete_job_files,
+    job_dir,
+    resolve_upload_path,
+    save_job_docx,
+)
 from app.deid.worker.router import WorkerRouter
 from app.models_deid import (
     DeidClientPack,
@@ -35,7 +43,7 @@ from app.time_utils import coerce_beijing, now_beijing
 
 SOURCE_UI = {
     "manual": "手动",
-    "llm": "智能发现",
+    "llm": "AI 识别",
     "remembered": "已记住",
 }
 
@@ -66,6 +74,46 @@ def _parse_progress(job: DeidJob) -> dict[str, Any] | None:
         return None
 
 
+_LOG_TAIL_MAX = 30
+
+
+def _merge_progress_payload(
+    job: DeidJob,
+    *,
+    phase: str,
+    percent: int,
+    message: str,
+    queue_position: int | None = None,
+    stats: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    log_line: str | None = None,
+) -> dict[str, Any]:
+    prev = _parse_progress(job) or {}
+    log_tail = list(prev.get("log_tail") or [])
+    if log_line:
+        log_tail.append(log_line)
+        if len(log_tail) > _LOG_TAIL_MAX:
+            log_tail = log_tail[-_LOG_TAIL_MAX:]
+    payload: dict[str, Any] = {
+        "phase": phase,
+        "percent": max(0, min(100, percent)),
+        "message": message,
+    }
+    if queue_position is not None:
+        payload["queue_position"] = queue_position
+    if stats is not None:
+        payload["stats"] = stats
+    elif prev.get("stats"):
+        payload["stats"] = prev["stats"]
+    if metrics is not None:
+        payload["metrics"] = metrics
+    elif prev.get("metrics"):
+        payload["metrics"] = prev["metrics"]
+    if log_tail:
+        payload["log_tail"] = log_tail
+    return payload
+
+
 def set_job_progress(
     db: Session,
     job: DeidJob,
@@ -74,18 +122,42 @@ def set_job_progress(
     percent: int,
     message: str,
     queue_position: int | None = None,
+    stats: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    log_line: str | None = None,
     commit: bool = True,
+    emit: bool = True,
 ) -> None:
-    payload: dict[str, Any] = {
-        "phase": phase,
-        "percent": max(0, min(100, percent)),
-        "message": message,
-    }
-    if queue_position is not None:
-        payload["queue_position"] = queue_position
+    payload = _merge_progress_payload(
+        job,
+        phase=phase,
+        percent=percent,
+        message=message,
+        queue_position=queue_position,
+        stats=stats,
+        metrics=metrics,
+        log_line=log_line,
+    )
     job.progress_json = json.dumps(payload, ensure_ascii=False)
     if commit:
         db.commit()
+    if emit:
+        bus = get_scan_event_bus()
+        bus.emit(
+            job.id,
+            {
+                "type": "phase",
+                "phase": phase,
+                "percent": payload["percent"],
+                "message": message,
+            },
+        )
+        if stats:
+            bus.emit(job.id, {"type": "stats", **stats})
+        if metrics:
+            bus.emit(job.id, {"type": "metrics", **metrics})
+        if log_line:
+            bus.emit(job.id, {"type": "log", "line": log_line})
 
 
 def job_needs_worker_queue(
@@ -136,12 +208,6 @@ def _job_to_dict(job: DeidJob) -> dict[str, Any]:
             run_summary = json.loads(job.run_summary_json)
         except json.JSONDecodeError:
             pass
-    ai_summary = None
-    if job.ai_summary_json:
-        try:
-            ai_summary = json.loads(job.ai_summary_json)
-        except json.JSONDecodeError:
-            pass
     return {
         "id": job.id,
         "status": job.status,
@@ -150,7 +216,6 @@ def _job_to_dict(job: DeidJob) -> dict[str, Any]:
         "engine": job.engine,
         "verification": verification,
         "run_summary": run_summary,
-        "ai_summary": ai_summary,
         "override_reason": job.override_reason,
         "completed_at": _dt_iso(job.completed_at),
         "expires_at": _dt_iso(job.expires_at),
@@ -162,7 +227,7 @@ def _job_to_dict(job: DeidJob) -> dict[str, Any]:
 
 
 def list_jobs(db: Session) -> list[dict]:
-    cutoff = now_beijing() - timedelta(hours=24)
+    cutoff = now_beijing() - timedelta(hours=JOB_RETENTION_HOURS)
     done_jobs = (
         db.query(DeidJob)
         .filter(DeidJob.status == "done", DeidJob.completed_at >= cutoff)
@@ -434,6 +499,20 @@ async def _scan_job_impl(
     if not path.exists():
         raise HTTPException(400, "原文件已丢失")
 
+    _clear_auto_entities(db, job_id)
+    if job.status not in ("scanning", "queued"):
+        job.status = "scanning"
+    bus = get_scan_event_bus()
+    set_job_progress(
+        db,
+        job,
+        phase="starting",
+        percent=1,
+        message="准备扫描…",
+        log_line="扫描任务已开始",
+        commit=True,
+    )
+
     manual_entities = (
         db.query(DeidJobEntity)
         .filter(DeidJobEntity.job_id == job_id, DeidJobEntity.source == "manual")
@@ -458,56 +537,182 @@ async def _scan_job_impl(
             )
         )
 
-    _clear_auto_entities(db, job_id)
-    if job.status not in ("scanning", "queued"):
-        job.status = "scanning"
-    set_job_progress(db, job, phase="extract", percent=5, message="提取文档文本…", commit=True)
+    set_job_progress(
+        db,
+        job,
+        phase="extract",
+        percent=5,
+        message="提取文档文本…",
+        log_line="正在解压并读取文档…",
+        commit=True,
+    )
 
-    sample = extract_sample_text(path)
+    import os
+
+    sample, doc_stats = extract_doc_sample_and_stats(path)
     text_norm = normalize_for_match(sample)
+    llm_chunk_count = count_llm_chunks(sample)
+    stats_payload = {
+        "paragraphs": doc_stats["paragraph_count"],
+        "chars": doc_stats["char_count"],
+        "tables": doc_stats["table_count"],
+        "chunks": llm_chunk_count,
+    }
+    stats_msg = (
+        f"已解析 {doc_stats['paragraph_count']:,} 段 · "
+        f"{doc_stats['char_count']:,} 字"
+    )
+    if llm_chunk_count > 1:
+        stats_msg += f" · 将分 {llm_chunk_count} 段分析"
+    set_job_progress(
+        db,
+        job,
+        phase="extract",
+        percent=15,
+        message=stats_msg,
+        stats=stats_payload,
+        log_line=stats_msg,
+        commit=True,
+    )
 
-    set_job_progress(db, job, phase="remembered", percent=20, message="匹配已记住实体…")
+    set_job_progress(
+        db,
+        job,
+        phase="remembered",
+        percent=20,
+        message="匹配已记住实体…",
+        stats=stats_payload,
+        log_line="匹配词库与已记住实体…",
+    )
     remembered_entities, remembered_hits = _discover_remembered(db, text_norm)
+    remembered_names = [e.canonical_name for e in remembered_entities[:5]]
+    bus.emit(
+        job_id,
+        {
+            "type": "remembered",
+            "count": remembered_hits,
+            "names": remembered_names,
+        },
+    )
+    set_job_progress(
+        db,
+        job,
+        phase="remembered",
+        percent=25,
+        message=f"词库匹配 {remembered_hits} 个实体",
+        stats=stats_payload,
+        log_line=f"词库匹配完成，命中 {remembered_hits} 个实体",
+        commit=True,
+    )
 
     llm_entities: list[MergedEntity] = []
     llm_result = None
     llm_enabled = job.use_worker and job_needs_worker_queue(db, job, worker_router)
 
     if llm_enabled:
+        scan_metrics: dict[str, Any] = {"model": None}
+        llm_percent = 30
+
         def on_llm_progress(current: int, total: int) -> None:
+            nonlocal llm_percent
             if total <= 0:
                 return
-            pct = 30 + int(60 * current / total)
+            llm_percent = 30 + int(60 * current / total)
             set_job_progress(
                 db,
                 job,
                 phase="llm",
-                percent=pct,
-                message=f"智能发现 {current}/{total}",
+                percent=llm_percent,
+                message=f"AI 识别 {current}/{total}",
+                stats=stats_payload,
+                metrics=scan_metrics if scan_metrics.get("model") else None,
                 commit=True,
+                emit=False,
+            )
+            bus.emit(
+                job_id,
+                {
+                    "type": "phase",
+                    "phase": "llm",
+                    "percent": llm_percent,
+                    "message": f"AI 识别 {current}/{total}",
+                },
             )
 
-        set_job_progress(db, job, phase="llm", percent=30, message="智能发现…")
+        def on_llm_event(event: dict) -> None:
+            bus.emit(job_id, event)
+            if event.get("type") == "metrics":
+                scan_metrics.update(event)
+                set_job_progress(
+                    db,
+                    job,
+                    phase="llm",
+                    percent=llm_percent,
+                    message="AI 识别中…",
+                    stats=stats_payload,
+                    metrics=scan_metrics,
+                    commit=True,
+                    emit=False,
+                )
+            elif event.get("type") == "log":
+                set_job_progress(
+                    db,
+                    job,
+                    phase="llm",
+                    percent=llm_percent,
+                    message="AI 识别中…",
+                    stats=stats_payload,
+                    metrics=scan_metrics if scan_metrics.get("model") else None,
+                    log_line=str(event.get("line") or ""),
+                    commit=True,
+                    emit=False,
+                )
+            elif event.get("type") == "entity":
+                set_job_progress(
+                    db,
+                    job,
+                    phase="llm",
+                    percent=llm_percent,
+                    message="AI 识别中…",
+                    stats=stats_payload,
+                    metrics=scan_metrics if scan_metrics.get("model") else None,
+                    log_line=f"发现实体：{event.get('name')}",
+                    commit=True,
+                    emit=False,
+                )
+
+        set_job_progress(
+            db,
+            job,
+            phase="llm",
+            percent=30,
+            message="AI 识别…",
+            stats=stats_payload,
+            log_line="启动 AI 模型识别…",
+        )
         llm_result = await discover_llm(
             sample,
             worker_router,
             job_id=job_id,
-            system_prompt=build_scan_system_prompt(get_scan_prompt(db), job.prompt_extra),
+            system_prompt=build_scan_system_prompt(
+                get_scan_prompt(db),
+                job.prompt_extra,
+                entity_types=list_entity_types(db),
+            ),
             enabled=True,
             on_progress=on_llm_progress,
+            on_event=on_llm_event,
             valid_entity_types=frozenset(valid_codes(db)),
         )
-        llm_entities = [
-            MergedEntity(
-                canonical_name=e.canonical_name,
-                entity_type=e.entity_type,
-                source="llm",
-                aliases=e.aliases or [e.canonical_name],
-                hit_count=e.hit_count,
-                confidence=e.confidence,
-            )
-            for e in llm_result.entities
-        ]
+        if llm_result.worker_model:
+            scan_metrics["model"] = llm_result.worker_model
+        scan_metrics.update(
+            {
+                "elapsed_ms": llm_result.elapsed_ms,
+                "prompt_tokens": llm_result.prompt_tokens,
+                "completion_tokens": llm_result.completion_tokens,
+            }
+        )
     else:
         set_job_progress(
             db,
@@ -515,18 +720,50 @@ async def _scan_job_impl(
             phase="remembered",
             percent=50,
             message="离线模式：仅匹配已记住实体",
+            stats=stats_payload,
+            log_line="Worker 离线，跳过 AI 识别",
         )
 
+    combined_raw = list(llm_result.entities) if llm_result else []
+    if sample:
+        enrich_discovered_entities(sample, combined_raw)
+        if combined_raw:
+            bus.emit(
+                job_id,
+                {
+                    "type": "log",
+                    "line": f"上下文关联完成，共 {len(combined_raw)} 个实体（含别名扩展）",
+                },
+            )
+
+    llm_entities = [
+        MergedEntity(
+            canonical_name=e.canonical_name,
+            entity_type=e.entity_type,
+            source=e.source,
+            aliases=e.aliases or [e.canonical_name],
+            hit_count=e.hit_count,
+            confidence=e.confidence,
+        )
+        for e in combined_raw
+    ]
+
     all_discovered = remembered_entities + llm_entities
+    set_job_progress(
+        db,
+        job,
+        phase="merge",
+        percent=92,
+        message="合并去重实体…",
+        stats=stats_payload,
+        log_line="合并与去重实体列表…",
+        commit=True,
+    )
     merged = merge_entities(manual_merged + all_discovered)
 
     _clear_auto_entities(db, job_id)
     auto_only = [e for e in merged if e.source != "manual"]
     _persist_merged_entities(db, job_id, auto_only)
-
-    set_job_progress(db, job, phase="done", percent=100, message="解析完成")
-    job.status = "scanned"
-    db.commit()
 
     llm_hits = len(llm_result.entities) if llm_result else 0
     scan_summary = {
@@ -537,7 +774,40 @@ async def _scan_job_impl(
         "worker_model": llm_result.worker_model if llm_result else None,
         "llm_errors": llm_result.errors if llm_result else [],
         "offline_only": not llm_enabled,
+        "paragraphs": doc_stats["paragraph_count"],
+        "chars": doc_stats["char_count"],
+        "elapsed_ms": llm_result.elapsed_ms if llm_result else 0,
+        "prompt_tokens": llm_result.prompt_tokens if llm_result else 0,
+        "completion_tokens": llm_result.completion_tokens if llm_result else 0,
     }
+    entity_count = len(list_job_entities(db, job_id))
+    set_job_progress(
+        db,
+        job,
+        phase="done",
+        percent=100,
+        message="解析完成",
+        stats=stats_payload,
+        metrics={
+            "elapsed_ms": scan_summary["elapsed_ms"],
+            "prompt_tokens": scan_summary["prompt_tokens"],
+            "completion_tokens": scan_summary["completion_tokens"],
+            "model": scan_summary.get("worker_model"),
+        },
+        log_line=f"扫描完成，共发现 {entity_count} 个实体",
+        commit=False,
+    )
+    job.status = "scanned"
+    db.commit()
+    bus.emit(
+        job_id,
+        {
+            "type": "done",
+            "entity_count": entity_count,
+            "scan_summary": scan_summary,
+        },
+    )
+    bus.close(job_id)
     return {
         "job": _job_to_dict(job),
         "entities": list_job_entities(db, job_id),
@@ -745,7 +1015,7 @@ def _persist_manual_to_library(
 def _persist_llm_entities_to_library(
     db: Session, job: DeidJob, entities: list[DeidJobEntity]
 ) -> None:
-    """Save confirmed LLM-discovered entities to the library."""
+    """Save LLM-discovered entities to the library."""
     for je in entities:
         if je.source != "llm":
             continue
@@ -760,6 +1030,20 @@ def _persist_llm_entities_to_library(
             library_source="llm",
             added_from="job_llm",
         )
+
+
+def _persist_active_llm_entities_to_library(db: Session, job: DeidJob) -> None:
+    """Persist selected LLM entities to「我的实体」by default."""
+    entities = (
+        db.query(DeidJobEntity)
+        .filter(
+            DeidJobEntity.job_id == job.id,
+            DeidJobEntity.source == "llm",
+            DeidJobEntity.is_excluded.is_(False),
+        )
+        .all()
+    )
+    _persist_llm_entities_to_library(db, job, entities)
 
 
 def patch_job_entity(db: Session, job_id: int, entity_id: int, **kwargs) -> dict:
@@ -855,6 +1139,7 @@ def confirm_job(
     if not active:
         raise HTTPException(400, "请至少选择一个实体")
     _assign_placeholders(db, job_id)
+    _persist_active_llm_entities_to_library(db, job)
     _persist_remembered_entities(db, job, remember_ids)
     job.status = "confirmed"
     job.preview_ack_at = now_beijing()
@@ -945,7 +1230,7 @@ def _execute_deid(db: Session, job: DeidJob, job_id: int) -> dict:
     )
     job.status = "done"
     job.completed_at = now_beijing()
-    job.expires_at = job.completed_at + timedelta(hours=24)
+    job.expires_at = job.completed_at + timedelta(hours=JOB_RETENTION_HOURS)
     _write_mappings(db, job_id, entities)
     db.commit()
     return {
@@ -971,6 +1256,7 @@ def run_job(
     if not active:
         raise HTTPException(400, "请至少选择一个实体")
     _assign_placeholders(db, job_id)
+    _persist_active_llm_entities_to_library(db, job)
     _persist_remembered_entities(db, job, remember_ids)
     db.commit()
     return _execute_deid(db, job, job_id)
@@ -986,11 +1272,11 @@ def rerun_job(
     job = db.get(DeidJob, job_id)
     if not job or job.status != "done":
         raise HTTPException(400, "只能对已完成的任务重新脱敏")
-    job.ai_summary_json = None
     active = _apply_entity_selection(db, job_id, entity_ids)
     if not active:
         raise HTTPException(400, "请至少选择一个实体")
     _assign_placeholders(db, job_id)
+    _persist_active_llm_entities_to_library(db, job)
     _persist_remembered_entities(db, job, remember_ids)
     db.commit()
     return _execute_deid(db, job, job_id)
@@ -1080,47 +1366,10 @@ def get_job_effective_prompt(db: Session, job_id: int) -> dict:
     return {
         "global_prompt": global_prompt,
         "prompt_extra": job.prompt_extra,
-        "effective_prompt": build_scan_system_prompt(global_prompt, job.prompt_extra),
+        "effective_prompt": build_scan_system_prompt(
+            global_prompt,
+            job.prompt_extra,
+            entity_types=list_entity_types(db),
+        ),
         "default_prompt": DEFAULT_SCAN_PROMPT,
     }
-
-
-async def generate_job_ai_summary(
-    db: Session,
-    job_id: int,
-    *,
-    worker_router: WorkerRouter | None,
-) -> dict:
-    from app.deid.ai_summary import generate_ai_summary
-
-    job = db.get(DeidJob, job_id)
-    if not job or job.status != "done":
-        raise HTTPException(400, "任务未完成")
-    if job.ai_summary_json:
-        try:
-            return json.loads(job.ai_summary_json)
-        except json.JSONDecodeError:
-            pass
-
-    entities = list_job_entities(db, job_id)
-    verification = json.loads(job.verification_json or "{}")
-    run_summary = json.loads(job.run_summary_json or "{}")
-    type_counts: dict[str, int] = {}
-    for e in entities:
-        if e.get("is_excluded"):
-            continue
-        t = e.get("entity_type") or "custom"
-        type_counts[t] = type_counts.get(t, 0) + 1
-
-    text = await generate_ai_summary(
-        worker_router=worker_router,
-        entity_count=len([e for e in entities if not e.get("is_excluded")]),
-        replacement_count=run_summary.get("replacement_count") or 0,
-        verification_passed=bool(verification.get("passed")),
-        entity_type_counts=type_counts,
-        engine=job.engine,
-    )
-    payload = {"text": text}
-    job.ai_summary_json = json.dumps(payload, ensure_ascii=False)
-    db.commit()
-    return payload

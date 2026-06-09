@@ -13,7 +13,7 @@ from fastapi import WebSocket
 
 from app.deid.worker.errors import WorkerBusy, WorkerOffline, WorkerRequestError
 from app.deid.worker.session import WorkerSession
-from app.deid.worker.sse_parse import parse_ollama_sse_chunk
+from app.deid.worker.sse_parse import parse_ollama_sse_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -240,8 +240,7 @@ class WorkerRouter:
                             else:
                                 raise pending.error
                         return
-                    token = parse_ollama_sse_chunk(str(item))
-                    if token:
+                    for token in parse_ollama_sse_tokens(str(item)):
                         yield token
             finally:
                 self._pending_streams.pop(req_id, None)

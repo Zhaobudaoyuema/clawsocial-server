@@ -1,13 +1,16 @@
 <script setup lang="ts">
 const props = defineProps<{
   current: 'upload' | 'scan' | 'confirm' | 'done'
+  finished?: boolean
+  compact?: boolean
+  prominent?: boolean
 }>()
 
 const steps = [
-  { id: 'upload' as const, label: '上传' },
-  { id: 'scan' as const, label: '扫描' },
-  { id: 'confirm' as const, label: '确认' },
-  { id: 'done' as const, label: '完成' },
+  { id: 'upload' as const, label: '上传', short: '传' },
+  { id: 'scan' as const, label: '扫描', short: '扫' },
+  { id: 'confirm' as const, label: '确认', short: '认' },
+  { id: 'done' as const, label: '完成', short: '完' },
 ]
 
 const order = ['upload', 'scan', 'confirm', 'done']
@@ -17,6 +20,7 @@ function stepIndex(id: string) {
 }
 
 function isDone(id: string) {
+  if (props.finished && id === 'done') return true
   return stepIndex(id) < stepIndex(props.current)
 }
 
@@ -26,7 +30,7 @@ function isCurrent(id: string) {
 </script>
 
 <template>
-  <nav class="stepper" aria-label="脱敏流程">
+  <nav class="stepper" :class="{ compact, prominent }" aria-label="脱敏流程">
     <ol class="stepper-list">
       <li
         v-for="(step, i) in steps"
@@ -39,6 +43,7 @@ function isCurrent(id: string) {
           <span v-else>{{ i + 1 }}</span>
         </span>
         <span class="label">{{ step.label }}</span>
+        <span class="label-short">{{ step.short }}</span>
         <span v-if="i < steps.length - 1" class="line" aria-hidden="true" />
       </li>
     </ol>
@@ -48,6 +53,44 @@ function isCurrent(id: string) {
 <style scoped>
 .stepper {
   margin-bottom: 2rem;
+}
+.stepper.compact {
+  margin-bottom: 0;
+}
+.stepper.compact .dot {
+  width: 24px;
+  height: 24px;
+  font-size: 0.75rem;
+}
+.stepper.compact .label {
+  font-size: 0.875rem;
+}
+.stepper.compact .line {
+  height: 3px;
+  margin: 0 0.5rem;
+  border-radius: 999px;
+}
+.stepper.prominent {
+  margin-bottom: 0;
+  padding: 1.1rem 0.75rem 1.35rem;
+}
+.stepper.prominent .dot {
+  width: 36px;
+  height: 36px;
+  font-size: 0.9375rem;
+  border-width: 2px;
+}
+.stepper.prominent .label {
+  font-size: 1rem;
+  margin-left: 0.65rem;
+}
+.stepper.prominent .step.current .label {
+  font-size: 1.0625rem;
+}
+.stepper.prominent .line {
+  height: 4px;
+  margin: 0 1rem;
+  border-radius: 999px;
 }
 .stepper-list {
   display: flex;
@@ -112,9 +155,27 @@ function isCurrent(id: string) {
 .step.done .line {
   background: var(--deid-success-border);
 }
+.label-short {
+  display: none;
+  margin-left: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--deid-ink-muted);
+  white-space: nowrap;
+}
+.step.current .label-short {
+  color: var(--deid-ink);
+  font-weight: 600;
+}
+.step.done .label-short {
+  color: var(--deid-ink-secondary);
+}
 @media (max-width: 640px) {
   .label {
     display: none;
+  }
+  .label-short {
+    display: inline;
   }
   .line {
     margin: 0 0.35rem;

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import DeidBadge from './DeidBadge.vue'
 import DeidEmptyState from './DeidEmptyState.vue'
+import DeidModal from './DeidModal.vue'
 import { useDeidStore } from '../../stores/deid'
 
 const props = defineProps<{
@@ -18,6 +19,15 @@ const emit = defineEmits<{
 }>()
 
 const store = useDeidStore()
+
+const deleteModalOpen = ref(false)
+const pendingDelete = ref<Record<string, unknown> | null>(null)
+
+const pendingDeleteName = computed(() =>
+  pendingDelete.value
+    ? (pendingDelete.value as { original_filename: string }).original_filename
+    : '',
+)
 
 const statusMap: Record<string, { variant: 'draft' | 'scanned' | 'done' | 'failed' | 'running'; label: string }> = {
   draft: { variant: 'draft', label: '草稿' },
@@ -39,9 +49,14 @@ function fmtHours(h: number | null | undefined) {
 }
 
 function ttlTitle(h: number | null | undefined) {
-  if (h == null) return '完成后 24 小时自动清理，请及时下载'
+  if (h == null) return '完成后 8 小时自动清理，请及时下载'
   return `完成后约 ${Math.round(h)} 小时后自动清理，请及时下载`
 }
+
+const pendingDeleteTtl = computed(() => {
+  const h = (pendingDelete.value as { hours_until_cleanup?: number } | null)?.hours_until_cleanup
+  return ttlTitle(h)
+})
 
 function isActive(job: Record<string, unknown>) {
   if (props.activeJobId != null) return props.activeJobId === job.id
@@ -63,14 +78,20 @@ function onOpenEntities() {
   emit('closeDrawer')
 }
 
-async function onDelete(job: Record<string, unknown>, e: Event) {
+function onDelete(job: Record<string, unknown>, e: Event) {
   e.stopPropagation()
-  const name = (job as { original_filename: string }).original_filename
-  if (!confirm(`删除任务「${name}」？此操作不可恢复。`)) return
-  const id = (job as { id: number }).id
+  pendingDelete.value = job
+  deleteModalOpen.value = true
+}
+
+async function confirmDelete() {
+  if (!pendingDelete.value) return
+  const id = (pendingDelete.value as { id: number }).id
   await store.deleteJob(id)
   emit('deleted', id)
   emit('closeDrawer')
+  deleteModalOpen.value = false
+  pendingDelete.value = null
 }
 </script>
 
@@ -78,7 +99,13 @@ async function onDelete(job: Record<string, unknown>, e: Event) {
   <aside class="rail" :class="{ open: drawerOpen }">
     <div class="rail-section">
       <div class="rail-label">任务</div>
-      <ul v-if="store.jobs.length" class="job-list">
+      <ul v-if="store.jobsLoading" class="job-list job-skeleton" aria-busy="true" aria-label="加载任务列表">
+        <li v-for="i in 3" :key="i" class="skeleton-row">
+          <span class="skeleton-line skeleton-line--title" />
+          <span class="skeleton-line skeleton-line--meta" />
+        </li>
+      </ul>
+      <ul v-else-if="store.jobs.length" class="job-list">
         <li v-for="job in store.jobs" :key="(job as { id: number }).id" class="job-item">
           <button
             type="button"
@@ -110,7 +137,7 @@ async function onDelete(job: Record<string, unknown>, e: Event) {
         </li>
       </ul>
       <DeidEmptyState
-        v-else
+        v-else-if="!store.jobsLoading"
         title="还没有任务"
         hint="上传 Word 文档开始第一份脱敏"
         cta-label="上传第一份文档"
@@ -131,6 +158,17 @@ async function onDelete(job: Record<string, unknown>, e: Event) {
         + 新建任务
       </button>
     </div>
+
+    <DeidModal v-model:open="deleteModalOpen" title="删除任务？" danger persistent>
+      <p>
+        确定删除「<strong>{{ pendingDeleteName }}</strong>」？此操作不可恢复。
+      </p>
+      <p class="delete-ttl">{{ pendingDeleteTtl }}</p>
+      <template #footer>
+        <button type="button" class="deid-btn" @click="deleteModalOpen = false">取消</button>
+        <button type="button" class="deid-btn deid-btn--danger" @click="confirmDelete">删除</button>
+      </template>
+    </DeidModal>
   </aside>
 </template>
 
@@ -143,6 +181,13 @@ async function onDelete(job: Record<string, unknown>, e: Event) {
   border-right: 1px solid var(--deid-border);
   background: var(--deid-rail-bg);
   min-height: calc(100vh - var(--deid-topbar-height));
+}
+@media (min-width: 769px) {
+  .rail {
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
 }
 .rail-section {
   padding: 1rem 0.75rem;
@@ -276,6 +321,48 @@ async function onDelete(job: Record<string, unknown>, e: Event) {
   background: var(--deid-primary-hover);
   border-color: var(--deid-primary-hover);
   color: #fff;
+}
+.delete-ttl {
+  margin: 0.75rem 0 0;
+  font-size: 0.875rem;
+  color: var(--deid-ink-muted);
+}
+.job-skeleton {
+  pointer-events: none;
+}
+.skeleton-row {
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.skeleton-line {
+  display: block;
+  height: 0.75rem;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--deid-surface-2) 25%,
+    var(--deid-surface-3) 50%,
+    var(--deid-surface-2) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+.skeleton-line--title {
+  width: 72%;
+  height: 0.85rem;
+}
+.skeleton-line--meta {
+  width: 42%;
+}
+@keyframes skeleton-pulse {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
 }
 @media (max-width: 768px) {
   .rail {

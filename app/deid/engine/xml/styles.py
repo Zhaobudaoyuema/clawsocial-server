@@ -2,8 +2,9 @@
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from app.deid.engine.xml.ns import detect_w_ns, iter_w, local_name, w_qname
+
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-NS = {"w": W_NS}
 
 
 def plain_rpr_xml(work_dir: Path) -> str:
@@ -14,16 +15,17 @@ def plain_rpr_xml(work_dir: Path) -> str:
     if styles.exists():
         try:
             root = ET.parse(styles).getroot()
-            for style in root.findall(f".//{{{W_NS}}}style"):
-                if style.get(f"{{{W_NS}}}type") == "paragraph":
-                    sid = style.get(f"{{{W_NS}}}styleId")
+            w_ns = detect_w_ns(root)
+            for style in iter_w(root, "style"):
+                if style.get(w_qname(w_ns, "type")) == "paragraph":
+                    sid = style.get(w_qname(w_ns, "styleId"))
                     if sid in ("Normal", "a", "1"):
-                        rpr = style.find(f"{{{W_NS}}}rPr")
+                        rpr = next(iter_w(style, "rPr"), None)
                         if rpr is not None:
-                            rfonts = rpr.find(f"{{{W_NS}}}rFonts")
+                            rfonts = next(iter_w(rpr, "rFonts"), None)
                             if rfonts is not None:
-                                east = rfonts.get(f"{{{W_NS}}}eastAsia") or east
-                                ascii_font = rfonts.get(f"{{{W_NS}}}ascii") or ascii_font
+                                east = rfonts.get(w_qname(w_ns, "eastAsia")) or east
+                                ascii_font = rfonts.get(w_qname(w_ns, "ascii")) or ascii_font
                             break
         except ET.ParseError:
             pass

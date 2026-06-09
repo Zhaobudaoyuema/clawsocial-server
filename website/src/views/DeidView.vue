@@ -93,10 +93,27 @@ function onJobDeleted(jobId: number) {
 </template>
 
 <style scoped>
+.deid-app {
+  min-height: 100vh;
+}
 .shell {
   display: flex;
   min-height: calc(100vh - var(--deid-topbar-height));
   position: relative;
+}
+@media (min-width: 769px) {
+  .deid-app {
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .shell {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
 }
 .drawer-backdrop {
   display: none;

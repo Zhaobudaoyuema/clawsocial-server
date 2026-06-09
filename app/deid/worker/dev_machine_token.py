@@ -23,7 +23,7 @@ ALLOWED_DEV_MACHINE_GUIDS: frozenset[str] = frozenset(
     }
 )
 
-DEFAULT_RELAY_URL = "https://clawsocial.world"
+DEFAULT_RELAY_URL = "http://clawsocial.world"
 
 
 def token_from_machine_guid(guid: str) -> str:

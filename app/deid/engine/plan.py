@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 
@@ -10,6 +11,18 @@ def normalize_for_match(text: str) -> str:
     """NFKC + collapse whitespace for scan/replace matching."""
     t = unicodedata.normalize("NFKC", text)
     return re.sub(r"\s+", "", t)
+
+
+def build_norm_index(text: str) -> tuple[str, list[int]]:
+    """Normalized text + original char index per normalized char."""
+    orig_indices: list[int] = []
+    parts: list[str] = []
+    for i, ch in enumerate(text):
+        nc = normalize_for_match(ch)
+        if nc:
+            parts.append(nc)
+            orig_indices.append(i)
+    return "".join(parts), orig_indices
 
 
 @dataclass
@@ -23,6 +36,14 @@ class MatchSpan:
 
 
 @dataclass
+class _PreparedNeedle:
+    norm: str
+    replacement: str
+    entity_type: str
+    source: str
+
+
+@dataclass
 class ReplacementPlan:
     """Build replacement spans from aliases, patterns, and whitelist."""
 
@@ -30,12 +51,46 @@ class ReplacementPlan:
     spans: list[MatchSpan] = field(default_factory=list)
     placeholder_map: dict[str, str] = field(default_factory=dict)  # canonical -> placeholder
     stats_whitelist_skips: int = 0
+    _prepared: list[_PreparedNeedle] = field(default_factory=list, repr=False)
+    _needles_by_char: dict[str, list[_PreparedNeedle]] = field(default_factory=dict, repr=False)
+    _finalized: bool = field(default=False, repr=False)
+
+    def finalize(self) -> None:
+        if self._finalized:
+            return
+        seen: set[str] = set()
+        prepared: list[_PreparedNeedle] = []
+        for span in self.spans:
+            norm = normalize_for_match(span.original)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            prepared.append(
+                _PreparedNeedle(
+                    norm=norm,
+                    replacement=span.replacement,
+                    entity_type=span.entity_type,
+                    source=span.source,
+                )
+            )
+        prepared.sort(key=lambda p: len(p.norm), reverse=True)
+        self._prepared = prepared
+        buckets: dict[str, list[_PreparedNeedle]] = defaultdict(list)
+        for pn in prepared:
+            buckets[pn.norm[0]].append(pn)
+        self._needles_by_char = dict(buckets)
+        self._finalized = True
 
     def apply_to_text(self, text: str) -> tuple[str, int]:
         """Return (new_text, replacement_count) for a single paragraph."""
         if not self.spans or not text:
             return text, 0
-        applicable = self._find_spans_in_original(text)
+        if not self._finalized:
+            self.finalize()
+        norm_text, orig_indices = build_norm_index(text)
+        if not norm_text or not self._prepared:
+            return text, 0
+        applicable = self._find_spans_in_original(text, norm_text, orig_indices)
         if not applicable:
             return text, 0
         merged = self._dedupe_longest(applicable)
@@ -47,21 +102,39 @@ class ReplacementPlan:
             count += 1
         return out, count
 
-    def _find_spans_in_original(self, text: str) -> list[MatchSpan]:
-        norm_text = normalize_for_match(text)
+    def _candidate_needles(self, norm_text: str) -> list[_PreparedNeedle]:
+        if not norm_text:
+            return []
+        seen: set[str] = set()
+        out: list[_PreparedNeedle] = []
+        for ch in set(norm_text):
+            for pn in self._needles_by_char.get(ch, ()):
+                if pn.norm not in seen:
+                    seen.add(pn.norm)
+                    out.append(pn)
+        out.sort(key=lambda p: len(p.norm), reverse=True)
+        return out
+
+    def _find_spans_in_original(
+        self,
+        text: str,
+        norm_text: str,
+        orig_indices: list[int],
+    ) -> list[MatchSpan]:
         result: list[MatchSpan] = []
-        for span in self.spans:
-            needle = normalize_for_match(span.original)
+        for pn in self._candidate_needles(norm_text):
+            if pn.norm not in norm_text:
+                continue
             idx = 0
             while True:
-                pos = norm_text.find(needle, idx)
+                pos = norm_text.find(pn.norm, idx)
                 if pos < 0:
                     break
-                end = pos + len(needle)
+                end = pos + len(pn.norm)
                 if self._overlaps_whitelist(pos, end):
                     idx = pos + 1
                     continue
-                orig_slice = self._norm_index_to_orig(text, pos, end)
+                orig_slice = self._norm_index_to_orig(orig_indices, pos, end, text)
                 if orig_slice:
                     o_start, o_end, orig = orig_slice
                     result.append(
@@ -69,26 +142,25 @@ class ReplacementPlan:
                             start=o_start,
                             end=o_end,
                             original=orig,
-                            replacement=span.replacement,
-                            entity_type=span.entity_type,
-                            source=span.source,
+                            replacement=pn.replacement,
+                            entity_type=pn.entity_type,
+                            source=pn.source,
                         )
                     )
                 idx = pos + 1
         return result
 
     @staticmethod
-    def _norm_index_to_orig(text: str, n_start: int, n_end: int) -> tuple[int, int, str] | None:
-        """Map normalized (no-space) indices to original string slice."""
-        norm_chars: list[tuple[int, str]] = []
-        for i, ch in enumerate(text):
-            nc = normalize_for_match(ch)
-            if nc:
-                norm_chars.append((i, nc))
-        if n_end > len(norm_chars):
+    def _norm_index_to_orig(
+        orig_indices: list[int],
+        n_start: int,
+        n_end: int,
+        text: str,
+    ) -> tuple[int, int, str] | None:
+        if n_end > len(orig_indices):
             return None
-        o_start = norm_chars[n_start][0]
-        o_end = norm_chars[n_end - 1][0] + 1
+        o_start = orig_indices[n_start]
+        o_end = orig_indices[n_end - 1] + 1
         return o_start, o_end, text[o_start:o_end]
 
     def _overlaps_whitelist(self, start: int, end: int) -> bool:
@@ -119,7 +191,6 @@ def build_replacement_plan(
 ) -> ReplacementPlan:
     """Construct plan with length-descending alias matching."""
     plan = ReplacementPlan()
-    # Whitelist on sample text (paragraph-level re-check in apply)
     norm_sample = normalize_for_match(text_for_whitelist) if text_for_whitelist else ""
     for term, ttype in whitelist_terms:
         if ttype == "regex":
@@ -159,6 +230,7 @@ def build_replacement_plan(
             continue
 
     plan.spans = spans
+    plan.finalize()
     return plan
 
 

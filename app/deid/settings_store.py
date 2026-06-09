@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.deid.prompts import DEFAULT_SCAN_PROMPT, SCAN_PROMPT_SETTING_KEY
+from app.deid.prompts import build_default_scan_prompt, SCAN_PROMPT_SETTING_KEY
 from app.models_deid import DeidSetting
 from app.time_utils import coerce_beijing
 
@@ -26,17 +26,18 @@ def get_scan_prompt(db: Session) -> str:
     stored = get_setting(db, SCAN_PROMPT_SETTING_KEY)
     if stored is not None and stored.strip():
         return stored.strip()
-    return DEFAULT_SCAN_PROMPT
+    return build_default_scan_prompt()
 
 
 def ensure_default_scan_prompt(db: Session) -> None:
     if get_setting(db, SCAN_PROMPT_SETTING_KEY) is None:
-        set_setting(db, SCAN_PROMPT_SETTING_KEY, DEFAULT_SCAN_PROMPT)
+        set_setting(db, SCAN_PROMPT_SETTING_KEY, build_default_scan_prompt())
 
 
 def reset_scan_prompt(db: Session) -> str:
-    set_setting(db, SCAN_PROMPT_SETTING_KEY, DEFAULT_SCAN_PROMPT)
-    return DEFAULT_SCAN_PROMPT
+    prompt = build_default_scan_prompt()
+    set_setting(db, SCAN_PROMPT_SETTING_KEY, prompt)
+    return prompt
 
 
 def scan_prompt_meta(db: Session) -> dict:
@@ -47,6 +48,6 @@ def scan_prompt_meta(db: Session) -> dict:
         updated_at = c.isoformat() if c else None
     return {
         "prompt": get_scan_prompt(db),
-        "default_prompt": DEFAULT_SCAN_PROMPT,
+        "default_prompt": build_default_scan_prompt(),
         "updated_at": updated_at,
     }
