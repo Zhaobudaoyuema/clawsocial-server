@@ -20,8 +20,14 @@ from app.database import engine, SessionLocal
 from app.models import User
 from app.utils import plain_text
 from app import models
+import importlib
+
+importlib.import_module("app.models_deid")  # register deid tables with Base.metadata
 from app.migrate import run_migrations
-from app.api import blog, register, stats, world, ws_client, ws_server, share
+from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid, deid_chat
+from app.deid.worker.router import WorkerRouter
+from app.deid.scan_queue import ScanQueue
+from app.deid.chat.session import ChatSessionStore
 from app.api.client import history as client_history
 from app.crawfish.world.state import WorldConfig, WorldState
 
@@ -35,8 +41,12 @@ _RATE_LIMIT_EXEMPT = {"/health", "/stats"}
 
 
 def _rate_limit_skip_path(path: str) -> bool:
-    """官网静态资源不参与 QPS 限流（避免多文件并行加载被 429）。"""
-    return path.startswith("/assets/") or path.startswith("/world/assets/")
+    """官网静态资源与脱敏 API 不参与 QPS 限流（轮询/并行请求不应 429）。"""
+    return (
+        path.startswith("/assets/")
+        or path.startswith("/world/assets/")
+        or path.startswith("/api/deid")
+    )
 _RATE_LIMIT_QPS = int(os.getenv("RATE_LIMIT_QPS", "20"))
 _RATE_LIMIT_WINDOW_SEC = 1.0
 _rate_limit_buckets: dict[str, list[float]] = {}  # key -> [timestamps]
@@ -94,13 +104,69 @@ async def lifespan(app: FastAPI):
     app.state.world_state = _world_state
 
     from app.jobs.world_aggregator import start as start_scheduler, set_world_state
+    from app.jobs.deid_cleanup import start as start_deid_cleanup
+
     set_world_state(_world_state)
     start_scheduler()
+    start_deid_cleanup()
+
+    from app.database import SessionLocal
+    from app.deid.entity_types import ensure_default_entity_types
+    from app.deid.settings_store import ensure_default_scan_prompt
+
+    db = SessionLocal()
+    try:
+        ensure_default_scan_prompt(db)
+        ensure_default_entity_types(db)
+    finally:
+        db.close()
+
+    app.state.worker_router = WorkerRouter()
+    app.state.scan_queue = ScanQueue()
+    app.state.scan_queue.set_worker_router(app.state.worker_router)
+    app.state.chat_session_store = ChatSessionStore()
+    ping_task = asyncio.create_task(_worker_ping_loop(app))
+    chat_cleanup_task = asyncio.create_task(_chat_session_cleanup_loop(app))
 
     yield
 
+    ping_task.cancel()
+    chat_cleanup_task.cancel()
+    try:
+        await ping_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await chat_cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+    from app.jobs.deid_cleanup import stop as stop_deid_cleanup
     from app.jobs.world_aggregator import stop as stop_scheduler
+
+    stop_deid_cleanup()
     stop_scheduler()
+
+
+async def _chat_session_cleanup_loop(app: FastAPI) -> None:
+    import asyncio
+
+    while True:
+        await asyncio.sleep(600)
+        store = getattr(app.state, "chat_session_store", None)
+        if store:
+            store.cleanup_expired()
+
+
+async def _worker_ping_loop(app: FastAPI) -> None:
+    """Send heartbeat ping to Mac Worker every 30s."""
+    import asyncio
+
+    while True:
+        await asyncio.sleep(30)
+        router = getattr(app.state, "worker_router", None)
+        if router:
+            await router.send_ping()
 
 
 
@@ -177,6 +243,9 @@ app.include_router(ws_server.router)
 app.include_router(share.router)
 app.include_router(client_history.router)
 app.include_router(blog.router)
+app.include_router(deid.router)
+app.include_router(deid_chat.router)
+app.include_router(ws_worker.router)
 
 # 官网（Vue SPA 构建产物）
 @app.get("/")
@@ -222,6 +291,15 @@ async def serve_home():
 @app.get("/blog/")
 async def serve_blog():
     """博客文章页"""
+    from fastapi.responses import FileResponse
+    import os
+    return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
+
+
+@app.get("/deid")
+@app.get("/deid/")
+async def serve_deid():
+    """财务文档脱敏工具"""
     from fastapi.responses import FileResponse
     import os
     return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))

@@ -42,7 +42,19 @@ const router = createRouter({
       name: 'blog-post',
       component: () => import('../views/BlogPostView.vue'),
     },
+    {
+      path: '/deid',
+      name: 'deid',
+      component: () => import('../views/DeidView.vue'),
+      meta: { title: '文档脱敏' },
+    },
   ],
+})
+
+router.afterEach((to) => {
+  const base = 'ClawSocial'
+  const pageTitle = to.meta.title as string | undefined
+  document.title = pageTitle ? `${pageTitle} · ${base}` : `${base} — AI 社交龙虾平台`
 })
 
 export default router

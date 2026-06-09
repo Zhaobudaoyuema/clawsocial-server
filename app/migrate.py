@@ -18,6 +18,10 @@ def run_migrations(engine: Engine) -> None:
     _ensure_event_markers_table(engine)
     _ensure_messages_is_public(engine)
     _ensure_social_events_reason(engine)
+    _ensure_deid_settings_table(engine)
+    _ensure_deid_jobs_prompt_extra(engine)
+    _ensure_deid_jobs_scan_queue(engine)
+    _ensure_deid_jobs_ai_summary(engine)
 
 
 def _ensure_users_last_seen_at(engine: Engine) -> None:
@@ -334,4 +338,108 @@ def _ensure_social_events_reason(engine: Engine) -> None:
             conn.execute(text("ALTER TABLE social_events ADD COLUMN reason VARCHAR(30)"))
         else:
             conn.execute(text("ALTER TABLE social_events ADD COLUMN reason VARCHAR(30) NULL"))
+        conn.commit()
+
+
+def _ensure_deid_settings_table(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "deid_settings" in insp.get_table_names():
+        return
+    dialect = engine.dialect.name
+    with engine.connect() as conn:
+        if dialect == "mysql":
+            conn.execute(
+                text(
+                    "CREATE TABLE deid_settings ("
+                    "`key` VARCHAR(64) PRIMARY KEY, "
+                    "`value` TEXT NOT NULL, "
+                    "updated_at DATETIME NOT NULL)"
+                )
+            )
+        elif dialect == "sqlite":
+            conn.execute(
+                text(
+                    "CREATE TABLE deid_settings ("
+                    "key VARCHAR(64) PRIMARY KEY, "
+                    "value TEXT NOT NULL, "
+                    "updated_at DATETIME NOT NULL)"
+                )
+            )
+        else:
+            conn.execute(
+                text(
+                    "CREATE TABLE deid_settings ("
+                    '"key" VARCHAR(64) PRIMARY KEY, '
+                    '"value" TEXT NOT NULL, '
+                    "updated_at DATETIME NOT NULL)"
+                )
+            )
+        conn.commit()
+
+
+def _ensure_deid_jobs_prompt_extra(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "deid_jobs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("deid_jobs")}
+    if "prompt_extra" in columns:
+        return
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        if dialect == "mysql":
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN prompt_extra TEXT NULL"))
+        elif dialect == "sqlite":
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN prompt_extra TEXT"))
+        else:
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN prompt_extra TEXT NULL"))
+        conn.commit()
+
+
+def _ensure_deid_jobs_scan_queue(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "deid_jobs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("deid_jobs")}
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        if "use_worker" not in columns:
+            if dialect == "mysql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN use_worker TINYINT(1) NOT NULL DEFAULT 1"
+                    )
+                )
+            elif dialect == "sqlite":
+                conn.execute(
+                    text("ALTER TABLE deid_jobs ADD COLUMN use_worker BOOLEAN NOT NULL DEFAULT 1")
+                )
+            else:
+                conn.execute(
+                    text("ALTER TABLE deid_jobs ADD COLUMN use_worker BOOLEAN NOT NULL DEFAULT TRUE")
+                )
+        if "progress_json" not in columns:
+            if dialect == "mysql":
+                conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN progress_json TEXT NULL"))
+            elif dialect == "sqlite":
+                conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN progress_json TEXT"))
+            else:
+                conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN progress_json TEXT NULL"))
+        conn.commit()
+
+
+def _ensure_deid_jobs_ai_summary(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "deid_jobs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("deid_jobs")}
+    if "ai_summary_json" in columns:
+        return
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        if dialect == "mysql":
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN ai_summary_json TEXT NULL"))
+        elif dialect == "sqlite":
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN ai_summary_json TEXT"))
+        else:
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN ai_summary_json TEXT NULL"))
         conn.commit()

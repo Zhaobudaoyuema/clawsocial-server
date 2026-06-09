@@ -1,0 +1,116 @@
+<script setup lang="ts">
+import { onMounted, provide, ref, watch } from 'vue'
+import { useDeidStore } from '../stores/deid'
+import DeidTopBar from '../components/deid/DeidTopBar.vue'
+import DeidLeftRail from '../components/deid/DeidLeftRail.vue'
+import DeidMainStage from '../components/deid/DeidMainStage.vue'
+import '../styles/deid-tokens.css'
+
+const store = useDeidStore()
+const activeJobId = ref<number | null>(null)
+const railOpen = ref(false)
+
+onMounted(async () => {
+  await store.fetchJobs()
+  await store.fetchEntityTypes()
+  await store.fetchWorkerStatus()
+  await store.fetchQueueStatus()
+  await store.restoreCurrentJob()
+  const cur = store.currentJob as { id?: number } | null
+  if (cur?.id) activeJobId.value = cur.id
+})
+
+watch(
+  () => [store.showEntitiesPanel, store.showConclusionView] as const,
+  ([entities, conclusion]) => {
+    if (entities || conclusion) closeRail()
+  },
+)
+
+async function onSelectJob(job: Record<string, unknown>) {
+  activeJobId.value = job.id as number
+  store.closeEntitiesPanel()
+  store.closeConclusionView()
+  closeRail()
+  await store.selectJob(job)
+}
+
+function onNewTask() {
+  activeJobId.value = null
+  store.closeEntitiesPanel()
+  store.closeConclusionView()
+  closeRail()
+  store.newTask()
+}
+
+function onOpenEntities() {
+  activeJobId.value = null
+  closeRail()
+  store.openEntitiesPanel()
+}
+
+function toggleRail() {
+  railOpen.value = !railOpen.value
+}
+
+function closeRail() {
+  railOpen.value = false
+}
+
+provide('closeDeidRail', closeRail)
+
+function onJobDeleted(jobId: number) {
+  if (activeJobId.value === jobId) {
+    activeJobId.value = null
+  }
+  closeRail()
+}
+</script>
+
+<template>
+  <div class="deid-app">
+    <DeidTopBar :menu-open="railOpen" @toggle-menu="toggleRail" />
+    <div
+      v-if="railOpen"
+      class="drawer-backdrop"
+      aria-hidden="true"
+      @click="closeRail"
+    />
+    <div class="shell">
+      <DeidLeftRail
+        :active-job-id="activeJobId"
+        :entities-active="store.showEntitiesPanel"
+        :drawer-open="railOpen"
+        @select="onSelectJob"
+        @new-task="onNewTask"
+        @open-entities="onOpenEntities"
+        @close-drawer="closeRail"
+        @deleted="onJobDeleted"
+      />
+      <DeidMainStage />
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.shell {
+  display: flex;
+  min-height: calc(100vh - var(--deid-topbar-height));
+  position: relative;
+}
+.drawer-backdrop {
+  display: none;
+}
+@media (max-width: 768px) {
+  .drawer-backdrop {
+    display: block;
+    position: fixed;
+    top: var(--deid-topbar-height);
+    left: min(300px, 88vw);
+    right: 0;
+    bottom: 0;
+    z-index: calc(var(--deid-drawer-z-index) - 1);
+    background: rgba(15, 15, 15, 0.35);
+  }
+}
+</style>

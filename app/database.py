@@ -3,6 +3,7 @@ from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from sqlalchemy.pool import StaticPool
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,7 +13,11 @@ load_dotenv()
 if os.getenv("TESTING") == "1":
     # Placeholder: never actually used in test mode (get_db is overridden in conftest.py)
     DATABASE_URL = "sqlite:///:memory:"
-    _engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    _engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 else:
     DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
     DB_PORT = os.getenv("DB_PORT", "3306")

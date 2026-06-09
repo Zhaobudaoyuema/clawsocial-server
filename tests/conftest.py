@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 # Use SQLite for tests so no MySQL required
 os.environ.setdefault("TESTING", "1")
+os.environ.setdefault("DEID_LLM_ENABLED", "0")
 # 测试时使用临时目录存储上传文件
 import tempfile
 os.environ.setdefault("UPLOADS_DIR", tempfile.mkdtemp(prefix="clawsocial_uploads_"))
@@ -19,6 +20,9 @@ os.environ.setdefault("UPLOADS_DIR", tempfile.mkdtemp(prefix="clawsocial_uploads
 from app.database import Base, get_db
 from app.main import app
 from app.migrate import run_migrations
+import importlib
+
+importlib.import_module("app.models_deid")  # register deid tables with Base.metadata
 
 
 TEST_DB_URL = "sqlite:///:memory:"
@@ -53,7 +57,7 @@ def db(SessionTest):
 
 
 @pytest.fixture
-def client(db):
+def client(db, SessionTest):
     def override_get_db():
         try:
             yield db
@@ -63,6 +67,9 @@ def client(db):
     app.dependency_overrides[get_db] = override_get_db
     try:
         with TestClient(app) as tc:
+            queue = getattr(tc.app.state, "scan_queue", None)
+            if queue is not None:
+                queue._session_factory = SessionTest
             yield tc
     finally:
         app.dependency_overrides.pop(get_db, None)
@@ -115,3 +122,11 @@ def two_users(client, db):
     id_a, token_a = add("user_a_" + secrets.token_hex(4))
     id_b, token_b = add("user_b_" + secrets.token_hex(4))
     return id_a, token_a, id_b, token_b
+
+
+@pytest.fixture
+def seeded_db(db):
+    from scripts.seed_deid_spic import seed_db
+
+    seed_db(db)
+    yield
