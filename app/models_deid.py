@@ -111,6 +111,7 @@ class DeidJob(Base):
     run_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    files_purged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
     prompt_extra: Mapped[str | None] = mapped_column(Text, nullable=True)
     use_worker: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

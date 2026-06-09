@@ -18,6 +18,7 @@ from app.deid.schemas import (
     LibraryEntityPatch,
     ManualEntityIn,
     MergeEntitiesIn,
+    RehydrateIn,
     PatternRuleIn,
     PatternTestIn,
     RunIn,
@@ -41,6 +42,11 @@ router = APIRouter(prefix="/api/deid", tags=["deid"])
 @router.get("/jobs")
 def list_jobs(db: Session = Depends(get_db)):
     return service.list_jobs(db)
+
+
+@router.get("/jobs/rehydrate-eligible")
+def rehydrate_eligible(db: Session = Depends(get_db)):
+    return service.list_rehydrate_eligible_jobs(db)
 
 
 @router.get("/jobs/{job_id}")
@@ -211,6 +217,16 @@ def rerun(job_id: int, body: RunIn | None = None, db: Session = Depends(get_db))
     remember_ids = body.remember_ids if body else None
     entity_ids = body.entity_ids if body else None
     return service.rerun_job(db, job_id, entity_ids=entity_ids, remember_ids=remember_ids)
+
+
+@router.get("/jobs/{job_id}/mapping")
+def job_mapping(job_id: int, db: Session = Depends(get_db)):
+    return service.get_job_mapping(db, job_id)
+
+
+@router.post("/jobs/{job_id}/rehydrate")
+def rehydrate_job(job_id: int, body: RehydrateIn, db: Session = Depends(get_db)):
+    return service.rehydrate_job_text(db, job_id, body.text)
 
 
 @router.get("/jobs/{job_id}/export")

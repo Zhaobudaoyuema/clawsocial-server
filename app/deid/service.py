@@ -20,8 +20,10 @@ from app.deid.schemas import ManualEntityIn
 from app.deid.scan_events import get_scan_event_bus
 from app.deid.settings_store import get_scan_prompt, reset_scan_prompt, scan_prompt_meta, set_setting
 from app.deid.prompts import DEFAULT_SCAN_PROMPT, SCAN_PROMPT_SETTING_KEY
+from app.deid.rehydrate import build_placeholder_map, rehydrate_text
 from app.deid.storage import (
     JOB_RETENTION_HOURS,
+    MAPPING_RETENTION_DAYS,
     delete_job_files,
     job_dir,
     resolve_upload_path,
@@ -182,18 +184,60 @@ def get_job(db: Session, job_id: int) -> dict:
     job = db.get(DeidJob, job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
-    out = _job_to_dict(job)
+    out = _job_to_dict(job, db)
     out["progress"] = _parse_progress(job)
     out["use_worker"] = job.use_worker
     return out
 
 
-def _job_to_dict(job: DeidJob) -> dict[str, Any]:
+def _mapping_count(db: Session, job_id: int) -> int:
+    return (
+        db.query(DeidEntityMapping)
+        .filter(DeidEntityMapping.job_id == job_id)
+        .count()
+    )
+
+
+def _ensure_job_mappings(db: Session, job_id: int) -> None:
+    """Backfill mapping rows from job_entities for jobs completed before rehydrate shipped."""
+    if _mapping_count(db, job_id) > 0:
+        return
+    job = db.get(DeidJob, job_id)
+    if not job or job.status not in ("done", "archived"):
+        return
+    entities = [
+        e
+        for e in list_job_entities(db, job_id)
+        if not e.get("is_excluded") and e.get("placeholder")
+    ]
+    if not entities:
+        return
+    _write_mappings(db, job_id, entities)
+    db.commit()
+
+
+def _job_rehydrate_meta(db: Session, job: DeidJob) -> dict[str, Any]:
+    completed_at = coerce_beijing(job.completed_at)
+    mapping_expires_at = None
+    rehydrate_available = False
+    if completed_at and job.status in ("done", "archived"):
+        _ensure_job_mappings(db, job.id)
+        mapping_expires_at = completed_at + timedelta(days=MAPPING_RETENTION_DAYS)
+        rehydrate_available = (
+            _mapping_count(db, job.id) > 0 and now_beijing() < mapping_expires_at
+        )
+    return {
+        "files_purged_at": _dt_iso(job.files_purged_at),
+        "mapping_expires_at": _dt_iso(mapping_expires_at) if mapping_expires_at else None,
+        "rehydrate_available": rehydrate_available,
+    }
+
+
+def _job_to_dict(job: DeidJob, db: Session | None = None) -> dict[str, Any]:
     hours = None
     completed_at = coerce_beijing(job.completed_at)
     expires_at = coerce_beijing(job.expires_at)
-    created_at = coerce_beijing(job.created_at)
-    if completed_at and expires_at:
+    if completed_at and expires_at and job.status == "done":
         delta = expires_at - now_beijing()
         hours = max(0, delta.total_seconds() / 3600)
     verification = None
@@ -208,7 +252,7 @@ def _job_to_dict(job: DeidJob) -> dict[str, Any]:
             run_summary = json.loads(job.run_summary_json)
         except json.JSONDecodeError:
             pass
-    return {
+    out: dict[str, Any] = {
         "id": job.id,
         "status": job.status,
         "pack_ids": _parse_pack_ids(job),
@@ -223,30 +267,40 @@ def _job_to_dict(job: DeidJob) -> dict[str, Any]:
         "hours_until_cleanup": hours,
         "use_worker": job.use_worker,
         "progress": _parse_progress(job),
+        "files_purged_at": None,
+        "mapping_expires_at": None,
+        "rehydrate_available": False,
     }
+    if db is not None:
+        out.update(_job_rehydrate_meta(db, job))
+    return out
 
 
 def list_jobs(db: Session) -> list[dict]:
-    cutoff = now_beijing() - timedelta(hours=JOB_RETENTION_HOURS)
-    done_jobs = (
+    mapping_cutoff = now_beijing() - timedelta(days=MAPPING_RETENTION_DAYS)
+    finished_jobs = (
         db.query(DeidJob)
-        .filter(DeidJob.status == "done", DeidJob.completed_at >= cutoff)
+        .filter(
+            DeidJob.status.in_(("done", "archived")),
+            DeidJob.completed_at.isnot(None),
+            DeidJob.completed_at >= mapping_cutoff,
+        )
         .order_by(DeidJob.created_at.desc())
         .all()
     )
     incomplete = (
         db.query(DeidJob)
-        .filter(DeidJob.status != "done")
+        .filter(~DeidJob.status.in_(("done", "archived")))
         .order_by(DeidJob.created_at.desc())
         .all()
     )
     seen: set[int] = set()
     out: list[dict] = []
-    for j in done_jobs + incomplete:
+    for j in finished_jobs + incomplete:
         if j.id in seen:
             continue
         seen.add(j.id)
-        out.append(_job_to_dict(j))
+        out.append(_job_to_dict(j, db))
     return out
 
 
@@ -281,7 +335,7 @@ def _purge_job(db: Session, job_id: int, *, commit: bool = True) -> None:
 
 def purge_incomplete_jobs(db: Session, *, keep_job_id: int | None = None) -> int:
     """Remove all non-done jobs (not shown in history). Returns count removed."""
-    q = db.query(DeidJob).filter(DeidJob.status != "done")
+    q = db.query(DeidJob).filter(~DeidJob.status.in_(("done", "archived")))
     if keep_job_id is not None:
         q = q.filter(DeidJob.id != keep_job_id)
     ids = [j.id for j in q.all()]
@@ -320,7 +374,7 @@ async def create_job(
     job.stored_path = rel
     job.original_filename = original
     db.commit()
-    return _job_to_dict(job)
+    return _job_to_dict(job, db)
 
 
 def _load_library_aliases(db: Session, pack_ids: list[int]) -> list[tuple[DeidEntity, DeidEntityAlias]]:
@@ -809,7 +863,7 @@ async def _scan_job_impl(
     )
     bus.close(job_id)
     return {
-        "job": _job_to_dict(job),
+        "job": _job_to_dict(job, db),
         "entities": list_job_entities(db, job_id),
         "scan_summary": scan_summary,
     }
@@ -1309,7 +1363,11 @@ def export_docx(
 ) -> tuple[Path, str]:
     """Return (path, download_filename) for the de-identified docx only."""
     job = db.get(DeidJob, job_id)
-    if not job or job.status != "done":
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status == "archived":
+        raise HTTPException(400, "文件已清理，无法下载")
+    if job.status != "done":
         raise HTTPException(400, "任务未完成")
     verification = json.loads(job.verification_json or "{}")
     if not verification.get("passed") and not override_ack:
@@ -1330,6 +1388,121 @@ def export_docx(
     stem = Path(job.original_filename or "document.docx").stem
     filename = f"{stem}_desensitized.docx"
     return out_docx, filename
+
+
+def archive_job_files(db: Session, job: DeidJob) -> None:
+    """Phase-1 cleanup: remove files, keep mapping for rehydrate."""
+    delete_job_files(job.id)
+    job.stored_path = None
+    job.output_path = None
+    job.verification_json = None
+    job.run_summary_json = None
+    job.status = "archived"
+    job.files_purged_at = now_beijing()
+
+
+def purge_expired_mapping_jobs(db: Session) -> int:
+    """Phase-2 cleanup: remove jobs whose mapping retention expired."""
+    cutoff = now_beijing() - timedelta(days=MAPPING_RETENTION_DAYS)
+    jobs = (
+        db.query(DeidJob)
+        .filter(
+            DeidJob.status == "archived",
+            DeidJob.completed_at.isnot(None),
+            DeidJob.completed_at < cutoff,
+        )
+        .all()
+    )
+    for job in jobs:
+        _purge_job(db, job.id, commit=False)
+    if jobs:
+        db.commit()
+    return len(jobs)
+
+
+def archive_expired_job_files(db: Session) -> int:
+    """Phase-1 cleanup: archive done jobs past file retention."""
+    cutoff = now_beijing() - timedelta(hours=JOB_RETENTION_HOURS)
+    jobs = (
+        db.query(DeidJob)
+        .filter(
+            DeidJob.status == "done",
+            DeidJob.completed_at.isnot(None),
+            DeidJob.completed_at < cutoff,
+        )
+        .all()
+    )
+    for job in jobs:
+        archive_job_files(db, job)
+    if jobs:
+        db.commit()
+    return len(jobs)
+
+
+def _assert_rehydrate_available(db: Session, job: DeidJob) -> None:
+    if job.status not in ("done", "archived"):
+        raise HTTPException(400, "任务未完成，无法回显")
+    meta = _job_rehydrate_meta(db, job)
+    if not meta["rehydrate_available"]:
+        raise HTTPException(400, "映射已过期或不存在，无法回显")
+
+
+def get_job_mapping(db: Session, job_id: int) -> list[dict]:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    _assert_rehydrate_available(db, job)
+    rows = (
+        db.query(DeidEntityMapping)
+        .filter(DeidEntityMapping.job_id == job_id)
+        .order_by(DeidEntityMapping.placeholder, DeidEntityMapping.original_text)
+        .all()
+    )
+    return [
+        {
+            "original_text": r.original_text,
+            "placeholder": r.placeholder,
+            "entity_type": r.entity_type,
+            "source": r.source,
+            "hit_count": r.hit_count,
+        }
+        for r in rows
+    ]
+
+
+def rehydrate_job_text(db: Session, job_id: int, text: str) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    _assert_rehydrate_available(db, job)
+    rows = db.query(DeidEntityMapping).filter(DeidEntityMapping.job_id == job_id).all()
+    ph_map = build_placeholder_map(rows)
+    result = rehydrate_text(text, ph_map)
+    return {
+        "text": result.text,
+        "resolved": result.resolved,
+        "unresolved": result.unresolved,
+    }
+
+
+def list_rehydrate_eligible_jobs(db: Session) -> list[dict]:
+    mapping_cutoff = now_beijing() - timedelta(days=MAPPING_RETENTION_DAYS)
+    jobs = (
+        db.query(DeidJob)
+        .filter(
+            DeidJob.status.in_(("done", "archived")),
+            DeidJob.completed_at.isnot(None),
+            DeidJob.completed_at >= mapping_cutoff,
+        )
+        .order_by(DeidJob.completed_at.desc())
+        .all()
+    )
+    out = []
+    for job in jobs:
+        d = _job_to_dict(job, db)
+        if d.get("rehydrate_available"):
+            out.append(d)
+    return out
 
 
 def delete_job(db: Session, job_id: int) -> None:

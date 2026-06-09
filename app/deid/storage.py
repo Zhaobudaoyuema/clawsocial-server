@@ -10,6 +10,7 @@ from app.uploads import UPLOADS_DIR, MAX_FILE_SIZE
 
 DEID_ROOT = UPLOADS_DIR / "deid"
 JOB_RETENTION_HOURS = 8
+MAPPING_RETENTION_DAYS = 90
 
 
 def job_dir(job_id: int) -> Path:

@@ -8,12 +8,14 @@ import { useDeidStore } from '../../stores/deid'
 const props = defineProps<{
   activeJobId?: number | null
   entitiesActive?: boolean
+  rehydrateActive?: boolean
   drawerOpen?: boolean
 }>()
 const emit = defineEmits<{
   select: [job: Record<string, unknown>]
   newTask: []
   openEntities: []
+  openRehydrate: []
   closeDrawer: []
   deleted: [jobId: number]
 }>()
@@ -37,6 +39,7 @@ const statusMap: Record<string, { variant: 'draft' | 'scanned' | 'done' | 'faile
   confirmed: { variant: 'scanned', label: '待确认' },
   running: { variant: 'running', label: '脱敏中' },
   done: { variant: 'done', label: '完成' },
+  archived: { variant: 'scanned', label: '已归档·可回显' },
   failed: { variant: 'failed', label: '失败' },
 }
 
@@ -78,6 +81,11 @@ function onOpenEntities() {
   emit('closeDrawer')
 }
 
+function onOpenRehydrate() {
+  emit('openRehydrate')
+  emit('closeDrawer')
+}
+
 function onDelete(job: Record<string, unknown>, e: Event) {
   e.stopPropagation()
   pendingDelete.value = job
@@ -110,7 +118,7 @@ async function confirmDelete() {
           <button
             type="button"
             class="job-row"
-            :class="{ active: isActive(job) && !entitiesActive }"
+            :class="{ active: isActive(job) && !entitiesActive && !rehydrateActive }"
             @click="onSelect(job)"
           >
             <span class="fname">{{ (job as { original_filename: string }).original_filename }}</span>
@@ -146,6 +154,14 @@ async function confirmDelete() {
     </div>
 
     <div class="rail-foot">
+      <button
+        type="button"
+        class="foot-btn nav-btn"
+        :class="{ active: rehydrateActive }"
+        @click="onOpenRehydrate"
+      >
+        结论回显
+      </button>
       <button
         type="button"
         class="foot-btn nav-btn"
@@ -190,7 +206,7 @@ async function confirmDelete() {
   }
 }
 .rail-section {
-  padding: 1rem 0.75rem;
+  padding: 1.5rem 1rem 1rem;
 }
 .rail-label {
   padding: 0 0.65rem 0.5rem;

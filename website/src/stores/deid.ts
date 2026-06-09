@@ -197,6 +197,7 @@ export const useDeidStore = defineStore('deid', () => {
   }
   const showConclusionView = ref(false)
   const showEntitiesPanel = ref(false)
+  const showRehydratePanel = ref(false)
   /** 用户主动打开「我的实体」时，禁止异步 restore/scan 抢回结论页 */
   const suppressAutoConclusion = ref(false)
   const entityDirty = ref(false)
@@ -243,12 +244,12 @@ export const useDeidStore = defineStore('deid', () => {
     | 'done'
 
   function wizardPhase(): WizardPhase {
-    if (showEntitiesPanel.value) return 'upload'
+    if (showEntitiesPanel.value || showRehydratePanel.value) return 'upload'
     const job = currentJob.value as { status?: string } | null
     if (!job) return 'upload'
     if (showConclusionView.value) return 'confirm-detail'
     const st = job.status || ''
-    if (st === 'done') return 'done'
+    if (st === 'done' || st === 'archived') return 'done'
     if (st === 'running') return 'deid-running'
     if (st === 'scanning' || st === 'queued') return 'scanning'
     const sp = scanProgress.value
@@ -267,9 +268,10 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   function openConclusionView() {
-    if (showEntitiesPanel.value || suppressAutoConclusion.value) return
+    if (showEntitiesPanel.value || showRehydratePanel.value || suppressAutoConclusion.value) return
     showConclusionView.value = true
     showEntitiesPanel.value = false
+    showRehydratePanel.value = false
   }
 
   function closeConclusionView() {
@@ -280,11 +282,34 @@ export const useDeidStore = defineStore('deid', () => {
     suppressAutoConclusion.value = true
     showEntitiesPanel.value = true
     showConclusionView.value = false
+    showRehydratePanel.value = false
   }
 
   function closeEntitiesPanel() {
     showEntitiesPanel.value = false
     suppressAutoConclusion.value = false
+  }
+
+  function openRehydratePanel() {
+    suppressAutoConclusion.value = true
+    showRehydratePanel.value = true
+    showEntitiesPanel.value = false
+    showConclusionView.value = false
+  }
+
+  function closeRehydratePanel() {
+    showRehydratePanel.value = false
+    suppressAutoConclusion.value = false
+  }
+
+  async function rehydrate(jobId: number, text: string) {
+    return readJson<{ text: string; resolved: string[]; unresolved: string[] }>(
+      await fetch(`${API}/jobs/${jobId}/rehydrate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }),
+    )
   }
 
   async function fetchJobSnapshot(jobId: number) {
@@ -387,7 +412,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function restoreCurrentJob() {
     const incomplete = jobs.value.find(
-      (j) => (j as { status: string }).status !== 'done',
+      (j) => !['done', 'archived'].includes((j as { status: string }).status),
     ) as { id: number; status: string } | undefined
     if (!incomplete) return
 
@@ -416,13 +441,16 @@ export const useDeidStore = defineStore('deid', () => {
     entityDirty.value = false
     showConclusionView.value = false
     showEntitiesPanel.value = false
+    showRehydratePanel.value = false
     const id = job.id as number
     const status = job.status as string
 
-    if (status === 'done') {
+    if (status === 'done' || status === 'archived') {
       await fetchJob(id)
       await loadEntities(id)
-      await fetchPreview(id)
+      if (status === 'done') {
+        await fetchPreview(id)
+      }
       return
     }
     if (status === 'scanned' || status === 'confirmed') {
@@ -453,6 +481,7 @@ export const useDeidStore = defineStore('deid', () => {
     scanProgress.value = null
     showConclusionView.value = false
     showEntitiesPanel.value = false
+    showRehydratePanel.value = false
     entityDirty.value = false
   }
 
@@ -475,6 +504,7 @@ export const useDeidStore = defineStore('deid', () => {
       entityDirty.value = false
       showConclusionView.value = false
       showEntitiesPanel.value = false
+      showRehydratePanel.value = false
       await fetchJobs()
       return currentJob.value
     } catch (e) {
@@ -620,6 +650,7 @@ export const useDeidStore = defineStore('deid', () => {
     error.value = null
     showConclusionView.value = false
     showEntitiesPanel.value = false
+    showRehydratePanel.value = false
     if (currentJob.value) {
       currentJob.value = { ...currentJob.value, status: 'running' }
     }
@@ -761,6 +792,7 @@ export const useDeidStore = defineStore('deid', () => {
     scanLive,
     showConclusionView,
     showEntitiesPanel,
+    showRehydratePanel,
     suppressAutoConclusion,
     wizardPhase,
     wizardStep,
@@ -768,6 +800,9 @@ export const useDeidStore = defineStore('deid', () => {
     closeConclusionView,
     openEntitiesPanel,
     closeEntitiesPanel,
+    openRehydratePanel,
+    closeRehydratePanel,
+    rehydrate,
     entityDirty,
     queueStatus,
     workerStatus,

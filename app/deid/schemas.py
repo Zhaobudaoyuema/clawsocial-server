@@ -137,3 +137,13 @@ class EntityTypePatch(BaseModel):
 class MergeEntitiesIn(BaseModel):
     target_entity_id: int
     source_entity_ids: list[int]
+
+
+class RehydrateIn(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+class RehydrateOut(BaseModel):
+    text: str
+    resolved: list[str] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)

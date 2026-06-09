@@ -8,6 +8,7 @@ import DeidReplaceSamples from './DeidReplaceSamples.vue'
 import DeidEntityList from './DeidEntityList.vue'
 import DeidConclusionView from './DeidConclusionView.vue'
 import DeidMyEntities from './DeidMyEntities.vue'
+import DeidRehydrateView from './DeidRehydrateView.vue'
 import DeidStepper from './DeidStepper.vue'
 import DeidStepNav from './DeidStepNav.vue'
 import DeidWorkerBanner from './DeidWorkerBanner.vue'
@@ -35,7 +36,13 @@ const isScanning = computed(
     status.value === 'queued' ||
     (!!store.scanProgress && store.scanProgress.phase !== 'error'),
 )
-const isDone = computed(() => status.value === 'done')
+const isDone = computed(() => status.value === 'done' || status.value === 'archived')
+const filesPurged = computed(
+  () =>
+    status.value === 'archived' ||
+    !!(job.value as { files_purged_at?: string | null } | null)?.files_purged_at,
+)
+const canDownload = computed(() => isDone.value && !filesPurged.value)
 
 const verification = computed(
   () => ((job.value as { verification?: Record<string, unknown> })?.verification) || {},
@@ -192,7 +199,11 @@ function confirmOverrideDownload() {
 
 <template>
   <main class="stage">
-    <div ref="stageBodyRef" class="stage-body">
+    <div
+      ref="stageBodyRef"
+      class="stage-body"
+      :class="{ 'stage-body--rehydrate': store.showRehydratePanel }"
+    >
     <div v-if="showWorkerToast" class="toast toast--ok">
       智能扫描已恢复，可使用 AI 发现实体
       <button type="button" class="toast-x" @click="store.clearWorkerToast()">×</button>
@@ -206,8 +217,11 @@ function confirmOverrideDownload() {
       </div>
     </div>
     <Transition name="deid-fade" mode="out-in">
+      <!-- 结论回显 -->
+      <DeidRehydrateView v-if="store.showRehydratePanel" key="rehydrate" class="panel-fill panel-fill--rehydrate" />
+
       <!-- 我的实体 -->
-      <DeidMyEntities v-if="store.showEntitiesPanel" key="entities" class="panel-fill" />
+      <DeidMyEntities v-else-if="store.showEntitiesPanel" key="entities" class="panel-fill" />
 
       <!-- 结论全屏 -->
       <DeidConclusionView v-else-if="store.showConclusionView" key="conclusion" class="panel-fill" />
@@ -217,23 +231,26 @@ function confirmOverrideDownload() {
         <div class="wizard-toolbar">
           <DeidStepper :current="currentStep" :finished="isDone" />
           <DeidStepNav>
-          <a
-            v-if="verificationPassed && jobId"
-            class="deid-btn deid-btn--primary"
-            :href="store.exportUrl(jobId, false, undefined)"
-            download
-          >
-            下载文档
-          </a>
-          <button
-            v-else-if="jobId"
-            type="button"
-            class="deid-btn deid-btn--primary"
-            @click="openOverrideModal"
-          >
-            下载文档
-          </button>
-          <button v-if="store.entityDirty" type="button" class="deid-btn" @click="doRerun">
+          <template v-if="canDownload">
+            <a
+              v-if="verificationPassed && jobId"
+              class="deid-btn deid-btn--primary"
+              :href="store.exportUrl(jobId, false, undefined)"
+              download
+            >
+              下载文档
+            </a>
+            <button
+              v-else-if="jobId"
+              type="button"
+              class="deid-btn deid-btn--primary"
+              @click="openOverrideModal"
+            >
+              下载文档
+            </button>
+          </template>
+          <p v-else-if="filesPurged" class="archived-hint">文件已清理，可使用左侧「结论回显」还原外部结论</p>
+          <button v-if="store.entityDirty && canDownload" type="button" class="deid-btn" @click="doRerun">
             重新脱敏
           </button>
           </DeidStepNav>
@@ -408,6 +425,22 @@ function confirmOverrideDownload() {
     display: flex;
     flex-direction: column;
   }
+  .stage-body--rehydrate {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    padding: 1.5rem 2.5rem 1.75rem 3rem;
+    box-sizing: border-box;
+  }
+  .stage-body--rehydrate > .toast {
+    margin: 0 !important;
+    flex-shrink: 0;
+  }
+  .stage-body--rehydrate > .panel-fill--rehydrate {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
   .wizard-panel {
     width: 100%;
     max-width: none;
@@ -427,9 +460,14 @@ function confirmOverrideDownload() {
   .wizard-toolbar :deep(.step-nav) {
     margin-bottom: 0;
   }
-  .toast {
+  .archived-hint {
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--deid-ink-muted);
+  }
+  .stage-body > .toast {
     flex-shrink: 0;
-    margin: 0 2rem 0.5rem;
+    margin: 0.75rem 2.75rem 1rem;
     padding: 0.5rem 0.75rem;
     font-size: 0.875rem;
   }
@@ -445,8 +483,8 @@ function confirmOverrideDownload() {
   font-size: 0.9375rem;
 }
 @media (min-width: 769px) {
-  .toast {
-    margin: 0 2rem 0.5rem;
+  .stage-body > .toast {
+    margin: 0.75rem 2.75rem 1rem;
   }
 }
 .toast--ok {
@@ -492,6 +530,9 @@ function confirmOverrideDownload() {
     margin: 0;
     padding: 0;
     height: 100%;
+  }
+  .panel-fill--rehydrate {
+    background: var(--deid-bg);
   }
 }
 .running-stage {

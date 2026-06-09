@@ -332,6 +332,36 @@ def test_list_jobs_includes_incomplete(client: TestClient, db, seeded_db):
     assert any(j["id"] == draft_id and j["status"] == "done" for j in listed)
 
 
+def test_list_jobs_includes_archived(client: TestClient, db, seeded_db):
+    from app.deid.service import archive_job_files
+    from app.models_deid import DeidJob
+
+    _ensure_fixture()
+    with open(FIXTURE, "rb") as f:
+        r = client.post(
+            "/api/deid/jobs",
+            files={
+                "file": (
+                    "spic_sample.docx",
+                    f,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+            data={"use_worker": "false"},
+        )
+    job_id = r.json()["id"]
+    client.post(f"/api/deid/jobs/{job_id}/scan")
+    ids = _entity_ids(client, job_id)
+    client.post(f"/api/deid/jobs/{job_id}/run", json={"entity_ids": ids})
+    job = db.get(DeidJob, job_id)
+    archive_job_files(db, job)
+    db.commit()
+    listed = client.get("/api/deid/jobs").json()
+    row = next(j for j in listed if j["id"] == job_id)
+    assert row["status"] == "archived"
+    assert row["rehydrate_available"] is True
+
+
 def test_list_jobs_after_run(client: TestClient, db, seeded_db):
     """Regression: list_jobs must not crash on naive expires_at from MySQL."""
     _ensure_fixture()

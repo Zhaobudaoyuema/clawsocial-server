@@ -21,9 +21,9 @@ onMounted(async () => {
 })
 
 watch(
-  () => [store.showEntitiesPanel, store.showConclusionView] as const,
-  ([entities, conclusion]) => {
-    if (entities || conclusion) closeRail()
+  () => [store.showEntitiesPanel, store.showConclusionView, store.showRehydratePanel] as const,
+  ([entities, conclusion, rehydrate]) => {
+    if (entities || conclusion || rehydrate) closeRail()
   },
 )
 
@@ -31,6 +31,7 @@ async function onSelectJob(job: Record<string, unknown>) {
   activeJobId.value = job.id as number
   store.closeEntitiesPanel()
   store.closeConclusionView()
+  store.closeRehydratePanel()
   closeRail()
   await store.selectJob(job)
 }
@@ -39,6 +40,7 @@ function onNewTask() {
   activeJobId.value = null
   store.closeEntitiesPanel()
   store.closeConclusionView()
+  store.closeRehydratePanel()
   closeRail()
   store.newTask()
 }
@@ -47,6 +49,12 @@ function onOpenEntities() {
   activeJobId.value = null
   closeRail()
   store.openEntitiesPanel()
+}
+
+function onOpenRehydrate() {
+  activeJobId.value = null
+  closeRail()
+  store.openRehydratePanel()
 }
 
 function toggleRail() {
@@ -80,10 +88,12 @@ function onJobDeleted(jobId: number) {
       <DeidLeftRail
         :active-job-id="activeJobId"
         :entities-active="store.showEntitiesPanel"
+        :rehydrate-active="store.showRehydratePanel"
         :drawer-open="railOpen"
         @select="onSelectJob"
         @new-task="onNewTask"
         @open-entities="onOpenEntities"
+        @open-rehydrate="onOpenRehydrate"
         @close-drawer="closeRail"
         @deleted="onJobDeleted"
       />

@@ -22,6 +22,7 @@ def run_migrations(engine: Engine) -> None:
     _ensure_deid_jobs_prompt_extra(engine)
     _ensure_deid_jobs_scan_queue(engine)
     _ensure_deid_jobs_ai_summary(engine)
+    _ensure_deid_jobs_files_purged_at(engine)
 
 
 def _ensure_users_last_seen_at(engine: Engine) -> None:
@@ -424,6 +425,24 @@ def _ensure_deid_jobs_scan_queue(engine: Engine) -> None:
                 conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN progress_json TEXT"))
             else:
                 conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN progress_json TEXT NULL"))
+        conn.commit()
+
+
+def _ensure_deid_jobs_files_purged_at(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "deid_jobs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("deid_jobs")}
+    if "files_purged_at" in columns:
+        return
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        if dialect == "mysql":
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN files_purged_at DATETIME NULL"))
+        elif dialect == "sqlite":
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN files_purged_at DATETIME"))
+        else:
+            conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN files_purged_at DATETIME NULL"))
         conn.commit()
 
 
