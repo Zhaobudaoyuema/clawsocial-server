@@ -24,6 +24,7 @@ from app.deid.schemas import (
     WhitelistIn,
 )
 from app.deid.engine.plan import normalize_for_match
+from app.deid.worker.client import get_worker_client
 from app.models_deid import (
     DeidClientPack,
     DeidEntity,
@@ -107,22 +108,29 @@ def get_effective_prompt(job_id: int, db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/scan")
 async def scan_job(job_id: int, request: Request, db: Session = Depends(get_db)):
-    router = getattr(request.app.state, "worker_router", None)
-    return await service.scan_job(db, job_id, worker_router=router)
+    client = get_worker_client(request.app)
+    return await service.scan_job(db, job_id, worker_router=client)
 
 
 @router.post("/jobs/{job_id}/rescan")
 async def rescan_job(job_id: int, request: Request, db: Session = Depends(get_db)):
-    router = getattr(request.app.state, "worker_router", None)
-    return await service.scan_job(db, job_id, worker_router=router)
+    client = get_worker_client(request.app)
+    return await service.scan_job(db, job_id, worker_router=client)
 
 
 @router.get("/worker/status")
-def worker_status(request: Request):
-    router = getattr(request.app.state, "worker_router", None)
-    if not router:
+async def worker_status(request: Request):
+    relay = getattr(request.app.state, "worker_relay", None)
+    if relay and relay.enabled:
+        await relay.refresh_status()
+    client = get_worker_client(request.app)
+    if not client:
         return {"online": False, "state": "offline", "model": None, "hostname": None, "version": None}
-    return router.status_dict()
+    status = client.status_dict()
+    if relay and relay.enabled:
+        status["mode"] = "relay"
+        status["relay_url"] = relay.base_url
+    return status
 
 
 @router.get("/jobs/{job_id}/entities")
@@ -184,8 +192,8 @@ def rerun(job_id: int, body: RunIn | None = None, db: Session = Depends(get_db))
 
 @router.post("/jobs/{job_id}/ai-summary")
 async def ai_summary(job_id: int, request: Request, db: Session = Depends(get_db)):
-    router = getattr(request.app.state, "worker_router", None)
-    return await service.generate_job_ai_summary(db, job_id, worker_router=router)
+    client = get_worker_client(request.app)
+    return await service.generate_job_ai_summary(db, job_id, worker_router=client)
 
 
 @router.get("/jobs/{job_id}/export")

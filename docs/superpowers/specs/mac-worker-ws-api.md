@@ -1,6 +1,6 @@
 # Ollama Mac Worker — WebSocket API 调用方文档
 
-> 版本：v0.3.0 · 协议模式：透明代理（proxy）
+> 版本：v0.4.0 · 协议模式：透明代理（proxy）
 
 ## 1. 概述
 
@@ -569,10 +569,49 @@ ollama-worker start
 
 ---
 
-## 14. 变更记录
+## 14. 本地 Windows 调试（经生产 Worker 中继）
+
+Mac Worker **只能连一条** WebSocket。本地调试时不改 Worker 的 `--host`，而是通过生产服务器的 **token 保护 HTTP 中继** 调用同一 Mac Worker。
+
+```
+本地 Windows FastAPI
+    │  HTTPS + DEID_DEV_RELAY_TOKEN
+    ▼
+生产 /api/deid/dev/worker/*
+    │  已有 wss://域名/ws/worker
+    ▼
+Mac Worker → Ollama
+```
+
+**生产 `.env`（可选，一般不用）：**
+
+```bash
+DEID_DEV_RELAY_TOKEN=<openssl rand -hex 32>   # 覆盖机器白名单
+DEID_DEV_RELAY_IPS=你的公网IP                   # 可选
+```
+
+**本地 Windows：** 无需 `.env`；`python -m scripts.show_dev_relay_token` 查看本机 token。GUID 须在 `ALLOWED_DEV_MACHINE_GUIDS` 中（已内置当前开发机）。
+
+**本地 `.env`（可选覆盖）：**
+
+```bash
+DEID_WORKER_RELAY_URL=https://clawsocial.world
+DEID_WORKER_RELAY_TOKEN=<与机器 token 或 env 一致>
+```
+
+未设置 `DEID_DEV_RELAY_TOKEN` 时，`/api/deid/dev/*` 返回 **404**（不暴露端点）。
+
+仅前端调试时可设 `VITE_DEV_PROXY_TARGET=https://clawsocial.world`，Vite 代理 API 到生产。
+
+完整步骤见 [`docs/DEV_LOCAL.md`](../../DEV_LOCAL.md)。
+
+---
+
+## 15. 变更记录
 
 | 版本 | 日期 | 说明 |
 |-|-|-|
 | v0.1.0 | 2026-06-08 | 初版：透明代理 |
 | v0.2.0 | 2026-06-08 | 去掉 token；增加远程 IP 限制；单任务；仅 `/v1/chat/completions`；补充 403/429 |
 | v0.3.0 | 2026-06-01 | 新增 §13 Docker 部署 + Mac Worker 联调；修正 §12.2 init 路径为 `/ws/worker` |
+| v0.4.0 | 2026-06-01 | 新增 §14 本地 Windows → 生产 Worker 安全中继 |

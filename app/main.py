@@ -121,25 +121,26 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    from app.deid.worker.relay_client import RemoteWorkerRelay
+
     app.state.worker_router = WorkerRouter()
-    app.state.scan_queue = ScanQueue()
-    app.state.scan_queue.set_worker_router(app.state.worker_router)
+    app.state.worker_relay = RemoteWorkerRelay()
+    app.state.scan_queue = ScanQueue(app=app)
     app.state.chat_session_store = ChatSessionStore()
     ping_task = asyncio.create_task(_worker_ping_loop(app))
+    relay_status_task = asyncio.create_task(_relay_status_loop(app))
     chat_cleanup_task = asyncio.create_task(_chat_session_cleanup_loop(app))
 
     yield
 
     ping_task.cancel()
+    relay_status_task.cancel()
     chat_cleanup_task.cancel()
-    try:
-        await ping_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await chat_cleanup_task
-    except asyncio.CancelledError:
-        pass
+    for task in (ping_task, relay_status_task, chat_cleanup_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     from app.jobs.deid_cleanup import stop as stop_deid_cleanup
     from app.jobs.world_aggregator import stop as stop_scheduler
@@ -167,6 +168,17 @@ async def _worker_ping_loop(app: FastAPI) -> None:
         router = getattr(app.state, "worker_router", None)
         if router:
             await router.send_ping()
+
+
+async def _relay_status_loop(app: FastAPI) -> None:
+    """Refresh remote worker status when local dev uses DEID_WORKER_RELAY_*."""
+    import asyncio
+
+    while True:
+        relay = getattr(app.state, "worker_relay", None)
+        if relay and relay.enabled:
+            await relay.refresh_status()
+        await asyncio.sleep(10)
 
 
 
@@ -210,7 +222,11 @@ _PLAIN_TEXT_ONLY_PATHS = _RATE_LIMIT_EXEMPT
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    from fastapi.responses import JSONResponse
+
     path = request.scope.get("path", "").split("?")[0]
+    if path.startswith("/api/deid/dev"):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     if path in _PLAIN_TEXT_ONLY_PATHS:
         return plain_text(f"错误 {exc.status_code}：{exc.detail}", status_code=exc.status_code)
     # "Not Found" is the default 404 message — pass through real status code
@@ -246,6 +262,10 @@ app.include_router(blog.router)
 app.include_router(deid.router)
 app.include_router(deid_chat.router)
 app.include_router(ws_worker.router)
+
+from app.api.deid_dev import include_dev_relay_routes
+
+include_dev_relay_routes(app)
 
 # 官网（Vue SPA 构建产物）
 @app.get("/")

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.deid.chat.service import stream_chat_reply
+from app.deid.worker.client import get_worker_client
 from app.deid.chat.session import ChatSessionStore, list_chat_jobs
 
 router = APIRouter(prefix="/api/deid/chat", tags=["deid-chat"])
@@ -75,10 +75,13 @@ async def post_message(
     request: Request,
 ):
     store = _get_store(request)
-    worker_router = getattr(request.app.state, "worker_router", None)
+    worker_client = get_worker_client(request.app)
+    relay = getattr(request.app.state, "worker_relay", None)
+    if relay and relay.enabled:
+        await relay.refresh_status()
 
     async def gen():
-        async for line in stream_chat_reply(store, worker_router, session_id, body.content):
+        async for line in stream_chat_reply(store, worker_client, session_id, body.content):
             yield line
 
     return StreamingResponse(gen(), media_type="text/event-stream")

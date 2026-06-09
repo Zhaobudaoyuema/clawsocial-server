@@ -10,7 +10,7 @@ from typing import Any
 
 from app.database import SessionLocal
 from app.deid import service
-from app.deid.worker.router import WorkerRouter
+from app.deid.worker.client import get_worker_client
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +20,17 @@ SessionFactory = Callable[[], Any]
 class ScanQueue:
     """Serializes scan jobs that need the Mac Worker (use_worker=True)."""
 
-    def __init__(self, session_factory: SessionFactory | None = None) -> None:
+    def __init__(self, session_factory: SessionFactory | None = None, app=None) -> None:
         self._waiting: deque[int] = deque()
         self._current: int | None = None
         self._lock = asyncio.Lock()
-        self._worker_router: WorkerRouter | None = None
+        self._app = app
         self._session_factory = session_factory or SessionLocal
 
-    def set_worker_router(self, router: WorkerRouter | None) -> None:
-        self._worker_router = router
+    def _worker_client(self):
+        if self._app is None:
+            return None
+        return get_worker_client(self._app)
 
     def status_dict(self) -> dict[str, Any]:
         return {
@@ -57,7 +59,7 @@ class ScanQueue:
             if not job:
                 return {"status": "error", "queue_position": None, "message": "任务不存在"}
 
-            needs_queue = service.job_needs_worker_queue(db, job, self._worker_router)
+            needs_queue = service.job_needs_worker_queue(db, job, self._worker_client())
             if not needs_queue:
                 service.set_job_progress(
                     db,
@@ -110,7 +112,7 @@ class ScanQueue:
             await service.scan_job_async(
                 db,
                 job_id,
-                worker_router=self._worker_router,
+                worker_router=self._worker_client(),
                 queue=self if queued else None,
             )
         except Exception:
