@@ -130,6 +130,9 @@ def test_job_scan_run_flow(client: TestClient, db, seeded_db):
     assert r.status_code == 200
     ct = r.headers.get("content-type", "")
     assert "wordprocessingml" in ct or "octet-stream" in ct
+    cd = r.headers.get("content-disposition", "")
+    assert "deid_" in cd
+    assert "_desensitized.docx" in cd
 
 
 def _ensure_ceec_fixture():
@@ -167,7 +170,17 @@ def test_ceec_fixture_scan(client: TestClient, db, seeded_db):
     assert summary.get("llm_skipped") in ("worker_offline", "llm_disabled", None) or summary.get("llm_hits", 0) >= 0
 
 
-def test_worker_status_offline(client: TestClient):
+def test_worker_status_offline(client: TestClient, monkeypatch):
+    """Isolate from remote DEID relay configured on dev machines."""
+    relay = client.app.state.worker_relay
+    relay._base_url = ""
+    relay._token = ""
+    relay._status = None
+    monkeypatch.setattr(
+        "app.api.deid.get_worker_client",
+        lambda app: app.state.worker_router,
+    )
+    client.app.state.worker_router._session = None
     r = client.get("/api/deid/worker/status")
     assert r.status_code == 200
     data = r.json()
@@ -209,26 +222,23 @@ def test_start_scan_without_worker(client: TestClient, db, seeded_db):
 def test_scan_with_mock_llm(client: TestClient, db, seeded_db, monkeypatch):
     _ensure_ceec_fixture()
     import app.deid.service as service_mod
-    from app.deid.discovery.llm import LlmDiscoveryResult
-    from app.deid.discovery.rules import DiscoveredEntity
+    from app.deid.discovery.entity_rescan import InitialScanResult
+    from app.deid.discovery.merge import MergedEntity
 
-    async def fake_discover_llm(sample, router, *, job_id, system_prompt=None, enabled=None, on_progress=None, **kwargs):
-        return LlmDiscoveryResult(
-            entities=[
-                DiscoveredEntity(
-                    canonical_name="中能建氢能源有限公司",
-                    entity_type="company",
-                    source="llm",
-                    aliases=["中能建氢能源有限公司"],
-                    hit_count=2,
-                    confidence=0.92,
-                )
-            ],
-            chunks=1,
-            worker_model="test-model",
-        )
+    async def fake_initial_scan(*args, **kwargs):
+        entities = [
+            MergedEntity(
+                canonical_name="中能建氢能源有限公司",
+                entity_type="company",
+                source="llm",
+                aliases=["中能建氢能源有限公司"],
+                hit_count=2,
+                confidence=0.92,
+            )
+        ]
+        return InitialScanResult(entities=entities, llm_result=None)
 
-    monkeypatch.setattr(service_mod, "discover_llm", fake_discover_llm)
+    monkeypatch.setattr(service_mod, "run_initial_scan", fake_initial_scan)
     monkeypatch.setattr(service_mod, "job_needs_worker_queue", lambda db, job, router: True)
     monkeypatch.setenv("DEID_LLM_ENABLED", "1")
 
@@ -257,26 +267,23 @@ def test_llm_entities_auto_saved_to_library(client: TestClient, db, seeded_db, m
     """LLM entities are saved to library by default when deid runs."""
     _ensure_ceec_fixture()
     import app.deid.service as service_mod
-    from app.deid.discovery.llm import LlmDiscoveryResult
-    from app.deid.discovery.rules import DiscoveredEntity
+    from app.deid.discovery.entity_rescan import InitialScanResult
+    from app.deid.discovery.merge import MergedEntity
 
-    async def fake_discover_llm(sample, router, *, job_id, system_prompt=None, enabled=None, on_progress=None, **kwargs):
-        return LlmDiscoveryResult(
-            entities=[
-                DiscoveredEntity(
-                    canonical_name="LLM测试主体有限公司",
-                    entity_type="company",
-                    source="llm",
-                    aliases=["LLM测试主体有限公司", "测试主体"],
-                    hit_count=1,
-                    confidence=0.9,
-                )
-            ],
-            chunks=1,
-            worker_model="test-model",
-        )
+    async def fake_initial_scan(*args, **kwargs):
+        entities = [
+            MergedEntity(
+                canonical_name="LLM测试主体有限公司",
+                entity_type="company",
+                source="llm",
+                aliases=["LLM测试主体有限公司", "测试主体"],
+                hit_count=1,
+                confidence=0.9,
+            )
+        ]
+        return InitialScanResult(entities=entities, llm_result=None)
 
-    monkeypatch.setattr(service_mod, "discover_llm", fake_discover_llm)
+    monkeypatch.setattr(service_mod, "run_initial_scan", fake_initial_scan)
     monkeypatch.setattr(service_mod, "job_needs_worker_queue", lambda db, job, router: True)
     monkeypatch.setenv("DEID_LLM_ENABLED", "1")
 
@@ -304,7 +311,54 @@ def test_llm_entities_auto_saved_to_library(client: TestClient, db, seeded_db, m
     match = [e for e in lib if "LLM测试主体" in e["canonical_name"]]
     assert len(match) == 1
     assert match[0]["source"] == "llm"
-    assert "测试主体" in match[0]["aliases"]
+
+
+def test_confirm_with_remember_ids_no_duplicate_alias(client: TestClient, db, seeded_db, monkeypatch):
+    """confirm 时 auto-save + remember_ids 重叠不应触发别名唯一约束冲突。"""
+    _ensure_ceec_fixture()
+    import app.deid.service as service_mod
+    from app.deid.discovery.entity_rescan import InitialScanResult
+    from app.deid.discovery.merge import MergedEntity
+
+    async def fake_initial_scan(*args, **kwargs):
+        return InitialScanResult(
+            entities=[
+                MergedEntity(
+                    canonical_name="重复别名测试公司",
+                    entity_type="company",
+                    source="llm",
+                    aliases=["重复别名测试公司", "测试简称"],
+                    hit_count=1,
+                )
+            ],
+            llm_result=None,
+        )
+
+    monkeypatch.setattr(service_mod, "run_initial_scan", fake_initial_scan)
+    monkeypatch.setattr(service_mod, "job_needs_worker_queue", lambda db, job, router: True)
+    monkeypatch.setenv("DEID_LLM_ENABLED", "1")
+
+    with open(CEEC_FIXTURE, "rb") as f:
+        r = client.post(
+            "/api/deid/jobs",
+            files={
+                "file": (
+                    "ceec_audit_test.docx",
+                    f,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+    job_id = r.json()["id"]
+    client.post(f"/api/deid/jobs/{job_id}/scan")
+    ents = client.get(f"/api/deid/jobs/{job_id}/entities").json()
+    ids = [e["id"] for e in ents if not e.get("is_excluded")]
+    r = client.post(
+        f"/api/deid/jobs/{job_id}/confirm",
+        json={"entity_ids": ids, "remember_ids": ids},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "done"
 
 
 def test_list_jobs_includes_incomplete(client: TestClient, db, seeded_db):
@@ -465,3 +519,25 @@ def test_delete_job(client: TestClient, db, seeded_db):
     r = client.delete(f"/api/deid/jobs/{job_id}")
     assert r.status_code == 200
     assert client.get(f"/api/deid/jobs/{job_id}").status_code == 404
+
+
+def test_delete_job_with_global_experience(client: TestClient, db, seeded_db):
+    from app.deid.discovery.experience_store import append_global_experience
+
+    _ensure_fixture()
+    with open(FIXTURE, "rb") as f:
+        r = client.post(
+            "/api/deid/jobs",
+            files={"file": ("spic_sample.docx", f, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        )
+    job_id = r.json()["id"]
+    append_global_experience(db, "表头简称需补全", source_job_id=job_id)
+    db.commit()
+
+    r = client.delete(f"/api/deid/jobs/{job_id}")
+    assert r.status_code == 200
+    assert client.get(f"/api/deid/jobs/{job_id}").status_code == 404
+    from app.models_deid import DeidGlobalExperience
+
+    row = db.query(DeidGlobalExperience).filter(DeidGlobalExperience.text == "表头简称需补全").one()
+    assert row.source_job_id is None

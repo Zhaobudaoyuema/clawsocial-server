@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { semanticCatLabel } from '../components/deid/semanticCategories'
+import { deidEventSourceUrl, deidFetch, getDeidAccessToken } from '../utils/deidAccess'
 
 const API = '/api/deid'
 
@@ -76,6 +78,24 @@ export const useDeidStore = defineStore('deid', () => {
     streamTail: '',
   })
   let scanEventSource: EventSource | null = null
+  const showDeepReview = ref(false)
+  const deepRisks = ref<Record<string, unknown>[]>([])
+  const workerCalls = ref<Record<string, unknown>[]>([])
+  const deepLoading = ref(false)
+  const semanticRisks = ref<Record<string, unknown>[]>([])
+  const semanticLoading = ref(false)
+  const semanticSelection = ref<Record<string, unknown>[]>([])
+  const scanSnapshotEntities = ref<Record<string, unknown>[]>([])
+  const semanticStageEntered = ref(false)
+  const reScanning = ref(false)
+  const scanSession = ref<'initial' | 'rescan' | 'semantic' | null>(null)
+  const rescanGateOpen = ref(false)
+  const lastRescanResult = ref<{
+    run: number
+    delta: number
+    noChange: boolean
+  } | null>(null)
+  const globalExperience = ref<Record<string, unknown>[]>([])
 
   function resetScanLive() {
     scanLive.value = {
@@ -100,6 +120,26 @@ export const useDeidStore = defineStore('deid', () => {
 
   function handleScanEvent(event: Record<string, unknown>) {
     const type = event.type as string
+
+    if (scanSession.value === 'semantic' && type === 'done') return
+
+    if (scanSession.value === 'rescan') {
+      if (type === 'rescan_start') {
+        rescanGateOpen.value = true
+      } else if (!rescanGateOpen.value) {
+        if (type !== 'log' && type !== 'entity' && type !== 'token' && type !== 'chunk_start') {
+          return
+        }
+      }
+      if (type === 'done') return
+      if (type === 'phase') {
+        const phase = String(event.phase || '')
+        if (phase !== 're_discover' && phase !== 'done' && phase !== 'error') return
+        const msg = String(event.message || '')
+        if (msg.includes('初次识别')) return
+      }
+    }
+
     if (type === 'phase') {
       const phase = String(event.phase || '')
       scanProgress.value = {
@@ -134,13 +174,75 @@ export const useDeidStore = defineStore('deid', () => {
       scanLive.value.streamTail = (scanLive.value.streamTail + chunk).slice(-3000)
     } else if (type === 'entity') {
       scanLive.value.entitiesFound += 1
-      appendScanLog(`发现实体：${String(event.name || '')}`)
+      const name = String(event.name || '')
+      const typeCode = String(event.entity_type || '')
+      const typeLabel = typeCode ? entityTypeLabel(typeCode) : ''
+      appendScanLog(
+        typeLabel ? `发现实体 [${typeLabel}]：${name}` : `发现实体：${name}`,
+      )
     } else if (type === 'remembered') {
       const count = Number(event.count ?? 0)
       appendScanLog(`词库匹配 ${count} 个实体`)
+    } else if (type === 'rescan_start') {
+      rescanGateOpen.value = true
+      resetScanLive()
+      const n = Number(event.re_run_count ?? 1)
+      scanProgress.value = {
+        phase: 're_discover',
+        percent: 5,
+        message: `开始第 ${n} 次再识别…`,
+      }
+      appendScanLog(`—— 第 ${n} 次再识别 ——`)
     } else if (type === 'chunk_start') {
       scanLive.value.streamTail = ''
       appendScanLog(`—— 第 ${event.index}/${event.total} 段 ——`)
+    } else if (type === 'risk') {
+      const original = String(event.original || '')
+      const catCode = String(event.category || '')
+      const catLabel = semanticCatLabel(catCode)
+      const label = original.length > 40 ? `${original.slice(0, 40)}…` : original
+      appendScanLog(`发现语义风险 [${catLabel}]：${label}`)
+    } else if (type === 'semantic_done') {
+      const count = Number(event.risk_count ?? 0)
+      const filled = Number(event.rewrite_count ?? 0)
+      appendScanLog(
+        count > 0
+          ? `语义扫描完成，发现 ${count} 条风险，已生成 ${filled} 条改写`
+          : '语义扫描完成，未发现语义指纹',
+      )
+      scanProgress.value = {
+        phase: 'semantic_review',
+        percent: 100,
+        message:
+          count > 0
+            ? `发现 ${count} 条语义风险，已生成 ${filled} 条改写`
+            : '未发现需改写的语义指纹',
+      }
+    } else if (type === 'entities_snapshot') {
+      const list = event.entities as Record<string, unknown>[] | undefined
+      const round = String(event.round || '')
+      if (Array.isArray(list)) {
+        scanSnapshotEntities.value = list
+        appendScanLog(`实体列表更新（${round || '快照'}，${list.length} 个）`)
+      }
+    } else if (type === 'scan_round_done') {
+      const round = String(event.round || '')
+      if (round === 're_run') {
+        const run = Number(event.re_run_count ?? 0)
+        const delta = Number(event.delta ?? 0)
+        const noChange = Boolean(event.no_change)
+        appendScanLog(
+          delta > 0
+            ? `再识别完成，新增 ${delta} 个实体`
+            : '再识别完成，本轮无新增实体',
+        )
+        lastRescanResult.value = { run, delta, noChange }
+        scanProgress.value = {
+          phase: 'done',
+          percent: 100,
+          message: delta > 0 ? `第 ${run} 次再识别完成，新增 ${delta} 个` : `第 ${run} 次再识别完成，本轮无新增`,
+        }
+      }
     } else if (type === 'done') {
       const summary = event.scan_summary as Record<string, unknown> | undefined
       if (summary) scanSummary.value = summary
@@ -151,6 +253,7 @@ export const useDeidStore = defineStore('deid', () => {
       scanLive.value.doneSummary = `发现 ${count} 个实体 · 用时 ${formatScanDuration(ms)}${
         tokens > 0 ? ` · Token ${tokens.toLocaleString('zh-CN')}` : ''
       }`
+      semanticStageEntered.value = false
     } else if (type === 'error') {
       appendScanLog(`错误：${String(event.message || '扫描失败')}`)
     }
@@ -171,11 +274,14 @@ export const useDeidStore = defineStore('deid', () => {
     scanLive.value.streamConnected = false
   }
 
-  function connectScanStream(jobId: number) {
+  function connectScanStream(jobId: number, opts?: { reset?: boolean; fresh?: boolean }) {
     disconnectScanStream()
-    resetScanLive()
+    if (opts?.reset !== false) {
+      resetScanLive()
+    }
     scanLive.value.startedAt = Date.now()
-    const es = new EventSource(`${API}/jobs/${jobId}/scan-stream`)
+    const qs = opts?.fresh ? '?fresh=1' : ''
+    const es = new EventSource(deidEventSourceUrl(`${API}/jobs/${jobId}/scan-stream${qs}`))
     scanEventSource = es
     es.onopen = () => {
       scanLive.value.streamConnected = true
@@ -185,7 +291,9 @@ export const useDeidStore = defineStore('deid', () => {
         const data = JSON.parse(ev.data) as Record<string, unknown>
         handleScanEvent(data)
         if (data.type === 'done' || data.type === 'error') {
-          disconnectScanStream()
+          if (scanSession.value !== 'rescan' && scanSession.value !== 'semantic') {
+            disconnectScanStream()
+          }
         }
       } catch {
         /* ignore malformed */
@@ -239,8 +347,12 @@ export const useDeidStore = defineStore('deid', () => {
     | 'upload'
     | 'scan-draft'
     | 'scanning'
+    | 'entity-scanned'
+    | 'semantic-idle'
+    | 'semantic-scanning'
+    | 'semantic-review'
     | 'confirm-detail'
-    | 'deid-running'
+    | 'finishing'
     | 'done'
 
   function wizardPhase(): WizardPhase {
@@ -250,21 +362,59 @@ export const useDeidStore = defineStore('deid', () => {
     if (showConclusionView.value) return 'confirm-detail'
     const st = job.status || ''
     if (st === 'done' || st === 'archived') return 'done'
-    if (st === 'running') return 'deid-running'
-    if (st === 'scanning' || st === 'queued') return 'scanning'
+    if (st === 'finishing' || st === 'running') return 'finishing'
+    if (st === 'semantic_scanning') return 'semantic-scanning'
+    if (st === 'semantic_review') return 'semantic-review'
+    if (
+      (st === 'scanned' || st === 're_scanning' || st === 'confirmed') &&
+      !semanticStageEntered.value
+    ) {
+      return 'entity-scanned'
+    }
+    if (st === 'scanned' || st === 'confirmed') return 'semantic-idle'
+    if (st === 'scanning' || st === 'queued' || reScanning.value) return 'scanning'
     const sp = scanProgress.value
     if (sp && sp.phase !== 'error' && sp.phase !== 'done') return 'scanning'
-    if (st === 'scanned' || st === 'confirmed') return 'confirm-detail'
     if (st === 'draft') return 'scan-draft'
     return 'upload'
   }
 
-  function wizardStep(): 'upload' | 'scan' | 'confirm' | 'done' {
+  function entityScanMode(): 'scanning' | 'ready' | 're_scanning' {
+    const st = (currentJob.value as { status?: string } | null)?.status || ''
+    const sp = scanProgress.value
+    if (
+      reScanning.value ||
+      scanSession.value === 'rescan' ||
+      st === 're_scanning' ||
+      sp?.phase === 're_discover'
+    ) {
+      return 're_scanning'
+    }
+    if (st === 'scanning' || st === 'queued') return 'scanning'
+    if (
+      sp &&
+      sp.phase !== 'error' &&
+      sp.phase !== 'done' &&
+      !String(sp.phase).startsWith('semantic')
+    ) {
+      return 'scanning'
+    }
+    return 'ready'
+  }
+
+  function enterSemanticStage() {
+    semanticStageEntered.value = true
+  }
+
+  function wizardStep(): 'upload' | 'entity_scan' | 'semantic' | 'confirm' | 'finish' {
     const phase = wizardPhase()
-    if (phase === 'upload') return 'upload'
-    if (phase === 'scan-draft' || phase === 'scanning') return 'scan'
+    if (phase === 'upload' || phase === 'scan-draft') return 'upload'
+    if (phase === 'scanning' || phase === 'entity-scanned') return 'entity_scan'
+    if (phase === 'semantic-idle' || phase === 'semantic-scanning' || phase === 'semantic-review') {
+      return 'semantic'
+    }
     if (phase === 'confirm-detail') return 'confirm'
-    return 'done'
+    return 'finish'
   }
 
   function openConclusionView() {
@@ -304,7 +454,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function rehydrate(jobId: number, text: string) {
     return readJson<{ text: string; resolved: string[]; unresolved: string[] }>(
-      await fetch(`${API}/jobs/${jobId}/rehydrate`, {
+      await deidFetch(`${API}/jobs/${jobId}/rehydrate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
@@ -313,15 +463,15 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   async function fetchJobSnapshot(jobId: number) {
-    return readJson<Record<string, unknown>>(await fetch(`${API}/jobs/${jobId}`))
+    return readJson<Record<string, unknown>>(await deidFetch(`${API}/jobs/${jobId}`))
   }
 
   async function loadEntitiesSnapshot(jobId: number) {
-    return readJson<Record<string, unknown>[]>(await fetch(`${API}/jobs/${jobId}/entities`))
+    return readJson<Record<string, unknown>[]>(await deidFetch(`${API}/jobs/${jobId}/entities`))
   }
 
   async function fetchPreviewSnapshot(jobId: number) {
-    const r = await fetch(`${API}/jobs/${jobId}/preview`, { method: 'POST' })
+    const r = await deidFetch(`${API}/jobs/${jobId}/preview`, { method: 'POST' })
     if (!r.ok) return []
     const data = await readJson<{ previews?: { before: string; after: string }[] }>(r)
     return data.previews ?? []
@@ -342,7 +492,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function fetchWorkerStatus() {
     try {
-      const r = await fetch(`${API}/worker/status`)
+      const r = await deidFetch(`${API}/worker/status`)
       if (r.ok) {
         const prev = workerStatus.value.online
         workerStatus.value = await readJson(r)
@@ -371,7 +521,7 @@ export const useDeidStore = defineStore('deid', () => {
     jobsError.value = null
     jobsLoading.value = true
     try {
-      const r = await fetch(`${API}/jobs`)
+      const r = await deidFetch(`${API}/jobs`)
       jobs.value = await readJson(r)
     } catch (e) {
       jobsError.value = e instanceof Error ? e.message : '加载任务列表失败'
@@ -387,7 +537,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function fetchQueueStatus() {
     try {
-      const r = await fetch(`${API}/queue/status`)
+      const r = await deidFetch(`${API}/queue/status`)
       if (r.ok) {
         queueStatus.value = await readJson(r)
       }
@@ -397,15 +547,23 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   async function fetchJob(jobId: number) {
-    const job = await readJson<Record<string, unknown>>(await fetch(`${API}/jobs/${jobId}`))
+    const job = await readJson<Record<string, unknown>>(await deidFetch(`${API}/jobs/${jobId}`))
     currentJob.value = job
     const progress = job.progress as typeof scanProgress.value
     if (progress) scanProgress.value = progress
     return job
   }
 
+  async function fetchWorkerCalls(jobId: number) {
+    const data = await readJson<{ calls?: Record<string, unknown>[] }>(
+      await deidFetch(`${API}/jobs/${jobId}/worker-calls`),
+    )
+    workerCalls.value = data.calls ?? []
+    return workerCalls.value
+  }
+
   async function loadEntities(jobId: number) {
-    const r = await fetch(`${API}/jobs/${jobId}/entities`)
+    const r = await deidFetch(`${API}/jobs/${jobId}/entities`)
     entities.value = await readJson(r)
     return entities.value
   }
@@ -419,11 +577,14 @@ export const useDeidStore = defineStore('deid', () => {
     await fetchJob(incomplete.id)
     const status = incomplete.status
 
-    if (status === 'scanned' || status === 'confirmed') {
+    if (status === 'semantic_review' || status === 'semantic_scanning') {
       await loadEntities(incomplete.id)
-      if (needsConclusionStep(currentJob.value)) {
+      await fetchSemanticRisks(incomplete.id)
+    } else if (status === 'scanned' || status === 'confirmed') {
+      await loadEntities(incomplete.id)
+      if ((currentJob.value as { semantic_skipped?: boolean })?.semantic_skipped) {
         openConclusionView()
-      } else {
+      } else if (!needsConclusionStep(currentJob.value)) {
         await autoRunAfterScan(incomplete.id)
       }
     } else if (status === 'scanning' || status === 'queued') {
@@ -453,12 +614,18 @@ export const useDeidStore = defineStore('deid', () => {
       }
       return
     }
+    if (status === 'semantic_review' || status === 'semantic_scanning') {
+      await fetchJob(id)
+      await loadEntities(id)
+      await fetchSemanticRisks(id)
+      return
+    }
     if (status === 'scanned' || status === 'confirmed') {
       await fetchJob(id)
       await loadEntities(id)
-      if (needsConclusionStep(currentJob.value)) {
+      if ((currentJob.value as { semantic_skipped?: boolean })?.semantic_skipped) {
         openConclusionView()
-      } else {
+      } else if (!needsConclusionStep(currentJob.value)) {
         await autoRunAfterScan(id)
       }
       return
@@ -499,7 +666,7 @@ export const useDeidStore = defineStore('deid', () => {
         fd.append('prompt_extra', opts.promptExtra.trim())
       }
       fd.append('use_worker', opts?.useWorker !== false ? 'true' : 'false')
-      const r = await fetch(`${API}/jobs`, { method: 'POST', body: fd })
+      const r = await deidFetch(`${API}/jobs`, { method: 'POST', body: fd })
       currentJob.value = await readJson(r)
       entityDirty.value = false
       showConclusionView.value = false
@@ -519,6 +686,8 @@ export const useDeidStore = defineStore('deid', () => {
   function beginScan(jobId: number) {
     error.value = null
     resetScanLive()
+    semanticStageEntered.value = false
+    scanSnapshotEntities.value = []
     scanProgress.value = { phase: 'starting', percent: 0, message: '正在提交扫描…' }
     connectScanStream(jobId)
     if (currentJob.value) {
@@ -528,7 +697,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function startScan(jobId: number) {
     const data = await readJson<{ status: string; queue_position?: number }>(
-      await fetch(`${API}/jobs/${jobId}/start`, { method: 'POST' }),
+      await deidFetch(`${API}/jobs/${jobId}/start`, { method: 'POST' }),
     )
     await fetchJob(jobId)
     await fetchQueueStatus()
@@ -572,9 +741,8 @@ export const useDeidStore = defineStore('deid', () => {
           await loadEntities(jobId)
           disconnectScanStream()
           scanProgress.value = null
-          if (needsConclusionStep(job)) {
-            openConclusionView()
-          } else {
+          scanSnapshotEntities.value = []
+          if (!needsConclusionStep(job)) {
             await autoRunAfterScan(jobId)
           }
           return entities.value
@@ -584,9 +752,7 @@ export const useDeidStore = defineStore('deid', () => {
             await loadEntities(jobId)
             disconnectScanStream()
             scanProgress.value = null
-            if (needsConclusionStep(job)) {
-              openConclusionView()
-            } else {
+            if (!needsConclusionStep(job)) {
               await autoRunAfterScan(jobId)
             }
             return entities.value
@@ -605,7 +771,7 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   async function fetchPreview(jobId: number) {
-    const r = await fetch(`${API}/jobs/${jobId}/preview`, { method: 'POST' })
+    const r = await deidFetch(`${API}/jobs/${jobId}/preview`, { method: 'POST' })
     if (r.ok) {
       const data = await readJson<{ previews?: { before: string; after: string }[] }>(r)
       previews.value = data.previews ?? []
@@ -614,7 +780,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function addManual(jobId: number, body: Record<string, unknown>) {
     entities.value = await readJson(
-      await fetch(`${API}/jobs/${jobId}/entities`, {
+      await deidFetch(`${API}/jobs/${jobId}/entities`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -625,14 +791,14 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function deleteEntity(jobId: number, entityId: number) {
     entities.value = await readJson(
-      await fetch(`${API}/jobs/${jobId}/entities/${entityId}`, { method: 'DELETE' }),
+      await deidFetch(`${API}/jobs/${jobId}/entities/${entityId}`, { method: 'DELETE' }),
     )
     entityDirty.value = true
   }
 
   async function patchEntity(jobId: number, entityId: number, body: Record<string, unknown>) {
     entities.value = await readJson(
-      await fetch(`${API}/jobs/${jobId}/entities/${entityId}`, {
+      await deidFetch(`${API}/jobs/${jobId}/entities/${entityId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -652,13 +818,17 @@ export const useDeidStore = defineStore('deid', () => {
     showEntitiesPanel.value = false
     showRehydratePanel.value = false
     if (currentJob.value) {
-      currentJob.value = { ...currentJob.value, status: 'running' }
+      currentJob.value = { ...currentJob.value, status: 'finishing' }
     }
     try {
-      const r = await fetch(`${API}/jobs/${jobId}/run`, {
+      const r = await deidFetch(`${API}/jobs/${jobId}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entity_ids: entityIds, remember_ids: rememberIds }),
+        body: JSON.stringify({
+          entity_ids: entityIds,
+          remember_ids: rememberIds,
+          semantic_selection: semanticSelection.value,
+        }),
       })
       const data = await readJson<Record<string, unknown>>(r)
       if (currentJob.value) {
@@ -687,7 +857,7 @@ export const useDeidStore = defineStore('deid', () => {
     loadingMessage.value = '正在重新脱敏…'
     error.value = null
     try {
-      const r = await fetch(`${API}/jobs/${jobId}/rerun`, {
+      const r = await deidFetch(`${API}/jobs/${jobId}/rerun`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ entity_ids: entityIds, remember_ids: rememberIds }),
@@ -712,7 +882,7 @@ export const useDeidStore = defineStore('deid', () => {
   }
 
   async function deleteJob(jobId: number) {
-    await fetch(`${API}/jobs/${jobId}`, { method: 'DELETE' })
+    await readJson(await deidFetch(`${API}/jobs/${jobId}`, { method: 'DELETE' }))
     if ((currentJob.value as { id?: number } | null)?.id === jobId) {
       await newTask()
     }
@@ -722,18 +892,373 @@ export const useDeidStore = defineStore('deid', () => {
   function exportUrl(jobId: number, overrideAck: boolean, reason?: string) {
     const q = new URLSearchParams({ override_ack: String(overrideAck) })
     if (reason) q.set('override_reason', reason)
+    const token = getDeidAccessToken()
+    if (token) q.set('access_token', token)
     return `${API}/jobs/${jobId}/export?${q}`
+  }
+
+  function patchDeepRisk(riskId: string, patch: Record<string, unknown>) {
+    deepRisks.value = deepRisks.value.map((r) =>
+      r.risk_id === riskId ? { ...r, ...patch } : r,
+    )
+  }
+
+  function patchSemanticRisk(riskId: string, patch: Record<string, unknown>) {
+    semanticRisks.value = semanticRisks.value.map((r) =>
+      r.risk_id === riskId ? { ...r, ...patch } : r,
+    )
+  }
+
+  function saveSemanticSelection() {
+    semanticSelection.value = semanticRisks.value.map((r) => ({
+      risk_id: r.risk_id,
+      enabled: r.enabled !== false,
+      original: r.original,
+      rewritten: (r.rewritten as string) || (r.suggested_rewrite as string) || undefined,
+    }))
+  }
+
+  function proceedToConfirm() {
+    saveSemanticSelection()
+    openConclusionView()
+  }
+
+  async function fetchSemanticRisks(jobId: number) {
+    const data = await readJson<{ risks: Record<string, unknown>[] }>(
+      await deidFetch(`${API}/jobs/${jobId}/semantic/risks`),
+    )
+    semanticRisks.value = data.risks ?? []
+    return semanticRisks.value
+  }
+
+  async function semanticStart(jobId: number) {
+    semanticLoading.value = true
+    error.value = null
+    scanSession.value = 'semantic'
+    resetScanLive()
+    scanProgress.value = { phase: 'semantic_detect', percent: 8, message: '正在提交语义扫描…' }
+    connectScanStream(jobId, { fresh: true, reset: false })
+    if (currentJob.value) {
+      currentJob.value = { ...currentJob.value, status: 'semantic_scanning' }
+    }
+    try {
+      const data = await readJson<{ risks: Record<string, unknown>[]; status: string }>(
+        await deidFetch(`${API}/jobs/${jobId}/semantic/start`, { method: 'POST' }),
+      )
+      semanticRisks.value = data.risks ?? []
+      if (currentJob.value) {
+        currentJob.value = { ...currentJob.value, status: data.status }
+      }
+      const count = data.risks?.length ?? 0
+      if (String(scanProgress.value?.phase || '') !== 'semantic_review') {
+        scanProgress.value = {
+          phase: 'semantic_review',
+          percent: 100,
+          message: count > 0 ? `发现 ${count} 条语义风险` : '未发现需改写的语义指纹',
+        }
+      }
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '语义扫描失败'
+      scanProgress.value = {
+        phase: 'error',
+        percent: scanProgress.value?.percent ?? 0,
+        message: error.value,
+      }
+      throw e
+    } finally {
+      semanticLoading.value = false
+      disconnectScanStream()
+      window.setTimeout(() => {
+        scanSession.value = null
+        if (String(scanProgress.value?.phase || '').startsWith('semantic')) {
+          scanProgress.value = null
+        }
+      }, 3500)
+    }
+  }
+
+  async function semanticSuggestAll(jobId: number) {
+    semanticLoading.value = true
+    error.value = null
+    scanSession.value = 'semantic'
+    resetScanLive()
+    scanProgress.value = { phase: 'semantic_suggest', percent: 10, message: '正在生成改写…' }
+    connectScanStream(jobId, { fresh: true, reset: false })
+    if (currentJob.value) {
+      currentJob.value = { ...currentJob.value, status: 'semantic_scanning' }
+    }
+    try {
+      const data = await readJson<{ risks: Record<string, unknown>[]; status: string }>(
+        await deidFetch(`${API}/jobs/${jobId}/semantic/suggest-all`, { method: 'POST' }),
+      )
+      semanticRisks.value = data.risks ?? semanticRisks.value
+      if (currentJob.value) {
+        currentJob.value = { ...currentJob.value, status: data.status }
+      }
+      const filled = (data.risks ?? []).filter(
+        (r) => (r as { suggested_rewrite?: string; rewritten?: string }).suggested_rewrite
+          || (r as { rewritten?: string }).rewritten,
+      ).length
+      scanProgress.value = {
+        phase: 'semantic_review',
+        percent: 100,
+        message: `已生成 ${filled} 条改写建议`,
+      }
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '改写生成失败'
+      scanProgress.value = {
+        phase: 'error',
+        percent: scanProgress.value?.percent ?? 0,
+        message: error.value,
+      }
+      throw e
+    } finally {
+      semanticLoading.value = false
+      disconnectScanStream()
+      window.setTimeout(() => {
+        scanSession.value = null
+        if (String(scanProgress.value?.phase || '').startsWith('semantic')) {
+          scanProgress.value = null
+        }
+      }, 2500)
+    }
+  }
+
+  async function semanticSkip(jobId: number) {
+    const data = await readJson<{ semantic_skipped: boolean }>(
+      await deidFetch(`${API}/jobs/${jobId}/semantic/skip`, { method: 'POST' }),
+    )
+    if (currentJob.value) {
+      currentJob.value = {
+        ...currentJob.value,
+        semantic_skipped: data.semantic_skipped,
+      }
+    }
+    semanticRisks.value = []
+    semanticSelection.value = []
+    return data
+  }
+
+  async function semanticSuggest(jobId: number, riskId: string) {
+    const data = await readJson<{ risk_id: string; suggested_rewrite: string | null }>(
+      await deidFetch(`${API}/jobs/${jobId}/semantic/suggest/${encodeURIComponent(riskId)}`, {
+        method: 'POST',
+      }),
+    )
+    if (data.suggested_rewrite) {
+      patchSemanticRisk(riskId, { suggested_rewrite: data.suggested_rewrite })
+    }
+    return data
+  }
+
+  async function reRunScan(jobId: number) {
+    reScanning.value = true
+    error.value = null
+    scanSession.value = 'rescan'
+    rescanGateOpen.value = false
+    resetScanLive()
+    scanProgress.value = { phase: 're_discover', percent: 5, message: '正在提交再识别…' }
+    connectScanStream(jobId, { fresh: true, reset: false })
+    if (currentJob.value) {
+      currentJob.value = { ...currentJob.value, status: 're_scanning' }
+    }
+    try {
+      const data = await readJson<{
+        entities: Record<string, unknown>[]
+        re_run_count: number
+        delta: number
+        no_change: boolean
+        experience_eligible: boolean
+      }>(await deidFetch(`${API}/jobs/${jobId}/scan/re-run`, { method: 'POST' }))
+      entities.value = data.entities ?? entities.value
+      lastRescanResult.value = {
+        run: data.re_run_count,
+        delta: data.delta,
+        noChange: data.no_change,
+      }
+      if (currentJob.value) {
+        currentJob.value = {
+          ...currentJob.value,
+          status: 'scanned',
+          re_run_count: data.re_run_count,
+          experience_eligible: data.experience_eligible,
+        }
+      }
+      if (scanProgress.value?.phase !== 'done') {
+        scanProgress.value = {
+          phase: 'done',
+          percent: 100,
+          message: data.no_change
+            ? `第 ${data.re_run_count} 次再识别完成，本轮无新增`
+            : `第 ${data.re_run_count} 次再识别完成，新增 ${data.delta} 个`,
+        }
+      }
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '再识别失败'
+      scanProgress.value = {
+        phase: 'error',
+        percent: scanProgress.value?.percent ?? 0,
+        message: error.value,
+      }
+      throw e
+    } finally {
+      reScanning.value = false
+      disconnectScanStream()
+      window.setTimeout(() => {
+        scanSession.value = null
+        rescanGateOpen.value = false
+        if (scanProgress.value?.phase === 'done' || scanProgress.value?.phase === 'error') {
+          scanProgress.value = null
+        }
+      }, 4500)
+    }
+  }
+
+  async function generateExperience(jobId: number) {
+    return readJson<{ text: string | null; message?: string }>(
+      await deidFetch(`${API}/jobs/${jobId}/scan/experience`, { method: 'POST' }),
+    )
+  }
+
+  async function confirmExperience(jobId: number, text: string) {
+    return readJson(
+      await deidFetch(`${API}/jobs/${jobId}/scan/experience/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }),
+    )
+  }
+
+  async function fetchGlobalExperience() {
+    globalExperience.value = await readJson<Record<string, unknown>[]>(
+      await deidFetch(`${API}/settings/global-experience`),
+    )
+    return globalExperience.value
+  }
+
+  async function createGlobalExperience(text: string) {
+    const row = await readJson<Record<string, unknown>>(
+      await deidFetch(`${API}/settings/global-experience`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }),
+    )
+    await fetchGlobalExperience()
+    return row
+  }
+
+  async function updateGlobalExperience(id: number, text: string) {
+    const row = await readJson<Record<string, unknown>>(
+      await deidFetch(`${API}/settings/global-experience/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }),
+    )
+    await fetchGlobalExperience()
+    return row
+  }
+
+  async function deleteGlobalExperience(id: number) {
+    await readJson(await deidFetch(`${API}/settings/global-experience/${id}`, { method: 'DELETE' }))
+    await fetchGlobalExperience()
+  }
+
+  async function fetchDeepRisks(jobId: number) {
+    const data = await readJson<{ risks: Record<string, unknown>[] }>(
+      await deidFetch(`${API}/jobs/${jobId}/deep/risks`),
+    )
+    deepRisks.value = data.risks ?? []
+    return deepRisks.value
+  }
+
+  async function deepScan(jobId: number) {
+    deepLoading.value = true
+    error.value = null
+    try {
+      const data = await readJson<{ risks: Record<string, unknown>[]; status: string }>(
+        await deidFetch(`${API}/jobs/${jobId}/deep/scan`, { method: 'POST' }),
+      )
+      deepRisks.value = data.risks ?? []
+      showDeepReview.value = true
+      if (currentJob.value) {
+        currentJob.value = { ...currentJob.value, status: data.status }
+      }
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '深度扫描失败'
+      throw e
+    } finally {
+      deepLoading.value = false
+    }
+  }
+
+  async function deepSuggest(jobId: number, riskId: string) {
+    const data = await readJson<{ risk_id: string; suggested_rewrite: string | null }>(
+      await deidFetch(`${API}/jobs/${jobId}/deep/suggest/${encodeURIComponent(riskId)}`, {
+        method: 'POST',
+      }),
+    )
+    if (data.suggested_rewrite) {
+      patchDeepRisk(riskId, { suggested_rewrite: data.suggested_rewrite })
+    }
+    return data
+  }
+
+  async function deepApply(jobId: number) {
+    deepLoading.value = true
+    error.value = null
+    try {
+      const items = deepRisks.value.map((r) => ({
+        risk_id: r.risk_id as string,
+        enabled: r.enabled !== false,
+        original: r.original as string,
+        rewritten: (r.rewritten as string) || (r.suggested_rewrite as string) || undefined,
+      }))
+      const data = await readJson<Record<string, unknown>>(
+        await deidFetch(`${API}/jobs/${jobId}/deep/apply`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items }),
+        }),
+      )
+      showDeepReview.value = false
+      if (currentJob.value) {
+        currentJob.value = {
+          ...currentJob.value,
+          status: data.status as string,
+          verification: data.verification,
+        }
+      }
+      await fetchJob(jobId)
+      await fetchPreview(jobId)
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '深度应用失败'
+      throw e
+    } finally {
+      deepLoading.value = false
+    }
+  }
+
+  function closeDeepReview() {
+    showDeepReview.value = false
   }
 
   async function fetchLibrary(q?: string) {
     const url = q ? `${API}/entities?q=${encodeURIComponent(q)}` : `${API}/entities`
-    libraryEntities.value = await readJson(await fetch(url))
+    libraryEntities.value = await readJson(await deidFetch(url))
   }
 
   async function fetchEntityTypes() {
     try {
       const data = await readJson<{ code: string; label: string; placeholder_prefix: string }[]>(
-        await fetch(`${API}/entity-types`),
+        await deidFetch(`${API}/entity-types`),
       )
       entityTypes.value = data.length ? data : [...DEFAULT_ENTITY_TYPES]
     } catch {
@@ -747,7 +1272,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function createEntityType(body: { code: string; label: string; placeholder_prefix: string }) {
     await readJson(
-      await fetch(`${API}/entity-types`, {
+      await deidFetch(`${API}/entity-types`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -761,7 +1286,7 @@ export const useDeidStore = defineStore('deid', () => {
     body: { label?: string; placeholder_prefix?: string },
   ) {
     await readJson(
-      await fetch(`${API}/entity-types/${encodeURIComponent(code)}`, {
+      await deidFetch(`${API}/entity-types/${encodeURIComponent(code)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -772,7 +1297,7 @@ export const useDeidStore = defineStore('deid', () => {
 
   async function deleteEntityType(code: string) {
     await readJson(
-      await fetch(`${API}/entity-types/${encodeURIComponent(code)}`, { method: 'DELETE' }),
+      await deidFetch(`${API}/entity-types/${encodeURIComponent(code)}`, { method: 'DELETE' }),
     )
     await fetchEntityTypes()
   }
@@ -843,5 +1368,42 @@ export const useDeidStore = defineStore('deid', () => {
     updateEntityType,
     deleteEntityType,
     DEFAULT_ENTITY_TYPES,
+    showDeepReview,
+    deepRisks,
+    deepLoading,
+    deepScan,
+    fetchDeepRisks,
+    deepSuggest,
+    deepApply,
+    patchDeepRisk,
+    closeDeepReview,
+    semanticRisks,
+    semanticLoading,
+    semanticSelection,
+    scanSnapshotEntities,
+    semanticStageEntered,
+    reScanning,
+    scanSession,
+    lastRescanResult,
+    globalExperience,
+    entityScanMode,
+    enterSemanticStage,
+    patchSemanticRisk,
+    saveSemanticSelection,
+    proceedToConfirm,
+    fetchSemanticRisks,
+    semanticStart,
+    semanticSuggestAll,
+    semanticSkip,
+    semanticSuggest,
+    reRunScan,
+    generateExperience,
+    confirmExperience,
+    fetchGlobalExperience,
+    createGlobalExperience,
+    updateGlobalExperience,
+    deleteGlobalExperience,
+    workerCalls,
+    fetchWorkerCalls,
   }
 })

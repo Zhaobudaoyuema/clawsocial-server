@@ -2,7 +2,6 @@
 import { computed, ref } from 'vue'
 import DeidBadge from './DeidBadge.vue'
 import DeidEmptyState from './DeidEmptyState.vue'
-import DeidModal from './DeidModal.vue'
 import { useDeidStore } from '../../stores/deid'
 
 const props = defineProps<{
@@ -22,14 +21,25 @@ const emit = defineEmits<{
 
 const store = useDeidStore()
 
-const deleteModalOpen = ref(false)
 const pendingDelete = ref<Record<string, unknown> | null>(null)
+const deleteError = ref<string | null>(null)
 
-const pendingDeleteName = computed(() =>
-  pendingDelete.value
-    ? (pendingDelete.value as { original_filename: string }).original_filename
-    : '',
-)
+function isPendingDelete(job: Record<string, unknown>) {
+  return pendingDelete.value != null && (pendingDelete.value as { id: number }).id === job.id
+}
+
+function cancelDelete() {
+  pendingDelete.value = null
+  deleteError.value = null
+}
+
+const pendingDeleteHint = computed(() => {
+  const status = (pendingDelete.value as { status?: string } | null)?.status
+  if (status === 'done' || status === 'archived') {
+    return '请确认已下载脱敏文档'
+  }
+  return ''
+})
 
 const statusMap: Record<string, { variant: 'draft' | 'scanned' | 'done' | 'failed' | 'running'; label: string }> = {
   draft: { variant: 'draft', label: '草稿' },
@@ -55,11 +65,6 @@ function ttlTitle(h: number | null | undefined) {
   if (h == null) return '完成后 8 小时自动清理，请及时下载'
   return `完成后约 ${Math.round(h)} 小时后自动清理，请及时下载`
 }
-
-const pendingDeleteTtl = computed(() => {
-  const h = (pendingDelete.value as { hours_until_cleanup?: number } | null)?.hours_until_cleanup
-  return ttlTitle(h)
-})
 
 function isActive(job: Record<string, unknown>) {
   if (props.activeJobId != null) return props.activeJobId === job.id
@@ -88,18 +93,23 @@ function onOpenRehydrate() {
 
 function onDelete(job: Record<string, unknown>, e: Event) {
   e.stopPropagation()
+  if (isPendingDelete(job)) return
+  deleteError.value = null
   pendingDelete.value = job
-  deleteModalOpen.value = true
 }
 
 async function confirmDelete() {
   if (!pendingDelete.value) return
+  deleteError.value = null
   const id = (pendingDelete.value as { id: number }).id
-  await store.deleteJob(id)
-  emit('deleted', id)
-  emit('closeDrawer')
-  deleteModalOpen.value = false
-  pendingDelete.value = null
+  try {
+    await store.deleteJob(id)
+    emit('deleted', id)
+    emit('closeDrawer')
+    pendingDelete.value = null
+  } catch (e) {
+    deleteError.value = e instanceof Error ? e.message : '删除失败，请稍后重试'
+  }
 }
 </script>
 
@@ -114,34 +124,51 @@ async function confirmDelete() {
         </li>
       </ul>
       <ul v-else-if="store.jobs.length" class="job-list">
-        <li v-for="job in store.jobs" :key="(job as { id: number }).id" class="job-item">
-          <button
-            type="button"
-            class="job-row"
-            :class="{ active: isActive(job) && !entitiesActive && !rehydrateActive }"
-            @click="onSelect(job)"
-          >
-            <span class="fname">{{ (job as { original_filename: string }).original_filename }}</span>
-            <span class="meta">
-              <DeidBadge v-bind="statusMap[(job as { status: string }).status] || statusMap.draft" />
-              <span
-                v-if="(job as { hours_until_cleanup?: number }).hours_until_cleanup != null"
-                class="ttl"
-                :title="ttlTitle((job as { hours_until_cleanup: number }).hours_until_cleanup)"
-              >
-                {{ fmtHours((job as { hours_until_cleanup: number }).hours_until_cleanup) }}
+        <li
+          v-for="job in store.jobs"
+          :key="(job as { id: number }).id"
+          class="job-item"
+          :class="{ 'job-item--confirm': isPendingDelete(job) }"
+        >
+          <div v-if="isPendingDelete(job)" class="job-confirm">
+            <p class="job-confirm__title">删除此任务？</p>
+            <p class="job-confirm__name">{{ (job as { original_filename: string }).original_filename }}</p>
+            <p v-if="pendingDeleteHint" class="job-confirm__hint">{{ pendingDeleteHint }}</p>
+            <p v-if="deleteError" class="job-confirm__error">{{ deleteError }}</p>
+            <div class="job-confirm__actions">
+              <button type="button" class="deid-btn deid-btn--ghost" @click="cancelDelete">取消</button>
+              <button type="button" class="deid-btn deid-btn--danger-solid" @click="confirmDelete">删除</button>
+            </div>
+          </div>
+          <template v-else>
+            <button
+              type="button"
+              class="job-row"
+              :class="{ active: isActive(job) && !entitiesActive && !rehydrateActive }"
+              @click="onSelect(job)"
+            >
+              <span class="fname">{{ (job as { original_filename: string }).original_filename }}</span>
+              <span class="meta">
+                <DeidBadge v-bind="statusMap[(job as { status: string }).status] || statusMap.draft" />
+                <span
+                  v-if="(job as { hours_until_cleanup?: number }).hours_until_cleanup != null"
+                  class="ttl"
+                  :title="ttlTitle((job as { hours_until_cleanup: number }).hours_until_cleanup)"
+                >
+                  {{ fmtHours((job as { hours_until_cleanup: number }).hours_until_cleanup) }}
+                </span>
               </span>
-            </span>
-          </button>
-          <button
-            type="button"
-            class="job-delete"
-            title="删除任务"
-            aria-label="删除任务"
-            @click="onDelete(job, $event)"
-          >
-            ×
-          </button>
+            </button>
+            <button
+              type="button"
+              class="job-delete"
+              title="删除任务"
+              aria-label="删除任务"
+              @click="onDelete(job, $event)"
+            >
+              ×
+            </button>
+          </template>
         </li>
       </ul>
       <DeidEmptyState
@@ -168,23 +195,12 @@ async function confirmDelete() {
         :class="{ active: entitiesActive }"
         @click="onOpenEntities"
       >
-        我的实体
+        词库
       </button>
       <button type="button" class="foot-btn primary" @click="onNewTask">
         + 新建任务
       </button>
     </div>
-
-    <DeidModal v-model:open="deleteModalOpen" title="删除任务？" danger persistent>
-      <p>
-        确定删除「<strong>{{ pendingDeleteName }}</strong>」？此操作不可恢复。
-      </p>
-      <p class="delete-ttl">{{ pendingDeleteTtl }}</p>
-      <template #footer>
-        <button type="button" class="deid-btn" @click="deleteModalOpen = false">取消</button>
-        <button type="button" class="deid-btn deid-btn--danger" @click="confirmDelete">删除</button>
-      </template>
-    </DeidModal>
   </aside>
 </template>
 
@@ -338,10 +354,47 @@ async function confirmDelete() {
   border-color: var(--deid-primary-hover);
   color: #fff;
 }
-.delete-ttl {
-  margin: 0.75rem 0 0;
+.job-item--confirm {
+  display: block;
+}
+.job-confirm {
+  padding: 0.75rem 0.85rem;
+  border-radius: var(--deid-radius-sm);
+  background: var(--deid-danger-bg);
+  border: 1px solid var(--deid-danger-border);
+}
+.job-confirm__title {
+  margin: 0 0 0.35rem;
   font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--deid-danger);
+}
+.job-confirm__name {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--deid-ink-secondary);
+  word-break: break-word;
+}
+.job-confirm__hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
   color: var(--deid-ink-muted);
+}
+.job-confirm__error {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  color: var(--deid-danger);
+}
+.job-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+.job-confirm__actions .deid-btn {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 0.875rem;
 }
 .job-skeleton {
   pointer-events: none;

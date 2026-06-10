@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { deidFetch } from '../utils/deidAccess'
 
 const API = '/api/deid/chat'
 
@@ -24,7 +25,7 @@ export const useDeidChatStore = defineStore('deidChat', () => {
   const chatJobs = ref<Record<string, unknown>[]>([])
 
   async function fetchChatJobs() {
-    chatJobs.value = await readJson(await fetch(`${API}/jobs`))
+    chatJobs.value = await readJson(await deidFetch(`${API}/jobs`))
   }
 
   async function startSession(mode: 'none' | 'job' | 'upload', opts?: { jobId?: number; file?: File }) {
@@ -39,7 +40,7 @@ export const useDeidChatStore = defineStore('deidChat', () => {
       fd.append('file', opts.file)
     }
     const data = await readJson<{ session_id: string; doc_label?: string | null }>(
-      await fetch(`${API}/sessions`, { method: 'POST', body: fd }),
+      await deidFetch(`${API}/sessions`, { method: 'POST', body: fd }),
     )
     sessionId.value = data.session_id
     docLabel.value = data.doc_label ?? null
@@ -56,7 +57,7 @@ export const useDeidChatStore = defineStore('deidChat', () => {
     messages.value.push({ role: 'assistant', content: '', streaming: true })
 
     try {
-      const r = await fetch(`${API}/sessions/${sessionId.value}/messages`, {
+      const r = await deidFetch(`${API}/sessions/${sessionId.value}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: userText }),

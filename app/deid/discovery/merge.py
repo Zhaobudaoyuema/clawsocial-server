@@ -10,7 +10,8 @@ SOURCE_PRIORITY = {
     "manual": 0,
     "preset": 1,
     "rule": 2,
-    "llm": 3,
+    "leak_verify": 3,
+    "llm": 4,
 }
 
 # Generic fragments must not trigger cross-entity merge (enrich may add these).

@@ -112,11 +112,11 @@ async def lifespan(app: FastAPI):
 
     from app.database import SessionLocal
     from app.deid.entity_types import ensure_default_entity_types
-    from app.deid.settings_store import ensure_default_scan_prompt
+    from app.deid.settings_store import ensure_flow_prompts
 
     db = SessionLocal()
     try:
-        ensure_default_scan_prompt(db)
+        ensure_flow_prompts(db)
         ensure_default_entity_types(db)
     finally:
         db.close()
@@ -201,6 +201,26 @@ if os.path.isdir(_world_assets_dir):
         StaticFiles(directory=_world_assets_dir, html=False),
         name="world_website_assets",
     )
+
+_DEID_ACCESS_EXEMPT = {"/api/deid/access/verify"}
+
+
+@app.middleware("http")
+async def deid_access_middleware(request: Request, call_next):
+    if os.getenv("TESTING"):
+        return await call_next(request)
+    path = request.scope.get("path", "").split("?")[0]
+    if path.startswith("/api/deid") and not path.startswith("/api/deid/dev"):
+        if path not in _DEID_ACCESS_EXEMPT:
+            from app.deid.access_token import validate_deid_access_session
+
+            token = request.headers.get("X-Deid-Access-Token") or request.query_params.get(
+                "access_token"
+            )
+            if not validate_deid_access_session(token):
+                return plain_text("错误 401：需要有效的访问口令", status_code=401)
+    return await call_next(request)
+
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):

@@ -5,6 +5,7 @@ import DeidBadge from './DeidBadge.vue'
 import DeidEmptyState from './DeidEmptyState.vue'
 import DeidStepper from './DeidStepper.vue'
 import DeidEntityTypeSelect from './DeidEntityTypeSelect.vue'
+import { semanticCatLabel } from './semanticCategories'
 
 const store = useDeidStore()
 const emit = defineEmits<{ confirmed: [] }>()
@@ -15,6 +16,7 @@ const adding = ref(false)
 const search = ref('')
 const sortByHits = ref(true)
 const showEntities = ref(false)
+const showSemantic = ref(false)
 const showManual = ref(false)
 const manualName = ref('')
 const manualType = ref('company')
@@ -28,6 +30,54 @@ const totalCount = computed(() => store.entities.length)
 const jobFilename = computed(
   () => (store.currentJob as { original_filename?: string } | null)?.original_filename || '',
 )
+
+const semanticStale = computed(
+  () => !!(store.currentJob as { semantic_stale?: boolean } | null)?.semantic_stale,
+)
+
+const semanticSkipped = computed(
+  () => !!(store.currentJob as { semantic_skipped?: boolean } | null)?.semantic_skipped,
+)
+
+const semanticRisks = computed(() => store.semanticRisks)
+
+const enabledSemanticRisks = computed(() => {
+  const base =
+    store.semanticSelection.length > 0 ? store.semanticSelection : store.semanticRisks
+  return base.filter((r) => (r as { enabled?: boolean }).enabled !== false)
+})
+
+const semanticTotalCount = computed(() => semanticRisks.value.length)
+
+const semanticEnabledCount = computed(() => enabledSemanticRisks.value.length)
+
+const semanticHasRewrite = computed(() =>
+  enabledSemanticRisks.value.filter((r) => {
+    const rw =
+      (r as { rewritten?: string }).rewritten ||
+      (r as { suggested_rewrite?: string }).suggested_rewrite
+    const orig = (r as { original?: string }).original
+    return rw && orig && rw !== orig
+  }).length,
+)
+
+const showSemanticSection = computed(
+  () => semanticSkipped.value || semanticTotalCount.value > 0 || store.semanticStageEntered,
+)
+
+function catLabel(code: unknown) {
+  return semanticCatLabel(code)
+}
+
+function riskOriginal(r: Record<string, unknown>) {
+  const t = String(r.original || '')
+  return t.length > 48 ? `${t.slice(0, 48)}…` : t
+}
+
+function riskRewrite(r: Record<string, unknown>) {
+  const t = String(r.rewritten || r.suggested_rewrite || '')
+  return t.length > 48 ? `${t.slice(0, 48)}…` : t
+}
 
 const allSelected = computed(() => {
   const ids = activeEntities.value.map((e) => entityId(e))
@@ -51,12 +101,13 @@ const totalHits = computed(() =>
 )
 
 const sourceCounts = computed(() => {
-  const counts = { llm: 0, remembered: 0, manual: 0 }
+  const counts = { llm: 0, remembered: 0, manual: 0, leak_verify: 0 }
   for (const e of activeEntities.value) {
     const src = (e as { source: string }).source
     if (src === 'llm') counts.llm++
     else if (src === 'remembered') counts.remembered++
     else if (src === 'manual') counts.manual++
+    else if (src === 'leak_verify') counts.leak_verify++
   }
   return counts
 })
@@ -90,6 +141,21 @@ const filteredEntities = computed(() => {
   }
   return list
 })
+
+watch(
+  jobId,
+  async (id) => {
+    if (!id || semanticSkipped.value) return
+    if (store.semanticRisks.length > 0) return
+    try {
+      await store.fetchSemanticRisks(id)
+      if (!store.semanticSelection.length) store.saveSemanticSelection()
+    } catch {
+      /* 语义扫描未做或不可用 */
+    }
+  },
+  { immediate: true },
+)
 
 watch(
   () => store.entities,
@@ -144,7 +210,7 @@ function sourceBadge(e: Record<string, unknown>) {
   const label = (e as { source_label?: string }).source_label
   if (src === 'manual') return { variant: 'manual' as const, label: label || '手动' }
   if (src === 'llm') return { variant: 'llm' as const, label: 'AI 识别' }
-  if (src === 'remembered') return { variant: 'preset' as const, label: label || '已记住' }
+  if (src === 'remembered') return { variant: 'preset' as const, label: label || '词库' }
   return { variant: 'preset' as const, label: label || src }
 }
 
@@ -209,8 +275,11 @@ async function onConfirm() {
     <main class="conclusion-main">
       <section class="approve-hero" aria-labelledby="approve-title">
         <div class="approve-hero__badge" aria-hidden="true">✓</div>
-        <h2 id="approve-title" class="approve-hero__title">扫描完成，可开始脱敏</h2>
+        <h2 id="approve-title" class="approve-hero__title">确认实体与语义选择，开始脱敏</h2>
         <p v-if="jobFilename" class="approve-hero__file">{{ jobFilename }}</p>
+        <p v-if="semanticStale" class="semantic-stale-warn" role="status">
+          实体选择已调整，建议返回重新进行语义扫描
+        </p>
 
         <DeidEmptyState
           v-if="!store.entities.length"
@@ -228,8 +297,23 @@ async function onConfirm() {
 
           <div class="approve-stats">
             <span v-if="sourceCounts.llm" class="approve-stat">AI 识别 {{ sourceCounts.llm }}</span>
-            <span v-if="sourceCounts.remembered" class="approve-stat">已记住 {{ sourceCounts.remembered }}</span>
+            <span v-if="sourceCounts.remembered" class="approve-stat">词库 {{ sourceCounts.remembered }}</span>
             <span v-if="sourceCounts.manual" class="approve-stat">手动 {{ sourceCounts.manual }}</span>
+            <span v-if="sourceCounts.leak_verify" class="approve-stat">验漏 {{ sourceCounts.leak_verify }}</span>
+          </div>
+
+          <div v-if="showSemanticSection" class="semantic-hero">
+            <p v-if="semanticSkipped" class="semantic-hero__summary semantic-hero__summary--muted">
+              已跳过语义扫描
+            </p>
+            <p v-else-if="semanticTotalCount === 0" class="semantic-hero__summary semantic-hero__summary--muted">
+              语义扫描未发现指纹
+            </p>
+            <p v-else class="semantic-hero__summary">
+              语义指纹 <strong>{{ semanticTotalCount }}</strong> 条 · 已启用
+              <strong>{{ semanticEnabledCount }}</strong> 条 · 将应用改写
+              <strong>{{ semanticHasRewrite }}</strong> 条
+            </p>
           </div>
 
           <button
@@ -241,9 +325,51 @@ async function onConfirm() {
             {{ confirmLabel }}
           </button>
           <p class="approve-hero__trust">
-            脱敏完成后将自动验证，确保敏感信息已清除，再提供下载
+            确认后将写入脱敏文档并做程序验漏（别名/元数据），不再调用 Worker 扫描
           </p>
         </template>
+      </section>
+
+      <section v-if="showSemanticSection && !semanticSkipped && semanticTotalCount > 0" class="entity-drawer semantic-drawer">
+        <button
+          type="button"
+          class="entity-drawer__toggle"
+          :aria-expanded="showSemantic"
+          @click="showSemantic = !showSemantic"
+        >
+          <span>{{ showSemantic ? '收起语义改写' : '查看语义改写条目' }}</span>
+          <span class="entity-drawer__count">{{ semanticEnabledCount }} / {{ semanticTotalCount }}</span>
+          <span class="entity-drawer__chevron" :class="{ open: showSemantic }" aria-hidden="true">›</span>
+        </button>
+        <div v-show="showSemantic" class="entity-drawer__body">
+          <p class="entity-drawer__hint">以下为语义扫描结果，启用项将在脱敏时写入文档。</p>
+          <div class="table-wrap deid-panel semantic-table-wrap">
+            <table class="entity-table semantic-table">
+              <thead>
+                <tr>
+                  <th scope="col">类别</th>
+                  <th scope="col">原文</th>
+                  <th scope="col">改写</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="r in semanticRisks"
+                  :key="String((r as { risk_id?: string }).risk_id)"
+                  :class="{ 'semantic-row--off': (r as { enabled?: boolean }).enabled === false }"
+                >
+                  <td class="semantic-cat">{{ catLabel((r as { category?: string }).category) }}</td>
+                  <td class="semantic-orig deid-mono" :title="String((r as { original?: string }).original || '')">
+                    {{ riskOriginal(r as Record<string, unknown>) }}
+                  </td>
+                  <td class="semantic-rew deid-mono" :title="String((r as { rewritten?: string }).rewritten || (r as { suggested_rewrite?: string }).suggested_rewrite || '')">
+                    {{ riskRewrite(r as Record<string, unknown>) || '—' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </section>
 
       <section v-if="store.entities.length" class="entity-drawer">
@@ -371,7 +497,12 @@ async function onConfirm() {
     </main>
 
     <footer class="conclusion-footer">
-      <span class="conclusion-footer__count">已选 {{ selectedCount }} 个实体</span>
+      <span class="conclusion-footer__count">
+        已选 {{ selectedCount }} 个实体
+        <template v-if="!semanticSkipped && semanticEnabledCount > 0">
+          · {{ semanticEnabledCount }} 条语义改写
+        </template>
+      </span>
       <button
         type="button"
         class="deid-btn deid-btn--primary deid-btn--lg"
@@ -451,6 +582,15 @@ async function onConfirm() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.semantic-stale-warn {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--deid-radius-sm);
+  font-size: 0.875rem;
+  background: rgba(180, 83, 9, 0.08);
+  border: 1px solid var(--deid-warning, #b45309);
+  color: var(--deid-warning, #b45309);
+}
 .approve-hero__summary {
   margin: 0 0 0.35rem;
   font-size: 0.9375rem;
@@ -483,6 +623,48 @@ async function onConfirm() {
   color: var(--deid-ink-secondary);
   background: var(--deid-surface-2);
   border: 1px solid var(--deid-border);
+}
+.semantic-hero {
+  width: 100%;
+  max-width: 28rem;
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: var(--deid-radius-sm);
+  background: rgba(37, 99, 235, 0.06);
+  border: 1px solid rgba(37, 99, 235, 0.15);
+}
+.semantic-hero__summary {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--deid-ink-secondary);
+  line-height: 1.5;
+}
+.semantic-hero__summary strong {
+  color: var(--deid-primary);
+  font-weight: 600;
+}
+.semantic-hero__summary--muted {
+  color: var(--deid-ink-muted);
+}
+.semantic-drawer {
+  margin-top: 0;
+}
+.semantic-table-wrap {
+  margin-top: 0.5rem;
+}
+.semantic-table .semantic-cat {
+  white-space: nowrap;
+  color: var(--deid-ink-muted);
+  font-size: 0.8125rem;
+}
+.semantic-table .semantic-orig,
+.semantic-table .semantic-rew {
+  font-size: 0.8125rem;
+  max-width: 12rem;
+  word-break: break-all;
+}
+.semantic-row--off {
+  opacity: 0.45;
 }
 .approve-cta {
   min-width: 220px;

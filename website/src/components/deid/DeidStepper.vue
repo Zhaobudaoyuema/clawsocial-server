@@ -1,26 +1,33 @@
 <script setup lang="ts">
-const props = defineProps<{
-  current: 'upload' | 'scan' | 'confirm' | 'done'
-  finished?: boolean
-  compact?: boolean
-  prominent?: boolean
-}>()
+export type WizardStepId = 'upload' | 'entity_scan' | 'semantic' | 'confirm' | 'finish'
+
+const props = withDefaults(
+  defineProps<{
+    current: WizardStepId
+    finished?: boolean
+    compact?: boolean
+    prominent?: boolean
+    embedded?: boolean
+  }>(),
+  { embedded: false },
+)
 
 const steps = [
   { id: 'upload' as const, label: '上传', short: '传' },
-  { id: 'scan' as const, label: '扫描', short: '扫' },
+  { id: 'entity_scan' as const, label: '实体扫描', short: '实' },
+  { id: 'semantic' as const, label: '语义扫描', short: '义' },
   { id: 'confirm' as const, label: '确认', short: '认' },
-  { id: 'done' as const, label: '完成', short: '完' },
+  { id: 'finish' as const, label: '完成', short: '完' },
 ]
 
-const order = ['upload', 'scan', 'confirm', 'done']
+const order: WizardStepId[] = ['upload', 'entity_scan', 'semantic', 'confirm', 'finish']
 
 function stepIndex(id: string) {
-  return order.indexOf(id)
+  return order.indexOf(id as WizardStepId)
 }
 
 function isDone(id: string) {
-  if (props.finished && id === 'done') return true
+  if (props.finished && id === 'finish') return true
   return stepIndex(id) < stepIndex(props.current)
 }
 
@@ -30,7 +37,7 @@ function isCurrent(id: string) {
 </script>
 
 <template>
-  <nav class="stepper" :class="{ compact, prominent }" aria-label="脱敏流程">
+  <nav class="stepper" :class="{ compact, prominent, embedded }" aria-label="脱敏流程">
     <ol class="stepper-list">
       <li
         v-for="(step, i) in steps"
@@ -51,6 +58,38 @@ function isCurrent(id: string) {
 </template>
 
 <style scoped>
+.stepper.embedded {
+  margin-bottom: 0;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--deid-border);
+}
+.stepper.embedded .dot {
+  width: 24px;
+  height: 24px;
+  font-size: 0.6875rem;
+}
+.stepper.embedded .label {
+  font-size: 0.8125rem;
+  margin-left: 0.4rem;
+}
+.stepper.embedded .line {
+  height: 2px;
+  margin: 0 0.5rem;
+  border-radius: 999px;
+}
+.stepper.embedded .step.current .label {
+  font-size: 0.8125rem;
+}
+@media (max-width: 640px) {
+  .stepper.embedded .label {
+    display: none;
+  }
+  .stepper.embedded .label-short {
+    display: inline;
+    margin-left: 0.35rem;
+    font-size: 0.75rem;
+  }
+}
 .stepper {
   margin-bottom: 2rem;
 }

@@ -117,6 +117,29 @@ class DeidJob(Base):
     use_worker: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     progress_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scan_entities_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deep_risks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deep_pairs_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    experience_lines_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    semantic_selection_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    semantic_entity_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gaps_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reflect_round_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    semantic_skipped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    initial_entities_snapshot_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_re_run_delta_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    re_run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    experience_eligible: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class DeidGlobalExperience(Base):
+    __tablename__ = "deid_global_experience"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_job_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("deid_jobs.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
 
 class DeidJobEntity(Base):
@@ -154,6 +177,31 @@ class DeidEntityMapping(Base):
     entity_type: Mapped[str] = mapped_column(String(32), nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     hit_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class DeidWorkerCall(Base):
+    """Audit log: one Mac Worker chat-completions request per row."""
+
+    __tablename__ = "deid_worker_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("deid_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    flow_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    chunk_total: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    user_message: Mapped[str] = mapped_column(Text, nullable=False)
+    response_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    parsed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    elapsed_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
 
 class DeidHitLog(Base):

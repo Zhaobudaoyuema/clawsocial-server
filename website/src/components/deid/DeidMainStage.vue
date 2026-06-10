@@ -2,7 +2,6 @@
 import { computed, ref, watch } from 'vue'
 import { useDeidStore } from '../../stores/deid'
 import DeidUploadCard from './DeidUploadCard.vue'
-import DeidScanLivePanel from './DeidScanLivePanel.vue'
 import DeidCompletionHero from './DeidCompletionHero.vue'
 import DeidReplaceSamples from './DeidReplaceSamples.vue'
 import DeidEntityList from './DeidEntityList.vue'
@@ -14,6 +13,8 @@ import DeidStepNav from './DeidStepNav.vue'
 import DeidWorkerBanner from './DeidWorkerBanner.vue'
 import DeidScanErrorPanel from './DeidScanErrorPanel.vue'
 import DeidModal from './DeidModal.vue'
+import DeidEntityScanStage from './DeidEntityScanStage.vue'
+import DeidSemanticScanStage from './DeidSemanticScanStage.vue'
 
 const store = useDeidStore()
 
@@ -34,7 +35,9 @@ const isScanning = computed(
   () =>
     status.value === 'scanning' ||
     status.value === 'queued' ||
-    (!!store.scanProgress && store.scanProgress.phase !== 'error'),
+    status.value === 're_scanning' ||
+    store.reScanning ||
+    (!!store.scanProgress && store.scanProgress.phase !== 'error' && store.scanProgress.phase !== 'done'),
 )
 const isDone = computed(() => status.value === 'done' || status.value === 'archived')
 const filesPurged = computed(
@@ -52,6 +55,55 @@ const verificationSummary = computed(() => (verification.value.summary as string
 const verificationResiduals = computed(
   () => (verification.value.residuals as string[]) || [],
 )
+const finishVerifyMode = computed(
+  () => (verification.value.finish_verify_mode as string) || '',
+)
+const showFinishVerifyNote = computed(
+  () => isDone.value && finishVerifyMode.value === 'program_only',
+)
+const semanticSummary = computed(() => {
+  const sem = (verification.value.semantic as Record<string, unknown>) || {}
+  const applied = Number(sem.applied_count ?? 0)
+  const selected = Number(sem.selected_count ?? 0)
+  const missed = Number(sem.missed_count ?? 0)
+  if (job.value && (job.value as { semantic_skipped?: boolean }).semantic_skipped) {
+    return '未进行语义扫描'
+  }
+  if (selected > 0) {
+    let msg = `已应用 ${applied}/${selected} 条语义改写`
+    if (missed > 0) msg += `（${missed} 条未落地）`
+    return msg
+  }
+  return applied > 0 ? `已应用 ${applied} 条语义改写` : '未应用语义改写'
+})
+
+const readinessInfo = computed(() => {
+  const rd = (verification.value.readiness as Record<string, unknown>) || {}
+  return {
+    ready: rd.ready as boolean | null | undefined,
+    level: (rd.level as string) || 'standard',
+    blockers: (rd.blockers as string[]) || [],
+    notes: (rd.notes as string[]) || [],
+  }
+})
+
+const semanticMissedWarning = computed(() => {
+  const sem = (verification.value.semantic as Record<string, unknown>) || {}
+  const missed = Number(sem.missed_count ?? 0)
+  const blockers = readinessInfo.value.blockers
+  if (blockers.length) return blockers[0]
+  if (missed <= 0) return null
+  const readiness = sem.readiness as string | undefined
+  return readiness || `${missed} 条语义改写未能写入文档`
+})
+
+function onSemanticProceedConfirm() {
+  store.proceedToConfirm()
+}
+
+function onEntityScanProceedSemantic() {
+  /* semantic stage shown via semanticStageEntered */
+}
 
 const scanFailed = computed(
   () =>
@@ -73,16 +125,32 @@ const showJobsError = computed(
   () => !!store.jobsError && !jobsToastDismissed.value,
 )
 
-const showWorkerToast = computed(
-  () =>
+const showWorkerToast = computed(() => {
+  const phase = wizardPhase.value
+  const toastPhases = ['upload', 'scan-draft', 'scanning', 'entity-scanned']
+  return (
     store.workerWasOffline &&
     store.workerStatus.online &&
     !store.showConclusionView &&
     !store.showEntitiesPanel &&
-    !isDone.value,
-)
+    !isDone.value &&
+    toastPhases.includes(phase)
+  )
+})
+
+const workerToastMessage = computed(() => {
+  if (wizardPhase.value === 'entity-scanned') {
+    return 'Worker 已恢复，可继续再识别'
+  }
+  return '智能扫描已恢复，可使用 AI 发现实体'
+})
 
 const stageBodyRef = ref<HTMLElement | null>(null)
+
+const showTopStepper = computed(() => {
+  const p = wizardPhase.value
+  return p !== 'scanning' && p !== 'entity-scanned'
+})
 
 watch(
   () =>
@@ -97,23 +165,6 @@ watch(
   },
 )
 
-watch(
-  () =>
-    [
-      status.value,
-      store.showConclusionView,
-      store.showEntitiesPanel,
-      jobId.value,
-    ] as const,
-  ([st, conclusion, entitiesPanel]) => {
-    if (entitiesPanel || store.suppressAutoConclusion) return
-    if (st !== 'scanned' && st !== 'confirmed') return
-    if (!conclusion && store.needsConclusionStep()) {
-      store.openConclusionView()
-    }
-  },
-  { immediate: true },
-)
 
 function onSelect(file: File) {
   uploadError.value = null
@@ -205,7 +256,7 @@ function confirmOverrideDownload() {
       :class="{ 'stage-body--rehydrate': store.showRehydratePanel }"
     >
     <div v-if="showWorkerToast" class="toast toast--ok">
-      智能扫描已恢复，可使用 AI 发现实体
+      {{ workerToastMessage }}
       <button type="button" class="toast-x" @click="store.clearWorkerToast()">×</button>
     </div>
 
@@ -220,8 +271,8 @@ function confirmOverrideDownload() {
       <!-- 结论回显 -->
       <DeidRehydrateView v-if="store.showRehydratePanel" key="rehydrate" class="panel-fill panel-fill--rehydrate" />
 
-      <!-- 我的实体 -->
-      <DeidMyEntities v-else-if="store.showEntitiesPanel" key="entities" class="panel-fill" />
+      <!-- 词库 -->
+      <DeidMyEntities v-else-if="store.showEntitiesPanel" key="entities" class="panel-fill panel-fill--lexicon" />
 
       <!-- 结论全屏 -->
       <DeidConclusionView v-else-if="store.showConclusionView" key="conclusion" class="panel-fill" />
@@ -256,6 +307,17 @@ function confirmOverrideDownload() {
           </DeidStepNav>
         </div>
         <DeidCompletionHero :job="job" :entities="store.entities" />
+        <p v-if="showFinishVerifyNote && readinessInfo.notes.length" class="finish-verify-banner">
+          {{ readinessInfo.notes[0] }}
+        </p>
+        <p v-if="isDone" class="readiness-banner">{{ semanticSummary }}</p>
+        <p v-if="isDone && readinessInfo.level" class="readiness-banner">
+          外发就绪：{{ readinessInfo.ready === true ? '通过' : readinessInfo.ready === false ? '未通过' : '待确认' }}
+          （{{ readinessInfo.level }}）
+        </p>
+        <p v-if="isDone && semanticMissedWarning" class="readiness-banner readiness-banner--warn">
+          {{ semanticMissedWarning }}
+        </p>
         <DeidReplaceSamples :previews="store.previews" />
         <DeidEntityList :entities="store.entities" editable @delete="onDeleteEntity" />
         <div class="manual-add">
@@ -266,7 +328,8 @@ function confirmOverrideDownload() {
 
       <!-- 上传 / 扫描 -->
       <div v-else key="upload" class="upload-wrap wizard-panel">
-        <div class="wizard-toolbar">
+        <div class="deid-workbench-column">
+        <div v-if="showTopStepper" class="wizard-toolbar">
           <DeidStepper :current="currentStep" :finished="isDone" />
         </div>
 
@@ -290,9 +353,9 @@ function confirmOverrideDownload() {
         </div>
 
         <!-- 脱敏进行中 -->
-        <div v-else-if="wizardPhase === 'deid-running' && job" key="running" class="running-stage">
+        <div v-else-if="wizardPhase === 'finishing' && job" key="running" class="running-stage">
           <h2 class="deid-page-title">{{ (job as { original_filename: string }).original_filename }}</h2>
-          <p class="deid-page-sub">正在脱敏，请稍候…</p>
+          <p class="deid-page-sub">正在写入脱敏文档，请稍候…</p>
           <div class="job-card deid-panel confirm-card">
             <span class="deid-spinner" aria-hidden="true" />
             <p class="confirm-text">替换敏感实体中</p>
@@ -320,7 +383,7 @@ function confirmOverrideDownload() {
                   <path d="M14 2v6h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
                 </svg>
               </div>
-              <p class="ready-text">文档已就绪，点击开始扫描</p>
+              <p class="ready-text">文档已就绪，点击开始实体扫描</p>
             </div>
 
             <div class="cta">
@@ -330,35 +393,34 @@ function confirmOverrideDownload() {
                 :disabled="store.loading || isScanning"
                 @click="doScan"
               >
-                {{ workerOnline ? '开始扫描' : '匹配已记住实体' }}
+                {{ workerOnline ? '开始实体扫描' : '匹配词库实体' }}
               </button>
             </div>
           </div>
         </div>
 
-        <div v-else-if="wizardPhase === 'scanning' && job" class="job-stage">
-          <h2 class="deid-page-title">{{ (job as { original_filename: string }).original_filename }}</h2>
-          <p class="deid-page-sub">正在扫描文档…</p>
+        <div
+          v-else-if="(wizardPhase === 'scanning' || wizardPhase === 'entity-scanned') && job && jobId"
+          class="job-stage"
+        >
+          <DeidEntityScanStage
+            :job-id="jobId"
+            :filename="(job as { original_filename: string }).original_filename"
+            :mode="store.entityScanMode()"
+            @proceed-semantic="onEntityScanProceedSemantic"
+          />
+        </div>
 
-          <div class="job-card deid-panel">
-            <DeidScanLivePanel
-              v-if="store.scanProgress"
-              :percent="store.scanProgress.percent"
-              :message="store.scanProgress.message"
-              :phase="store.scanProgress.phase"
-              :queue-position="store.scanProgress.queue_position"
-              :stats="store.scanLive.stats || store.scanProgress.stats"
-              :metrics="store.scanLive.metrics || store.scanProgress.metrics"
-              :logs="store.scanLive.logs"
-              :stream-tail="store.scanLive.streamTail"
-              :entities-found="store.scanLive.entitiesFound"
-              :stream-connected="store.scanLive.streamConnected"
-              :started-at="store.scanLive.startedAt"
-            />
-          </div>
+        <DeidSemanticScanStage
+          v-else-if="(wizardPhase === 'semantic-idle' || wizardPhase === 'semantic-scanning' || wizardPhase === 'semantic-review') && jobId"
+          :job-id="jobId"
+          :mode="wizardPhase === 'semantic-scanning' ? 'scanning' : wizardPhase === 'semantic-review' ? 'review' : 'idle'"
+          @proceed-confirm="onSemanticProceedConfirm"
+        />
         </div>
       </div>
     </Transition>
+
     </div>
 
     <DeidModal v-model:open="showOverrideModal" title="验证未通过，确认下载？" danger>
@@ -424,6 +486,13 @@ function confirmOverrideDownload() {
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+  .stage-body > .panel-fill.panel-fill--lexicon {
+    flex: 0 0 auto;
+    min-height: auto;
+    height: auto;
+    overflow: visible;
+    display: block;
   }
   .stage-body--rehydrate {
     display: flex;
@@ -534,6 +603,12 @@ function confirmOverrideDownload() {
   .panel-fill--rehydrate {
     background: var(--deid-bg);
   }
+  .panel-fill--lexicon {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    height: auto;
+  }
 }
 .running-stage {
   max-width: 720px;
@@ -566,6 +641,49 @@ function confirmOverrideDownload() {
 }
 .confirm-card .deid-btn {
   min-width: 200px;
+}
+.finish-verify-banner,
+.readiness-banner {
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: var(--deid-radius-sm);
+  font-size: 0.9375rem;
+}
+.finish-verify-banner {
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  color: var(--deid-primary);
+}
+.readiness-banner {
+  background: var(--deid-success-bg);
+  border: 1px solid var(--deid-success-border);
+  color: var(--deid-success);
+}
+.readiness-banner--warn {
+  background: rgba(180, 83, 9, 0.08);
+  border-color: var(--deid-warning, #b45309);
+  color: var(--deid-warning, #b45309);
+}
+.snapshot-list {
+  margin: 1rem 0;
+  padding: 0.85rem 1rem !important;
+}
+.snapshot-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--deid-ink);
+}
+.snapshot-ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.875rem;
+  color: var(--deid-ink-secondary);
+}
+.snapshot-more {
+  color: var(--deid-ink-muted);
+  list-style: none;
+  margin-left: -1.1rem;
 }
 .worker-opt {
   display: inline-flex;
@@ -600,7 +718,7 @@ function confirmOverrideDownload() {
   text-align: center;
 }
 .job-stage {
-  max-width: 720px;
+  width: 100%;
 }
 .job-card {
   margin-top: 1.5rem;

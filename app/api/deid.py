@@ -9,9 +9,14 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deid import service
 from app.deid.scan_events import get_scan_event_bus
+from app.deid.access_token import issue_deid_access_session, validate_deid_day_code
 from app.deid.schemas import (
     AliasIn,
     ConfirmIn,
+    DeidAccessIn,
+    ExperienceConfirmIn,
+    GlobalExperienceIn,
+    DeepApplyIn,
     EntityTypeIn,
     EntityTypePatch,
     LibraryEntityIn,
@@ -39,6 +44,18 @@ from app.models_deid import (
 router = APIRouter(prefix="/api/deid", tags=["deid"])
 
 
+@router.post("/access/verify")
+def verify_deid_access(body: DeidAccessIn):
+    if not validate_deid_day_code(body.token):
+        raise HTTPException(401, "口令不正确")
+    return {"ok": True, "session": issue_deid_access_session()}
+
+
+@router.get("/access/check")
+def check_deid_access():
+    return {"ok": True}
+
+
 @router.get("/jobs")
 def list_jobs(db: Session = Depends(get_db)):
     return service.list_jobs(db)
@@ -54,8 +71,21 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
     return service.get_job(db, job_id)
 
 
+@router.get("/jobs/{job_id}/worker-calls")
+def list_worker_calls(
+    job_id: int,
+    limit: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    return service.list_worker_calls(db, job_id, limit=limit)
+
+
 @router.get("/jobs/{job_id}/scan-stream")
-async def scan_stream(job_id: int, db: Session = Depends(get_db)):
+async def scan_stream(
+    job_id: int,
+    fresh: bool = False,
+    db: Session = Depends(get_db),
+):
     job = db.get(DeidJob, job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
@@ -64,9 +94,17 @@ async def scan_stream(job_id: int, db: Session = Depends(get_db)):
 
     async def event_generator():
         try:
-            async for event in bus.subscribe(job_id):
+            async for event, is_replay in bus.subscribe(job_id, replay=not fresh):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event.get("type") in ("done", "error"):
+                if fresh:
+                    if not is_replay and event.get("type") in (
+                        "done",
+                        "error",
+                        "scan_round_done",
+                        "semantic_done",
+                    ):
+                        break
+                elif event.get("type") in ("done", "error"):
                     break
         except Exception as exc:
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
@@ -145,6 +183,51 @@ async def rescan_job(job_id: int, request: Request, db: Session = Depends(get_db
     return await service.scan_job(db, job_id, worker_router=client)
 
 
+@router.post("/jobs/{job_id}/scan/re-run")
+async def scan_re_run(job_id: int, request: Request, db: Session = Depends(get_db)):
+    client = get_worker_client(request.app)
+    return await service.re_run_scan_job(db, job_id, worker_router=client)
+
+
+@router.post("/jobs/{job_id}/scan/experience")
+async def scan_experience(job_id: int, request: Request, db: Session = Depends(get_db)):
+    client = get_worker_client(request.app)
+    return await service.generate_experience_job(db, job_id, worker_router=client)
+
+
+@router.post("/jobs/{job_id}/scan/experience/confirm")
+def scan_experience_confirm(
+    job_id: int,
+    body: ExperienceConfirmIn,
+    db: Session = Depends(get_db),
+):
+    return service.confirm_experience_job(db, job_id, text=body.text)
+
+
+@router.get("/settings/global-experience")
+def get_global_experience(db: Session = Depends(get_db)):
+    return service.list_global_experience_api(db)
+
+
+@router.post("/settings/global-experience")
+def post_global_experience(body: GlobalExperienceIn, db: Session = Depends(get_db)):
+    return service.create_global_experience_api(db, body.text)
+
+
+@router.patch("/settings/global-experience/{exp_id}")
+def patch_global_experience(
+    exp_id: int,
+    body: GlobalExperienceIn,
+    db: Session = Depends(get_db),
+):
+    return service.patch_global_experience_api(db, exp_id, body.text)
+
+
+@router.delete("/settings/global-experience/{exp_id}")
+def delete_global_experience(exp_id: int, db: Session = Depends(get_db)):
+    return service.remove_global_experience_api(db, exp_id)
+
+
 @router.get("/worker/status")
 async def worker_status(request: Request):
     relay = getattr(request.app.state, "worker_relay", None)
@@ -199,24 +282,149 @@ def preview(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/confirm")
-def confirm(job_id: int, body: ConfirmIn | None = None, db: Session = Depends(get_db)):
+async def confirm(
+    job_id: int,
+    request: Request,
+    body: ConfirmIn | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.deid.worker.client import get_worker_client
+
     remember_ids = body.remember_ids if body else None
     entity_ids = body.entity_ids if body else None
-    return service.confirm_job(db, job_id, entity_ids=entity_ids, remember_ids=remember_ids)
+    semantic_selection = body.semantic_selection if body else None
+    client = get_worker_client(request.app)
+    return await service.confirm_job(
+        db,
+        job_id,
+        entity_ids=entity_ids,
+        remember_ids=remember_ids,
+        semantic_selection=semantic_selection,
+        worker_router=client,
+    )
 
 
 @router.post("/jobs/{job_id}/run")
-def run(job_id: int, body: RunIn | None = None, db: Session = Depends(get_db)):
+async def run(
+    job_id: int,
+    request: Request,
+    body: RunIn | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.deid.worker.client import get_worker_client
+
     remember_ids = body.remember_ids if body else None
     entity_ids = body.entity_ids if body else None
-    return service.run_job(db, job_id, entity_ids=entity_ids, remember_ids=remember_ids)
+    client = get_worker_client(request.app)
+    return await service.run_job(
+        db,
+        job_id,
+        entity_ids=entity_ids,
+        remember_ids=remember_ids,
+        worker_router=client,
+    )
 
 
 @router.post("/jobs/{job_id}/rerun")
-def rerun(job_id: int, body: RunIn | None = None, db: Session = Depends(get_db)):
+async def rerun(
+    job_id: int,
+    request: Request,
+    body: RunIn | None = None,
+    db: Session = Depends(get_db),
+):
+    from app.deid.worker.client import get_worker_client
+
     remember_ids = body.remember_ids if body else None
     entity_ids = body.entity_ids if body else None
-    return service.rerun_job(db, job_id, entity_ids=entity_ids, remember_ids=remember_ids)
+    client = get_worker_client(request.app)
+    return await service.rerun_job(
+        db,
+        job_id,
+        entity_ids=entity_ids,
+        remember_ids=remember_ids,
+        worker_router=client,
+    )
+
+
+@router.post("/jobs/{job_id}/semantic/start")
+async def semantic_start(job_id: int, request: Request, db: Session = Depends(get_db)):
+    from app.deid.worker.client import get_worker_client
+
+    client = get_worker_client(request.app)
+    return await service.semantic_start_job(db, job_id, worker_router=client)
+
+
+@router.post("/jobs/{job_id}/semantic/skip")
+def semantic_skip(job_id: int, db: Session = Depends(get_db)):
+    return service.semantic_skip_job(db, job_id)
+
+
+@router.get("/jobs/{job_id}/semantic/risks")
+def semantic_risks(job_id: int, db: Session = Depends(get_db)):
+    return service.get_semantic_risks(db, job_id)
+
+
+@router.post("/jobs/{job_id}/semantic/suggest/{risk_id}")
+async def semantic_suggest(
+    job_id: int,
+    risk_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from app.deid.worker.client import get_worker_client
+
+    client = get_worker_client(request.app)
+    return await service.semantic_suggest_risk(
+        db, job_id, risk_id, worker_router=client
+    )
+
+
+@router.post("/jobs/{job_id}/semantic/suggest-all")
+async def semantic_suggest_all(job_id: int, request: Request, db: Session = Depends(get_db)):
+    from app.deid.worker.client import get_worker_client
+
+    client = get_worker_client(request.app)
+    return await service.semantic_suggest_all_job(db, job_id, worker_router=client)
+
+
+@router.post("/jobs/{job_id}/deep/scan")
+async def deep_scan(job_id: int, request: Request, db: Session = Depends(get_db)):
+    from app.deid.worker.client import get_worker_client
+
+    client = get_worker_client(request.app)
+    return await service.semantic_start_job(db, job_id, worker_router=client)
+
+
+@router.get("/jobs/{job_id}/deep/risks")
+def deep_risks(job_id: int, db: Session = Depends(get_db)):
+    return service.get_deep_risks(db, job_id)
+
+
+@router.post("/jobs/{job_id}/deep/suggest/{risk_id}")
+async def deep_suggest(
+    job_id: int,
+    risk_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from app.deid.worker.client import get_worker_client
+
+    client = get_worker_client(request.app)
+    return await service.deep_suggest_risk(db, job_id, risk_id, worker_router=client)
+
+
+@router.post("/jobs/{job_id}/deep/apply")
+async def deep_apply(
+    job_id: int,
+    body: DeepApplyIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    from app.deid.worker.client import get_worker_client
+
+    client = get_worker_client(request.app)
+    items = [i.model_dump() for i in body.items]
+    return await service.deep_apply_job(db, job_id, items, worker_router=client)
 
 
 @router.get("/jobs/{job_id}/mapping")

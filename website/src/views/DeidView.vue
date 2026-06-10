@@ -4,13 +4,17 @@ import { useDeidStore } from '../stores/deid'
 import DeidTopBar from '../components/deid/DeidTopBar.vue'
 import DeidLeftRail from '../components/deid/DeidLeftRail.vue'
 import DeidMainStage from '../components/deid/DeidMainStage.vue'
+import DeidAccessGate from '../components/deid/DeidAccessGate.vue'
+import { checkDeidSession } from '../utils/deidAccess'
 import '../styles/deid-tokens.css'
 
 const store = useDeidStore()
 const activeJobId = ref<number | null>(null)
 const railOpen = ref(false)
+const unlocked = ref(false)
+const checking = ref(true)
 
-onMounted(async () => {
+async function initDeid() {
   await store.fetchJobs()
   await store.fetchEntityTypes()
   await store.fetchWorkerStatus()
@@ -18,7 +22,20 @@ onMounted(async () => {
   await store.restoreCurrentJob()
   const cur = store.currentJob as { id?: number } | null
   if (cur?.id) activeJobId.value = cur.id
+}
+
+onMounted(async () => {
+  if (await checkDeidSession()) {
+    unlocked.value = true
+    await initDeid()
+  }
+  checking.value = false
 })
+
+async function onUnlocked() {
+  unlocked.value = true
+  await initDeid()
+}
 
 watch(
   () => [store.showEntitiesPanel, store.showConclusionView, store.showRehydratePanel] as const,
@@ -78,27 +95,31 @@ function onJobDeleted(jobId: number) {
 <template>
   <div class="deid-app">
     <DeidTopBar :menu-open="railOpen" @toggle-menu="toggleRail" />
-    <div
-      v-if="railOpen"
-      class="drawer-backdrop"
-      aria-hidden="true"
-      @click="closeRail"
-    />
-    <div class="shell">
-      <DeidLeftRail
-        :active-job-id="activeJobId"
-        :entities-active="store.showEntitiesPanel"
-        :rehydrate-active="store.showRehydratePanel"
-        :drawer-open="railOpen"
-        @select="onSelectJob"
-        @new-task="onNewTask"
-        @open-entities="onOpenEntities"
-        @open-rehydrate="onOpenRehydrate"
-        @close-drawer="closeRail"
-        @deleted="onJobDeleted"
+    <div v-if="checking" class="deid-loading">验证访问权限…</div>
+    <DeidAccessGate v-else-if="!unlocked" @unlocked="onUnlocked" />
+    <template v-else>
+      <div
+        v-if="railOpen"
+        class="drawer-backdrop"
+        aria-hidden="true"
+        @click="closeRail"
       />
-      <DeidMainStage />
-    </div>
+      <div class="shell">
+        <DeidLeftRail
+          :active-job-id="activeJobId"
+          :entities-active="store.showEntitiesPanel"
+          :rehydrate-active="store.showRehydratePanel"
+          :drawer-open="railOpen"
+          @select="onSelectJob"
+          @new-task="onNewTask"
+          @open-entities="onOpenEntities"
+          @open-rehydrate="onOpenRehydrate"
+          @close-drawer="closeRail"
+          @deleted="onJobDeleted"
+        />
+        <DeidMainStage />
+      </div>
+    </template>
   </div>
 </template>
 
@@ -110,6 +131,14 @@ function onJobDeleted(jobId: number) {
   display: flex;
   min-height: calc(100vh - var(--deid-topbar-height));
   position: relative;
+}
+.deid-loading {
+  min-height: calc(100vh - var(--deid-topbar-height));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--deid-ink-muted);
+  font-size: 0.9375rem;
 }
 @media (min-width: 769px) {
   .deid-app {

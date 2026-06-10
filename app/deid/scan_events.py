@@ -30,17 +30,22 @@ class ScanEventBus:
     def history(self, job_id: int) -> list[dict]:
         return list(self._history.get(job_id, []))
 
-    async def subscribe(self, job_id: int) -> AsyncIterator[dict]:
+    def clear_history(self, job_id: int) -> None:
+        self._history.pop(job_id, None)
+
+    async def subscribe(self, job_id: int, *, replay: bool = True) -> AsyncIterator[tuple[dict, bool]]:
+        """Yield (event, is_replay). Live events have is_replay=False."""
         q: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=256)
         self._subscribers.setdefault(job_id, []).append(q)
         try:
-            for ev in self.history(job_id):
-                yield ev
+            if replay:
+                for ev in self.history(job_id):
+                    yield ev, True
             while True:
                 item = await q.get()
                 if item is None:
                     break
-                yield item
+                yield item, False
         finally:
             subs = self._subscribers.get(job_id, [])
             if q in subs:

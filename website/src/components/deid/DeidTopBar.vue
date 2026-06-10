@@ -16,7 +16,7 @@ const workerLabel = computed(() => {
 
 const workerDetail = computed(() => {
   const w = store.workerStatus
-  if (!w.online) return '将使用已记住实体匹配'
+  if (!w.online) return '将使用词库实体匹配'
   return '已就绪'
 })
 

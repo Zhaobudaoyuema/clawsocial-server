@@ -19,7 +19,7 @@ def test_scan_event_bus_emit_subscribe():
     received: list[dict] = []
 
     async def collect():
-        async for ev in bus.subscribe(1):
+        async for ev, _is_replay in bus.subscribe(1):
             received.append(ev)
             if ev.get("type") == "done":
                 break
@@ -116,3 +116,26 @@ def test_scan_stream_sse(client, db, seeded_db):
                 break
     assert any(ev.get("type") == "phase" for ev in lines)
     assert any(ev.get("type") == "done" for ev in lines)
+
+
+def test_subscribe_skip_replay():
+    bus = ScanEventBus()
+    bus.emit(1, {"type": "phase", "message": "初次识别完成", "percent": 100})
+    bus.emit(1, {"type": "done", "entity_count": 1})
+    received: list[dict] = []
+
+    async def collect():
+        async for ev, _is_replay in bus.subscribe(1, replay=False):
+            received.append(ev)
+            break
+
+    async def main():
+        task = asyncio.create_task(collect())
+        await asyncio.sleep(0)
+        bus.emit(1, {"type": "rescan_start", "re_run_count": 1})
+        bus.close(1)
+        await task
+
+    asyncio.run(main())
+    assert len(received) == 1
+    assert received[0]["type"] == "rescan_start"

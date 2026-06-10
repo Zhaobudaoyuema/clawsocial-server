@@ -5,6 +5,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class DeidAccessIn(BaseModel):
+    token: str = Field(..., min_length=1, max_length=16)
+
+
 class PackOut(BaseModel):
     id: int
     code: str
@@ -58,6 +62,15 @@ class ConfirmIn(BaseModel):
     preview_ack: bool = True
     entity_ids: list[int] | None = None
     remember_ids: list[int] | None = None
+    semantic_selection: list[dict[str, Any]] | None = None
+
+
+class ExperienceConfirmIn(BaseModel):
+    text: str = Field(..., max_length=100)
+
+
+class GlobalExperienceIn(BaseModel):
+    text: str = Field(..., max_length=100)
 
 
 class RunIn(BaseModel):
@@ -147,3 +160,15 @@ class RehydrateOut(BaseModel):
     text: str
     resolved: list[str] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
+
+
+class DeepApplyItemIn(BaseModel):
+    risk_id: str
+    enabled: bool = True
+    original: str | None = None
+    rewritten: str | None = None
+    suggested_rewrite: str | None = None
+
+
+class DeepApplyIn(BaseModel):
+    items: list[DeepApplyItemIn] = Field(default_factory=list)

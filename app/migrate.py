@@ -23,6 +23,8 @@ def run_migrations(engine: Engine) -> None:
     _ensure_deid_jobs_scan_queue(engine)
     _ensure_deid_jobs_ai_summary(engine)
     _ensure_deid_jobs_files_purged_at(engine)
+    _ensure_deid_jobs_semantic_snapshot(engine)
+    _ensure_deid_worker_calls_table(engine)
 
 
 def _ensure_users_last_seen_at(engine: Engine) -> None:
@@ -461,4 +463,120 @@ def _ensure_deid_jobs_ai_summary(engine: Engine) -> None:
             conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN ai_summary_json TEXT"))
         else:
             conn.execute(text("ALTER TABLE deid_jobs ADD COLUMN ai_summary_json TEXT NULL"))
+        conn.commit()
+
+
+def _ensure_deid_jobs_semantic_snapshot(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "deid_jobs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("deid_jobs")}
+    if "semantic_entity_snapshot_json" in columns:
+        return
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        if dialect == "mysql":
+            conn.execute(
+                text("ALTER TABLE deid_jobs ADD COLUMN semantic_entity_snapshot_json TEXT NULL")
+            )
+        elif dialect == "sqlite":
+            conn.execute(
+                text("ALTER TABLE deid_jobs ADD COLUMN semantic_entity_snapshot_json TEXT")
+            )
+        else:
+            conn.execute(
+                text("ALTER TABLE deid_jobs ADD COLUMN semantic_entity_snapshot_json TEXT NULL")
+            )
+        conn.commit()
+
+
+def _ensure_deid_worker_calls_table(engine: Engine) -> None:
+    insp = inspect(engine)
+    if "deid_worker_calls" in insp.get_table_names():
+        return
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        if dialect == "mysql":
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE deid_worker_calls (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        job_id INT NOT NULL,
+                        flow_id VARCHAR(64) NOT NULL,
+                        request_id VARCHAR(128) NOT NULL,
+                        chunk_index INT NOT NULL DEFAULT 1,
+                        chunk_total INT NOT NULL DEFAULT 1,
+                        model VARCHAR(128) NULL,
+                        system_prompt TEXT NOT NULL,
+                        user_message TEXT NOT NULL,
+                        response_content TEXT NULL,
+                        error TEXT NULL,
+                        prompt_tokens INT NOT NULL DEFAULT 0,
+                        completion_tokens INT NOT NULL DEFAULT 0,
+                        parsed_count INT NOT NULL DEFAULT 0,
+                        elapsed_ms INT NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL,
+                        INDEX ix_deid_worker_calls_job_id (job_id),
+                        INDEX ix_deid_worker_calls_flow_id (flow_id),
+                        INDEX ix_deid_worker_calls_created_at (created_at),
+                        CONSTRAINT fk_deid_worker_calls_job
+                            FOREIGN KEY (job_id) REFERENCES deid_jobs(id) ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+        elif dialect == "sqlite":
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE deid_worker_calls (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        job_id INTEGER NOT NULL,
+                        flow_id VARCHAR(64) NOT NULL,
+                        request_id VARCHAR(128) NOT NULL,
+                        chunk_index INTEGER NOT NULL DEFAULT 1,
+                        chunk_total INTEGER NOT NULL DEFAULT 1,
+                        model VARCHAR(128),
+                        system_prompt TEXT NOT NULL,
+                        user_message TEXT NOT NULL,
+                        response_content TEXT,
+                        error TEXT,
+                        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                        completion_tokens INTEGER NOT NULL DEFAULT 0,
+                        parsed_count INTEGER NOT NULL DEFAULT 0,
+                        elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL,
+                        FOREIGN KEY (job_id) REFERENCES deid_jobs(id) ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            conn.execute(text("CREATE INDEX ix_deid_worker_calls_job_id ON deid_worker_calls (job_id)"))
+            conn.execute(text("CREATE INDEX ix_deid_worker_calls_flow_id ON deid_worker_calls (flow_id)"))
+        else:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE deid_worker_calls (
+                        id SERIAL PRIMARY KEY,
+                        job_id INTEGER NOT NULL REFERENCES deid_jobs(id) ON DELETE CASCADE,
+                        flow_id VARCHAR(64) NOT NULL,
+                        request_id VARCHAR(128) NOT NULL,
+                        chunk_index INTEGER NOT NULL DEFAULT 1,
+                        chunk_total INTEGER NOT NULL DEFAULT 1,
+                        model VARCHAR(128),
+                        system_prompt TEXT NOT NULL,
+                        user_message TEXT NOT NULL,
+                        response_content TEXT,
+                        error TEXT,
+                        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                        completion_tokens INTEGER NOT NULL DEFAULT 0,
+                        parsed_count INTEGER NOT NULL DEFAULT 0,
+                        elapsed_ms INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP NOT NULL
+                    )
+                    """
+                )
+            )
         conn.commit()

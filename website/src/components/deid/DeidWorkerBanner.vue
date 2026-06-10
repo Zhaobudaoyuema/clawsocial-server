@@ -14,7 +14,7 @@ function openEntities() {
 <template>
   <div class="worker-banner" role="status">
     <span class="msg">
-      智能扫描暂不可用：将自动匹配「我的实体」中已记住的名称
+      智能扫描暂不可用：将自动匹配词库中的名称
     </span>
     <button type="button" class="link" @click="openEntities">
       管理实体

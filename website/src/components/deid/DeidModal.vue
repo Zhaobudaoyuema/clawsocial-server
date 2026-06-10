@@ -20,7 +20,7 @@ function close() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && props.open) {
+  if (e.key === 'Escape' && props.open && !props.persistent) {
     e.preventDefault()
     close()
   }
@@ -79,7 +79,7 @@ onUnmounted(() => {
 .deid-modal-root {
   position: fixed;
   inset: 0;
-  z-index: 200;
+  z-index: 1000;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -143,5 +143,9 @@ onUnmounted(() => {
   gap: 0.65rem;
   padding: 0 1.5rem 1.25rem;
   flex-wrap: wrap;
+}
+
+.deid-modal-footer :deep(.deid-btn) {
+  font-synthesis: none;
 }
 </style>

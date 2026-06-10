@@ -17,7 +17,7 @@ def target_xml_files(work_dir: Path) -> list[Path]:
         paths.append(p)
     for p in sorted(word.glob("footer*.xml")):
         paths.append(p)
-    for name in ("footnotes.xml", "endnotes.xml"):
+    for name in ("footnotes.xml", "endnotes.xml", "comments.xml"):
         fp = word / name
         if fp.exists():
             paths.append(fp)

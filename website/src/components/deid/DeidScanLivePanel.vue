@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import DeidTechLogTerminal from './DeidTechLogTerminal.vue'
+import DeidTechLogModal from './DeidTechLogModal.vue'
 
 export type ScanLiveStats = {
   paragraphs?: number
@@ -27,15 +29,53 @@ const props = defineProps<{
   entitiesFound: number
   streamConnected?: boolean
   startedAt?: number | null
+  /** initial=初次扫描；rescan=核对阶段再识别 */
+  variant?: 'initial' | 'rescan'
+  reRunIndex?: number
 }>()
 
-const logRef = ref<HTMLElement | null>(null)
-const showTechLog = ref(false)
+const logModalOpen = ref(false)
 const localStarted = ref<number | null>(null)
 const tick = ref(0)
 let timer: ReturnType<typeof setInterval> | null = null
 
-const PHASE_ORDER = ['starting', 'queued', 'extract', 'remembered', 'llm', 'merge', 'done'] as const
+const isRescan = computed(() => props.variant === 'rescan')
+
+const rescanActive = computed(
+  () => isRescan.value && props.phase !== 'done' && props.phase !== 'error',
+)
+
+const rescanDone = computed(
+  () => isRescan.value && (props.phase === 'done' || props.phase === 'error'),
+)
+
+const chunkProgress = computed(() => {
+  const m = props.message.match(/(\d+)\s*\/\s*(\d+)/)
+  if (!m) return null
+  const current = Number(m[1])
+  const total = Number(m[2])
+  if (!total || current < 0) return null
+  return { current, total, pct: Math.min(100, Math.round((current / total) * 100)) }
+})
+
+const displayLabel = computed(() => {
+  const msg = props.message || ''
+  if (isRescan.value) {
+    if (msg.includes('初次识别')) {
+      if (rescanActive.value) {
+        return `第 ${props.reRunIndex || 1} 次再识别中…`
+      }
+      if (rescanDone.value) {
+        return `第 ${props.reRunIndex || 1} 次再识别完成`
+      }
+    }
+    if (rescanDone.value) return msg || `第 ${props.reRunIndex || 1} 次再识别完成`
+    return msg || `第 ${props.reRunIndex || 1} 次再识别中…`
+  }
+  return msg
+})
+
+const PHASE_ORDER = ['starting', 'queued', 'extract', 'remembered', 'initial_discover', 're_discover', 'merge', 'done'] as const
 const MIN_PHASE_MS = 480
 const displayPhaseIdx = ref(0)
 let phaseAdvanceTimer: ReturnType<typeof setTimeout> | null = null
@@ -64,6 +104,23 @@ function schedulePhaseAdvance(targetIdx: number) {
 watch(
   () => props.phase,
   (phase) => {
+    if (isRescan.value) {
+      if (phase === 'done' || props.percent >= 100) {
+        displayPhaseIdx.value = phaseToIdx('done')
+      } else {
+        displayPhaseIdx.value = phaseToIdx('re_discover')
+      }
+      if (phase && phase !== 'done' && phase !== 'error' && localStarted.value == null) {
+        localStarted.value = Date.now()
+      }
+      if (phase === 'done' || phase === 'error') {
+        if (timer) {
+          clearInterval(timer)
+          timer = null
+        }
+      }
+      return
+    }
     if (phase === 'starting' && displayPhaseIdx.value > 0) {
       displayPhaseIdx.value = 0
     }
@@ -94,9 +151,7 @@ watch(
 watch(
   () => [props.logs.length, props.streamTail],
   async () => {
-    await nextTick()
-    const el = logRef.value
-    if (el) el.scrollTop = el.scrollHeight
+    if (logModalOpen.value) await nextTick()
   },
 )
 
@@ -128,7 +183,9 @@ const totalTokens = computed(() => {
   return p + c
 })
 
-const hasTechLog = computed(() => props.logs.length > 0 || !!props.streamTail)
+const isLive = computed(
+  () => props.streamConnected && props.phase !== 'done' && props.phase !== 'error',
+)
 
 const showDisconnectBanner = computed(() => {
   const phase = props.phase || ''
@@ -141,6 +198,14 @@ const showDisconnectBanner = computed(() => {
 const phaseSteps = computed(() => {
   const currentIdx = displayPhaseIdx.value
   const doneAll = props.phase === 'done' || props.percent >= 100
+
+  if (isRescan.value) {
+    const active = !doneAll
+    return [
+      { id: 'rescan', label: 'AI 再识别', done: doneAll, active },
+      { id: 'merge', label: '合并结果', done: doneAll, active: false },
+    ]
+  }
 
   const defs = [
     { id: 'submit', label: '提交', until: phaseToIdx('extract') },
@@ -172,19 +237,35 @@ function formatNum(n?: number) {
 </script>
 
 <template>
-  <div class="scan-live" role="status" aria-live="polite">
+  <div class="scan-live" :class="{ 'scan-live--rescan': isRescan, 'scan-live--rescan-active': rescanActive }" role="status" aria-live="polite">
+    <div v-if="isRescan" class="scan-live__rescan-badge">
+      <span v-if="rescanActive" class="scan-live__rescan-spin deid-spinner" aria-hidden="true" />
+      <span class="scan-live__rescan-tag">RE-SCAN #{{ reRunIndex || 1 }}</span>
+    </div>
     <div class="scan-live__head">
       <div class="scan-live__title-row">
-        <span class="scan-live__label">{{ message }}</span>
-        <span class="scan-live__pct">{{ percent }}%</span>
+        <span class="scan-live__label">{{ displayLabel }}</span>
+        <span class="scan-live__pct" :class="{ 'scan-live__pct--active': rescanActive }">
+          <span v-if="rescanActive" class="scan-live__pct-spin deid-spinner" aria-hidden="true" />
+          {{ percent }}%
+        </span>
       </div>
-      <div class="scan-live__track">
+      <div class="scan-live__track" :class="{ 'scan-live__track--pulse': rescanActive }">
         <div class="scan-live__bar" :style="{ width: `${percent}%` }" />
+      </div>
+      <div v-if="chunkProgress && rescanActive" class="scan-live__chunk">
+        <div class="scan-live__chunk-label">
+          <span>文档分段</span>
+          <span>{{ chunkProgress.current }} / {{ chunkProgress.total }}</span>
+        </div>
+        <div class="scan-live__chunk-track">
+          <div class="scan-live__chunk-bar" :style="{ width: `${chunkProgress.pct}%` }" />
+        </div>
       </div>
       <div class="scan-live__meta">
         <span>已用时 {{ elapsedLabel }}</span>
         <span v-if="streamConnected" class="scan-live__live-dot">实时</span>
-        <span v-if="entitiesFound > 0">已发现 {{ entitiesFound }} 个实体</span>
+        <span v-if="entitiesFound > 0">{{ isRescan ? '本轮新增' : '已发现' }} {{ entitiesFound }} 个实体</span>
       </div>
     </div>
 
@@ -192,7 +273,7 @@ function formatNum(n?: number) {
       实时连接中断，扫描仍在后台进行，请稍候…
     </p>
 
-    <div class="scan-live__steps">
+    <div v-if="!isRescan || rescanDone" class="scan-live__steps">
       <span
         v-for="step in phaseSteps"
         :key="step.id"
@@ -203,7 +284,7 @@ function formatNum(n?: number) {
       </span>
     </div>
 
-    <div v-if="stats?.paragraphs || stats?.chars" class="scan-live__stats">
+    <div v-if="(!isRescan || rescanDone) && (stats?.paragraphs || stats?.chars)" class="scan-live__stats">
       <span v-if="stats?.paragraphs">段落 {{ formatNum(stats.paragraphs) }}</span>
       <span v-if="stats?.chars">字数 {{ formatNum(stats.chars) }}</span>
       <span v-if="stats?.chunks && stats.chunks > 1">分段 {{ stats.chunks }}</span>
@@ -217,20 +298,26 @@ function formatNum(n?: number) {
       扫描服务繁忙，排队第 {{ queuePosition }} 位…
     </p>
 
-    <button
-      v-if="hasTechLog"
-      type="button"
-      class="scan-live__tech-toggle"
-      @click="showTechLog = !showTechLog"
-    >
-      {{ showTechLog ? '隐藏技术日志' : '显示技术日志' }}
-    </button>
-
-    <div v-if="showTechLog" ref="logRef" class="scan-live__log">
-      <p v-if="logs.length === 0 && !streamTail" class="scan-live__log-empty">等待扫描日志…</p>
-      <div v-for="(line, i) in logs" :key="i" class="scan-live__log-line">{{ line }}</div>
-      <div v-if="streamTail" class="scan-live__log-stream">{{ streamTail }}</div>
+    <div class="scan-live__tech">
+      <div class="scan-live__tech-label">
+        <span class="scan-live__tech-icon" aria-hidden="true">▸</span>
+        TECH_LOG
+      </div>
+      <DeidTechLogTerminal
+        mode="compact"
+        :logs="logs"
+        :stream-tail="streamTail"
+        :live="isLive"
+        @click="logModalOpen = true"
+      />
     </div>
+
+    <DeidTechLogModal
+      v-model:open="logModalOpen"
+      :logs="logs"
+      :stream-tail="streamTail"
+      :live="isLive"
+    />
   </div>
 </template>
 
@@ -240,6 +327,114 @@ function formatNum(n?: number) {
   border-radius: var(--deid-radius);
   background: var(--deid-surface-2);
   border: 1px solid var(--deid-border);
+}
+.scan-live--rescan {
+  padding: 0.85rem 1rem;
+  background: color-mix(in srgb, var(--deid-primary) 4%, var(--deid-surface-2));
+  border-color: color-mix(in srgb, var(--deid-primary) 25%, var(--deid-border));
+}
+.scan-live--rescan-active {
+  border-color: color-mix(in srgb, var(--deid-primary) 55%, var(--deid-border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--deid-primary) 12%, transparent);
+}
+.scan-live__rescan-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.55rem;
+}
+.scan-live__rescan-spin {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex-shrink: 0;
+}
+.scan-live__rescan-tag {
+  font-family: var(--deid-font-mono, Consolas, monospace);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--deid-primary);
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: var(--deid-primary-soft);
+  border: 1px solid color-mix(in srgb, var(--deid-primary) 35%, transparent);
+}
+.scan-live__pct {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--deid-primary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.scan-live__pct--active {
+  color: var(--deid-primary);
+}
+.scan-live__pct-spin {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+.scan-live__track--pulse .scan-live__bar {
+  background: linear-gradient(
+    90deg,
+    var(--deid-primary),
+    color-mix(in srgb, var(--deid-primary) 70%, #fff),
+    var(--deid-primary-hover)
+  );
+  background-size: 200% 100%;
+  animation: scan-bar-shimmer 1.6s ease-in-out infinite;
+}
+@keyframes scan-bar-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+.scan-live__chunk {
+  margin-top: 0.55rem;
+}
+.scan-live__chunk-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.3rem;
+  font-size: 0.6875rem;
+  color: var(--deid-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+.scan-live__chunk-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--deid-border);
+  overflow: hidden;
+}
+.scan-live__chunk-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--deid-preset) 80%, var(--deid-primary));
+  transition: width 0.35s ease;
+}
+.scan-live--rescan .term--compact .term__body {
+  max-height: 96px;
+}
+.scan-live__tech {
+  margin-top: 0.15rem;
+}
+.scan-live__tech-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.45rem;
+  font-family: var(--deid-font-mono, Consolas, monospace);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: #3d6b52;
+}
+.scan-live__tech-icon {
+  color: #00ff88;
+  animation: scan-pulse 1.2s ease-in-out infinite;
 }
 .scan-live__head {
   margin-bottom: 0.85rem;
@@ -255,11 +450,6 @@ function formatNum(n?: number) {
 .scan-live__label {
   color: var(--deid-ink);
   font-weight: 500;
-}
-.scan-live__pct {
-  color: var(--deid-primary);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
 }
 .scan-live__track {
   height: 8px;
@@ -343,22 +533,6 @@ function formatNum(n?: number) {
   font-size: 0.9375rem;
   color: var(--deid-ink-muted);
 }
-.scan-live__tech-toggle {
-  display: inline-flex;
-  margin-bottom: 0.65rem;
-  padding: 0.35rem 0.65rem;
-  border: 1px solid var(--deid-border);
-  border-radius: var(--deid-radius-sm);
-  background: var(--deid-surface);
-  color: var(--deid-ink-secondary);
-  font-size: 0.8125rem;
-  font-family: inherit;
-  cursor: pointer;
-}
-.scan-live__tech-toggle:hover {
-  border-color: var(--deid-border-strong);
-  color: var(--deid-ink);
-}
 .scan-live__disconnect {
   margin: 0 0 0.75rem;
   padding: 0.55rem 0.75rem;
@@ -368,33 +542,5 @@ function formatNum(n?: number) {
   color: var(--deid-warning);
   font-size: 0.875rem;
   line-height: 1.45;
-}
-.scan-live__log {
-  max-height: 240px;
-  overflow-y: auto;
-  padding: 0.65rem 0.75rem;
-  border-radius: calc(var(--deid-radius) - 2px);
-  background: var(--deid-scan-log-bg, #f8fafc);
-  border: 1px solid var(--deid-border);
-  font-family: ui-monospace, 'Cascadia Code', 'Segoe UI Mono', monospace;
-  font-size: 0.75rem;
-  line-height: 1.45;
-}
-.scan-live__log-empty {
-  margin: 0;
-  color: var(--deid-ink-muted);
-  font-style: italic;
-}
-.scan-live__log-line {
-  color: var(--deid-scan-log-fg, #475569);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.scan-live__log-stream {
-  color: var(--deid-scan-log-fg, #64748b);
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin-top: 0.25rem;
-  opacity: 0.9;
 }
 </style>

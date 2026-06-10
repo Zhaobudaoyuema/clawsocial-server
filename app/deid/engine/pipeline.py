@@ -10,15 +10,91 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from app.deid.engine.docx_fallback import run_docx_fallback
-from app.deid.engine.plan import ReplacementPlan, build_plan_from_job_entities, normalize_for_match
+from app.deid.engine.plan import MatchSpan, ReplacementPlan, build_plan_from_job_entities, normalize_for_match
 from app.deid.engine.xml import replace as xml_replace
 from app.deid.engine.xml.ns import iter_w
 from app.deid.engine.xml.walker import target_xml_files
+from app.deid.engine.metadata import scan_metadata_residuals, scrub_docprops
 from app.deid.office_io import pack_docx, unpack_docx
 
 CREDIT_CODE_RE = re.compile(r"\b[0-9A-Z]{18}\b")
 ID_CARD_RE = re.compile(r"\b\d{17}[\dXx]\b")
 PHONE_RE = re.compile(r"\b1[3-9]\d{9}\b")
+
+
+def _semantic_plan_for_pairs(pairs: list[dict]) -> ReplacementPlan | None:
+    spans = [
+        MatchSpan(
+            start=0,
+            end=0,
+            original=p["original"],
+            replacement=p["rewritten"],
+            entity_type="semantic",
+            source="semantic",
+        )
+        for p in pairs
+        if p.get("original") and p.get("rewritten") and p["original"] != p["rewritten"]
+    ]
+    if not spans:
+        return None
+    plan = ReplacementPlan(spans=spans)
+    plan.finalize()
+    return plan
+
+
+def _text_from_element(el) -> str:
+    return "".join(t.text or "" for t in iter_w(el, "t"))
+
+
+def _pair_hits_in_text(plan, text: str) -> bool:
+    if not text.strip():
+        return False
+    _, cnt = plan.apply_to_text(text)
+    return cnt > 0
+
+
+def _pair_hits_in_workdir(work: Path, pair: dict) -> bool:
+    plan = _semantic_plan_for_pairs([pair])
+    if not plan:
+        return False
+    for xf in target_xml_files(work):
+        tree = ET.parse(xf)
+        root = tree.getroot()
+        for p in iter_w(root, "p"):
+            full = _text_from_element(p)
+            if _pair_hits_in_text(plan, full):
+                return True
+        for tc in iter_w(root, "tc"):
+            full = _text_from_element(tc)
+            if _pair_hits_in_text(plan, full):
+                return True
+    return False
+
+
+def partition_semantic_pairs(
+    work: Path, pairs: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Split pairs into those that match at least one paragraph vs missed."""
+    applicable: list[dict] = []
+    missed: list[dict] = []
+    for pair in pairs:
+        if pair.get("original") and pair.get("rewritten") and pair["original"] != pair["rewritten"]:
+            if _pair_hits_in_workdir(work, pair):
+                applicable.append(pair)
+            else:
+                missed.append(pair)
+    return applicable, missed
+
+
+def _apply_semantic_pairs_in_workdir(work: Path, pairs: list[dict]) -> int:
+    plan = _semantic_plan_for_pairs(pairs)
+    if not plan:
+        return 0
+    total = 0
+    for xf in target_xml_files(work):
+        _, cnt = xml_replace.process_xml_file(xf, plan)
+        total += cnt
+    return total
 
 
 def run_deid_pipeline(
@@ -27,6 +103,7 @@ def run_deid_pipeline(
     entities: list[dict],
     pattern_rules: list[dict],
     whitelist: list[dict],
+    semantic_pairs: list[dict] | None = None,
 ) -> dict:
     """
     Run de-identification. Returns summary dict with engine, counts, verification.
@@ -56,11 +133,42 @@ def run_deid_pipeline(
                 coverage["footnote"] += touched
             else:
                 coverage["document"] += touched
+        semantic_applied = 0
+        semantic_missed_count = 0
+        semantic_missed_samples: list[dict] = []
+        applicable_pairs: list[dict] = []
+        if semantic_pairs:
+            applicable_pairs, missed_pairs = partition_semantic_pairs(work, semantic_pairs)
+            semantic_missed_count = len(missed_pairs)
+            semantic_missed_samples = [
+                {
+                    "original": (p.get("original") or "")[:80],
+                    "rewritten": (p.get("rewritten") or "")[:80],
+                    "category": p.get("category"),
+                }
+                for p in missed_pairs[:10]
+            ]
+            if applicable_pairs:
+                semantic_applied = _apply_semantic_pairs_in_workdir(work, applicable_pairs)
+                total_repl += semantic_applied
+        scrub_docprops(work)
         verification = _residual_scan_workdir(work, entities)
+        meta_residuals = scan_metadata_residuals(work)
+        if meta_residuals:
+            verification.setdefault("metadata_residuals", meta_residuals)
+            verification["metadata_clean"] = False
+            if verification.get("passed"):
+                verification["passed"] = False
+        else:
+            verification["metadata_clean"] = True
         pack_docx(work, output_path, validate=False, fast=fast_io)
         return {
             "engine": "standard",
             "replacement_count": total_repl,
+            "semantic_applied_count": semantic_applied,
+            "semantic_missed_count": semantic_missed_count,
+            "semantic_missed_samples": semantic_missed_samples,
+            "semantic_selected_count": len(semantic_pairs or []),
             "coverage": coverage,
             "verification": verification,
             "warning": None,

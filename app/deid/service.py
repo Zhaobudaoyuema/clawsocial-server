@@ -9,17 +9,52 @@ from typing import Any
 from fastapi import HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.deid.discovery.enrich import enrich_discovered_entities
-from app.deid.discovery.llm import count_llm_chunks, discover_llm
+from app.deid.discovery.entity_leak import run_entity_leak_scan
+from app.deid.discovery.entity_rescan import (
+    diff_canonical_vs_initial,
+    run_initial_scan,
+    run_re_scan,
+    snapshot_entities,
+)
+from app.deid.discovery.experience_store import (
+    append_global_experience,
+    delete_global_experience,
+    list_global_experience,
+    list_global_experience_texts,
+    update_global_experience,
+)
+from app.deid.discovery.scan_experience import run_scan_experience
+from app.deid.discovery.semantic_categories import HIGH_RISK_CATEGORIES, normalize_category
+from app.deid.discovery.standard_verify import merge_verification
+from app.deid.discovery.deep_flows import (
+    find_risk_by_id,
+    run_deep_detect,
+    run_deep_suggest,
+    run_deep_suggest_all,
+    update_risk_in_list,
+)
+from app.deid.discovery.llm import build_scan_chunk_plan, count_llm_chunks
 from app.deid.discovery.merge import MergedEntity, merge_entities
 from app.deid.engine.pipeline import extract_doc_sample_and_stats, extract_sample_text, run_deid_pipeline
 from app.deid.engine.plan import normalize_for_match
-from app.deid.prompts import build_scan_system_prompt
+from app.deid.engine.preview import assign_placeholder_map, build_preview_text
+from app.deid.prompts import (
+    DEFAULT_SCAN_PROMPT,
+    FLOW_RE_DISCOVER_KEY,
+    SCAN_PROMPT_SETTING_KEY,
+    build_scan_system_prompt,
+)
+from app.deid.settings_store import get_flow_prompt
 from app.deid.entity_types import get_placeholder_prefix, list_entity_types, valid_codes
 from app.deid.schemas import ManualEntityIn
 from app.deid.scan_events import get_scan_event_bus
-from app.deid.settings_store import get_scan_prompt, reset_scan_prompt, scan_prompt_meta, set_setting
-from app.deid.prompts import DEFAULT_SCAN_PROMPT, SCAN_PROMPT_SETTING_KEY
+from app.deid.settings_store import (
+    get_export_filename_mode,
+    get_scan_prompt,
+    reset_scan_prompt,
+    scan_prompt_meta,
+    set_setting,
+)
 from app.deid.rehydrate import build_placeholder_map, rehydrate_text
 from app.deid.storage import (
     JOB_RETENTION_HOURS,
@@ -35,6 +70,7 @@ from app.models_deid import (
     DeidEntity,
     DeidEntityAlias,
     DeidEntityMapping,
+    DeidGlobalExperience,
     DeidJob,
     DeidJobEntity,
     DeidJobEntityAlias,
@@ -49,8 +85,40 @@ SOURCE_UI = {
     "remembered": "已记住",
 }
 
-_AUTO_SOURCES = frozenset({"llm", "remembered"})
+_AUTO_SOURCES = frozenset({"llm", "remembered", "leak_verify"})
 _CONF_ALIAS_PREFIX = "__conf:"
+
+
+def _merged_entities_snapshot(entities: list[MergedEntity]) -> list[dict]:
+    return [
+        {
+            "canonical_name": e.canonical_name,
+            "entity_type": e.entity_type,
+            "source": e.source,
+            "aliases": e.aliases,
+            "hit_count": e.hit_count,
+        }
+        for e in entities
+    ]
+
+
+def _load_global_experience_lines(db: Session) -> list[str]:
+    return list_global_experience_texts(db, limit=10)
+
+
+def _parse_initial_snapshot(job: DeidJob) -> list[dict]:
+    try:
+        raw = json.loads(job.initial_entities_snapshot_json or "[]")
+        return raw if isinstance(raw, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def _delta_vs_initial_count(job: DeidJob, entities: list[MergedEntity]) -> int:
+    initial = _parse_initial_snapshot(job)
+    if not initial:
+        return 0
+    return len(diff_canonical_vs_initial(initial, entities))
 
 
 def _parse_pack_ids(job: DeidJob) -> list[int]:
@@ -76,6 +144,13 @@ def _parse_progress(job: DeidJob) -> dict[str, Any] | None:
         return None
 
 
+def _job_scan_chunk_plan(job: DeidJob) -> dict | None:
+    progress = _parse_progress(job) or {}
+    stats = progress.get("stats") or {}
+    plan = stats.get("scan_chunk_plan")
+    return plan if isinstance(plan, dict) else None
+
+
 _LOG_TAIL_MAX = 30
 
 
@@ -89,6 +164,7 @@ def _merge_progress_payload(
     stats: dict[str, Any] | None = None,
     metrics: dict[str, Any] | None = None,
     log_line: str | None = None,
+    wizard_step: str | None = None,
 ) -> dict[str, Any]:
     prev = _parse_progress(job) or {}
     log_tail = list(prev.get("log_tail") or [])
@@ -113,6 +189,10 @@ def _merge_progress_payload(
         payload["metrics"] = prev["metrics"]
     if log_tail:
         payload["log_tail"] = log_tail
+    if wizard_step is not None:
+        payload["wizard_step"] = wizard_step
+    elif prev.get("wizard_step"):
+        payload["wizard_step"] = prev["wizard_step"]
     return payload
 
 
@@ -127,6 +207,7 @@ def set_job_progress(
     stats: dict[str, Any] | None = None,
     metrics: dict[str, Any] | None = None,
     log_line: str | None = None,
+    wizard_step: str | None = None,
     commit: bool = True,
     emit: bool = True,
 ) -> None:
@@ -139,6 +220,7 @@ def set_job_progress(
         stats=stats,
         metrics=metrics,
         log_line=log_line,
+        wizard_step=wizard_step,
     )
     job.progress_json = json.dumps(payload, ensure_ascii=False)
     if commit:
@@ -266,6 +348,15 @@ def _job_to_dict(job: DeidJob, db: Session | None = None) -> dict[str, Any]:
         "created_at": _dt_iso(job.created_at),
         "hours_until_cleanup": hours,
         "use_worker": job.use_worker,
+        "semantic_skipped": bool(job.semantic_skipped),
+        "re_run_count": job.re_run_count or 0,
+        "experience_eligible": bool(job.experience_eligible),
+        "initial_entity_count": len(_parse_initial_snapshot(job)),
+        "delta_vs_initial_count": _delta_vs_initial_count(
+            job, _job_entities_as_merged(db, job.id) if db else []
+        )
+        if db
+        else 0,
         "progress": _parse_progress(job),
         "files_purged_at": None,
         "mapping_expires_at": None,
@@ -273,6 +364,13 @@ def _job_to_dict(job: DeidJob, db: Session | None = None) -> dict[str, Any]:
     }
     if db is not None:
         out.update(_job_rehydrate_meta(db, job))
+        active_ids = {
+            r.id
+            for r in db.query(DeidJobEntity)
+            .filter(DeidJobEntity.job_id == job.id, DeidJobEntity.is_excluded.is_(False))
+            .all()
+        }
+        out["semantic_stale"] = _semantic_entity_stale(job, active_ids)
     return out
 
 
@@ -320,6 +418,13 @@ def _purge_job(db: Session, job_id: int, *, commit: bool = True) -> None:
     job = db.get(DeidJob, job_id)
     if not job:
         return
+    db.query(DeidGlobalExperience).filter(DeidGlobalExperience.source_job_id == job_id).update(
+        {DeidGlobalExperience.source_job_id: None},
+        synchronize_session=False,
+    )
+    from app.deid.worker_call_store import delete_worker_calls_for_job
+
+    delete_worker_calls_for_job(db, job_id)
     db.query(DeidEntityMapping).filter(DeidEntityMapping.job_id == job_id).delete()
     db.query(DeidJobEntityAlias).filter(
         DeidJobEntityAlias.job_entity_id.in_(
@@ -605,12 +710,14 @@ async def _scan_job_impl(
 
     sample, doc_stats = extract_doc_sample_and_stats(path)
     text_norm = normalize_for_match(sample)
+    scan_chunk_plan = build_scan_chunk_plan(sample)
     llm_chunk_count = count_llm_chunks(sample)
     stats_payload = {
         "paragraphs": doc_stats["paragraph_count"],
         "chars": doc_stats["char_count"],
         "tables": doc_stats["table_count"],
         "chunks": llm_chunk_count,
+        "scan_chunk_plan": scan_chunk_plan,
     }
     stats_msg = (
         f"已解析 {doc_stats['paragraph_count']:,} 段 · "
@@ -659,114 +766,170 @@ async def _scan_job_impl(
         commit=True,
     )
 
-    llm_entities: list[MergedEntity] = []
-    llm_result = None
     llm_enabled = job.use_worker and job_needs_worker_queue(db, job, worker_router)
+    base_system_prompt = build_scan_system_prompt(
+        get_scan_prompt(db),
+        job.prompt_extra,
+        entity_types=list_entity_types(db),
+    )
+    valid_types = frozenset(valid_codes(db))
+    base_entities = merge_entities(manual_merged + remembered_entities)
 
-    if llm_enabled:
-        scan_metrics: dict[str, Any] = {"model": None}
-        llm_percent = 30
+    scan_result = None
+    scan_metrics: dict[str, Any] = {"model": None}
+    scan_percent = 30
 
-        def on_llm_progress(current: int, total: int) -> None:
-            nonlocal llm_percent
-            if total <= 0:
-                return
-            llm_percent = 30 + int(60 * current / total)
-            set_job_progress(
-                db,
-                job,
-                phase="llm",
-                percent=llm_percent,
-                message=f"AI 识别 {current}/{total}",
-                stats=stats_payload,
-                metrics=scan_metrics if scan_metrics.get("model") else None,
-                commit=True,
-                emit=False,
-            )
-            bus.emit(
-                job_id,
-                {
-                    "type": "phase",
-                    "phase": "llm",
-                    "percent": llm_percent,
-                    "message": f"AI 识别 {current}/{total}",
-                },
-            )
+    def on_scan_progress(current: int, total: int, *, phase: str) -> None:
+        nonlocal scan_percent
+        if total <= 0:
+            return
+        scan_percent = 30 + int(55 * current / total)
+        set_job_progress(
+            db,
+            job,
+            phase=phase,
+            percent=scan_percent,
+            message=f"初次识别 {current}/{total}",
+            stats=stats_payload,
+            metrics=scan_metrics if scan_metrics.get("model") else None,
+            commit=True,
+            emit=False,
+        )
 
-        def on_llm_event(event: dict) -> None:
-            bus.emit(job_id, event)
-            if event.get("type") == "metrics":
-                scan_metrics.update(event)
-                set_job_progress(
-                    db,
-                    job,
-                    phase="llm",
-                    percent=llm_percent,
-                    message="AI 识别中…",
-                    stats=stats_payload,
-                    metrics=scan_metrics,
-                    commit=True,
-                    emit=False,
-                )
-            elif event.get("type") == "log":
-                set_job_progress(
-                    db,
-                    job,
-                    phase="llm",
-                    percent=llm_percent,
-                    message="AI 识别中…",
-                    stats=stats_payload,
-                    metrics=scan_metrics if scan_metrics.get("model") else None,
-                    log_line=str(event.get("line") or ""),
-                    commit=True,
-                    emit=False,
-                )
-            elif event.get("type") == "entity":
-                set_job_progress(
-                    db,
-                    job,
-                    phase="llm",
-                    percent=llm_percent,
-                    message="AI 识别中…",
-                    stats=stats_payload,
-                    metrics=scan_metrics if scan_metrics.get("model") else None,
-                    log_line=f"发现实体：{event.get('name')}",
-                    commit=True,
-                    emit=False,
-                )
+    def on_scan_event(event: dict) -> None:
+        bus.emit(job_id, event)
+        if event.get("type") == "metrics":
+            scan_metrics.update(event)
+
+    if llm_enabled and worker_router:
+        set_job_progress(
+            db,
+            job,
+            phase="initial_discover",
+            percent=30,
+            message="初次识别中…",
+            stats=stats_payload,
+            log_line="启动初次实体识别…",
+        )
+        exp_lines = _load_global_experience_lines(db)
+
+        def progress_discover(c: int, t: int) -> None:
+            on_scan_progress(c, t, phase="initial_discover")
+
+        scan_result = await run_initial_scan(
+            sample,
+            base_entities,
+            worker_router,
+            db,
+            job_id=job_id,
+            system_prompt=base_system_prompt,
+            valid_entity_types=valid_types,
+            exp_lines=exp_lines,
+            on_progress=progress_discover,
+            on_event=on_scan_event,
+        )
+        merged = scan_result.entities
+        bus.emit(
+            job_id,
+            {
+                "type": "entities_snapshot",
+                "round": "initial",
+                "entities": _merged_entities_snapshot(merged),
+            },
+        )
 
         set_job_progress(
             db,
             job,
-            phase="llm",
-            percent=30,
-            message="AI 识别…",
+            phase="re_discover_auto",
+            percent=75,
+            message="自动再识别中…",
             stats=stats_payload,
-            log_line="启动 AI 模型识别…",
+            log_line="启动自动再识别（补漏简称与别名）…",
         )
-        llm_result = await discover_llm(
+        re_prompt = get_flow_prompt(db, FLOW_RE_DISCOVER_KEY)
+        if job.prompt_extra:
+            from app.deid.prompts import JOB_EXTRA_SEPARATOR
+
+            re_prompt = f"{re_prompt}{JOB_EXTRA_SEPARATOR}{job.prompt_extra.strip()}"
+
+        def progress_auto_rescan(c: int, t: int) -> None:
+            on_scan_progress(c, t, phase="re_discover_auto")
+
+        auto_result = await run_re_scan(
             sample,
+            merged,
             worker_router,
+            db,
             job_id=job_id,
-            system_prompt=build_scan_system_prompt(
-                get_scan_prompt(db),
-                job.prompt_extra,
-                entity_types=list_entity_types(db),
-            ),
-            enabled=True,
-            on_progress=on_llm_progress,
-            on_event=on_llm_event,
-            valid_entity_types=frozenset(valid_codes(db)),
+            re_discover_prompt=re_prompt,
+            valid_entity_types=valid_types,
+            on_progress=progress_auto_rescan,
+            on_event=on_scan_event,
         )
-        if llm_result.worker_model:
-            scan_metrics["model"] = llm_result.worker_model
-        scan_metrics.update(
+        merged = auto_result.entities
+        bus.emit(
+            job_id,
             {
-                "elapsed_ms": llm_result.elapsed_ms,
-                "prompt_tokens": llm_result.prompt_tokens,
-                "completion_tokens": llm_result.completion_tokens,
-            }
+                "type": "entities_snapshot",
+                "round": "auto_rescan",
+                "entities": _merged_entities_snapshot(merged),
+            },
         )
+        if auto_result.new_canonicals:
+            bus.emit(
+                job_id,
+                {
+                    "type": "log",
+                    "line": f"自动再识别新增 {len(auto_result.new_canonicals)} 个实体",
+                },
+            )
+
+        set_job_progress(
+            db,
+            job,
+            phase="entity_leak_verify",
+            percent=85,
+            message="实体验漏检查中…",
+            stats=stats_payload,
+            log_line="Worker 检查字面残留…",
+        )
+        preview_ent_dicts = [
+            {
+                "canonical_name": e.canonical_name,
+                "entity_type": e.entity_type,
+                "source": e.source,
+                "is_excluded": False,
+                "aliases": e.aliases,
+            }
+            for e in merged
+        ]
+        preview_text = build_preview_text(
+            sample,
+            preview_ent_dicts,
+            _job_pattern_rules(db, job),
+            _job_whitelist_terms(db, job),
+            type_prefix_map=_type_prefix_map(db),
+        )
+        merged, _leaks, _leak_summary = await run_entity_leak_scan(
+            preview_text,
+            sample,
+            merged,
+            worker_router,
+            db,
+            job_id=job_id,
+            job_extra=job.prompt_extra,
+            on_event=on_scan_event,
+        )
+        if _leaks:
+            bus.emit(
+                job_id,
+                {
+                    "type": "entities_snapshot",
+                    "round": "leak_verify",
+                    "entities": _merged_entities_snapshot(merged),
+                },
+            )
     else:
         set_job_progress(
             db,
@@ -777,32 +940,9 @@ async def _scan_job_impl(
             stats=stats_payload,
             log_line="Worker 离线，跳过 AI 识别",
         )
+        merged = base_entities
+        scan_result = None
 
-    combined_raw = list(llm_result.entities) if llm_result else []
-    if sample:
-        enrich_discovered_entities(sample, combined_raw)
-        if combined_raw:
-            bus.emit(
-                job_id,
-                {
-                    "type": "log",
-                    "line": f"上下文关联完成，共 {len(combined_raw)} 个实体（含别名扩展）",
-                },
-            )
-
-    llm_entities = [
-        MergedEntity(
-            canonical_name=e.canonical_name,
-            entity_type=e.entity_type,
-            source=e.source,
-            aliases=e.aliases or [e.canonical_name],
-            hit_count=e.hit_count,
-            confidence=e.confidence,
-        )
-        for e in combined_raw
-    ]
-
-    all_discovered = remembered_entities + llm_entities
     set_job_progress(
         db,
         job,
@@ -813,26 +953,42 @@ async def _scan_job_impl(
         log_line="合并与去重实体列表…",
         commit=True,
     )
-    merged = merge_entities(manual_merged + all_discovered)
-
     _clear_auto_entities(db, job_id)
     auto_only = [e for e in merged if e.source != "manual"]
     _persist_merged_entities(db, job_id, auto_only)
 
-    llm_hits = len(llm_result.entities) if llm_result else 0
+    initial_snap = snapshot_entities(merged)
+    job.initial_entities_snapshot_json = json.dumps(initial_snap, ensure_ascii=False)
+    job.last_re_run_delta_json = json.dumps([], ensure_ascii=False)
+    job.re_run_count = 0
+    job.experience_eligible = False
+
+    job.scan_entities_json = json.dumps(
+        [
+            {
+                "canonical_name": e.canonical_name,
+                "entity_type": e.entity_type,
+                "source": e.source,
+                "aliases": e.aliases,
+                "hit_count": e.hit_count,
+            }
+            for e in merged
+        ],
+        ensure_ascii=False,
+    )
+
     scan_summary = {
         "remembered_hits": remembered_hits,
-        "llm_hits": llm_hits,
-        "llm_chunks": llm_result.chunks if llm_result else 0,
-        "llm_skipped": llm_result.skipped if llm_result else "llm_disabled",
-        "worker_model": llm_result.worker_model if llm_result else None,
-        "llm_errors": llm_result.errors if llm_result else [],
+        "llm_hits": len([e for e in merged if e.source == "llm"]),
+        "re_run_count": 0,
+        "llm_skipped": None if llm_enabled else "llm_disabled",
+        "worker_model": scan_metrics.get("model"),
         "offline_only": not llm_enabled,
         "paragraphs": doc_stats["paragraph_count"],
         "chars": doc_stats["char_count"],
-        "elapsed_ms": llm_result.elapsed_ms if llm_result else 0,
-        "prompt_tokens": llm_result.prompt_tokens if llm_result else 0,
-        "completion_tokens": llm_result.completion_tokens if llm_result else 0,
+        "elapsed_ms": scan_metrics.get("elapsed_ms", 0),
+        "prompt_tokens": scan_metrics.get("prompt_tokens", 0),
+        "completion_tokens": scan_metrics.get("completion_tokens", 0),
     }
     entity_count = len(list_job_entities(db, job_id))
     set_job_progress(
@@ -840,7 +996,7 @@ async def _scan_job_impl(
         job,
         phase="done",
         percent=100,
-        message="解析完成",
+        message="初次识别完成",
         stats=stats_payload,
         metrics={
             "elapsed_ms": scan_summary["elapsed_ms"],
@@ -848,11 +1004,21 @@ async def _scan_job_impl(
             "completion_tokens": scan_summary["completion_tokens"],
             "model": scan_summary.get("worker_model"),
         },
-        log_line=f"扫描完成，共发现 {entity_count} 个实体",
+        log_line=f"初次识别完成，共发现 {entity_count} 个实体",
+        wizard_step="semantic",
         commit=False,
     )
     job.status = "scanned"
     db.commit()
+    bus.emit(
+        job_id,
+        {
+            "type": "scan_round_done",
+            "round": "initial",
+            "entity_count": entity_count,
+            "delta": 0,
+        },
+    )
     bus.emit(
         job_id,
         {
@@ -869,7 +1035,260 @@ async def _scan_job_impl(
     }
 
 
+async def re_run_scan_job(
+    db: Session,
+    job_id: int,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status not in ("scanned", "semantic_review", "re_scanning"):
+        raise HTTPException(400, "当前状态不可再识别")
+    if not job.stored_path:
+        raise HTTPException(404, "任务未上传文件")
+    if not job_needs_worker_queue(db, job, worker_router):
+        raise HTTPException(503, "Worker 离线，无法再识别")
+
+    path = resolve_upload_path(job.stored_path)
+    sample, _ = extract_doc_sample_and_stats(path)
+    base_entities = _job_entities_as_merged(db, job_id)
+    manual = [e for e in base_entities if e.source == "manual"]
+    auto = [e for e in base_entities if e.source != "manual"]
+    base_entities = merge_entities(manual + auto)
+
+    job.status = "re_scanning"
+    db.commit()
+
+    bus = get_scan_event_bus()
+    bus.clear_history(job_id)
+    next_run = (job.re_run_count or 0) + 1
+    bus.emit(
+        job_id,
+        {
+            "type": "rescan_start",
+            "re_run_count": next_run,
+        },
+    )
+    set_job_progress(
+        db,
+        job,
+        phase="re_discover",
+        percent=5,
+        message=f"开始第 {next_run} 次再识别…",
+        commit=True,
+        emit=True,
+    )
+    re_prompt = get_flow_prompt(db, FLOW_RE_DISCOVER_KEY)
+    if job.prompt_extra:
+        from app.deid.prompts import JOB_EXTRA_SEPARATOR
+
+        re_prompt = f"{re_prompt}{JOB_EXTRA_SEPARATOR}{job.prompt_extra.strip()}"
+
+    def on_event(ev: dict) -> None:
+        bus.emit(job_id, ev)
+
+    def on_progress(c: int, t: int) -> None:
+        set_job_progress(
+            db,
+            job,
+            phase="re_discover",
+            percent=min(90, 10 + int(80 * c / max(t, 1))),
+            message=f"再识别中… {c}/{t}",
+            commit=True,
+            emit=True,
+        )
+
+    result = await run_re_scan(
+        sample,
+        base_entities,
+        worker_router,
+        db,
+        job_id=job_id,
+        re_discover_prompt=re_prompt,
+        valid_entity_types=frozenset(valid_codes(db)),
+        on_progress=on_progress,
+        on_event=on_event,
+    )
+
+    _clear_auto_entities(db, job_id)
+    auto_only = [e for e in result.entities if e.source != "manual"]
+    _persist_merged_entities(db, job_id, auto_only)
+
+    job.re_run_count = (job.re_run_count or 0) + 1
+    job.last_re_run_delta_json = json.dumps(result.new_canonicals, ensure_ascii=False)
+    job.experience_eligible = len(result.new_canonicals) > 0
+    job.status = "scanned"
+    db.commit()
+
+    initial = _parse_initial_snapshot(job)
+    delta_vs_initial = diff_canonical_vs_initial(initial, result.entities) if initial else []
+
+    bus.emit(
+        job_id,
+        {
+            "type": "entities_snapshot",
+            "round": "re_run",
+            "entities": _merged_entities_snapshot(result.entities),
+        },
+    )
+    bus.emit(
+        job_id,
+        {
+            "type": "scan_round_done",
+            "round": "re_run",
+            "entity_count": len(list_job_entities(db, job_id)),
+            "delta": len(result.new_canonicals),
+            "delta_entities": result.new_canonicals,
+            "delta_vs_initial": delta_vs_initial,
+            "no_change": len(result.new_canonicals) == 0,
+            "re_run_count": job.re_run_count,
+            "experience_eligible": job.experience_eligible,
+        },
+    )
+
+    return {
+        "entities": list_job_entities(db, job_id),
+        "re_run_count": job.re_run_count,
+        "delta": len(result.new_canonicals),
+        "delta_entities": result.new_canonicals,
+        "no_change": len(result.new_canonicals) == 0,
+        "experience_eligible": job.experience_eligible,
+    }
+
+
+async def generate_experience_job(
+    db: Session,
+    job_id: int,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if not job.experience_eligible:
+        raise HTTPException(400, "当前任务不可提取经验（需再识别产生新实体）")
+    if not job_needs_worker_queue(db, job, worker_router):
+        raise HTTPException(503, "Worker 离线")
+
+    initial = _parse_initial_snapshot(job)
+    if not initial:
+        raise HTTPException(400, "缺少初次识别快照")
+    if not job.stored_path:
+        raise HTTPException(400, "缺少原文件")
+
+    path = resolve_upload_path(job.stored_path)
+    sample, _ = extract_doc_sample_and_stats(path)
+    current = _job_entities_as_merged(db, job_id)
+
+    line = await run_scan_experience(
+        sample,
+        initial,
+        current,
+        worker_router,
+        db,
+        job_id=job_id,
+    )
+    if not line:
+        return {"text": None, "message": "未生成经验"}
+    return {"text": line}
+
+
+def confirm_experience_job(
+    db: Session,
+    job_id: int,
+    *,
+    text: str,
+) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if not job.experience_eligible:
+        raise HTTPException(400, "当前任务不可确认经验")
+
+    row = append_global_experience(db, text, source_job_id=job_id)
+    job.experience_eligible = False
+    db.commit()
+    return {"id": row.id, "text": row.text}
+
+
+def list_global_experience_api(db: Session) -> list[dict]:
+    rows = list_global_experience(db)
+    return [
+        {
+            "id": r.id,
+            "text": r.text,
+            "source_job_id": r.source_job_id,
+            "created_at": _dt_iso(r.created_at),
+            "updated_at": _dt_iso(r.updated_at),
+        }
+        for r in rows
+    ]
+
+
+def create_global_experience_api(db: Session, text: str) -> dict:
+    row = append_global_experience(db, text, source_job_id=None)
+    db.commit()
+    return {"id": row.id, "text": row.text}
+
+
+def patch_global_experience_api(db: Session, exp_id: int, text: str) -> dict:
+    row = update_global_experience(db, exp_id, text)
+    if not row:
+        raise HTTPException(404, "经验不存在")
+    db.commit()
+    return {"id": row.id, "text": row.text}
+
+
+def remove_global_experience_api(db: Session, exp_id: int) -> dict:
+    if not delete_global_experience(db, exp_id):
+        raise HTTPException(404, "经验不存在")
+    db.commit()
+    return {"deleted": True}
+
+
+def _job_entities_as_merged(db: Session, job_id: int) -> list[MergedEntity]:
+    rows = (
+        db.query(DeidJobEntity)
+        .filter(DeidJobEntity.job_id == job_id, DeidJobEntity.is_merged.is_(False))
+        .all()
+    )
+    out: list[MergedEntity] = []
+    for r in rows:
+        aliases = [
+            a.alias_text
+            for a in db.query(DeidJobEntityAlias).filter(
+                DeidJobEntityAlias.job_entity_id == r.id
+            )
+            if not a.alias_text.startswith(_CONF_ALIAS_PREFIX)
+        ]
+        out.append(
+            MergedEntity(
+                canonical_name=r.canonical_name,
+                entity_type=r.entity_type,
+                source=r.source,
+                aliases=aliases or [r.canonical_name],
+                hit_count=r.hit_count,
+                library_entity_id=r.library_entity_id,
+            )
+        )
+    return out
+
+
+def _canonical_keys(snapshot: list[dict]) -> set[str]:
+    keys: set[str] = set()
+    for item in snapshot:
+        k = normalize_for_match(item.get("canonical_name") or "")
+        if k:
+            keys.add(k)
+    return keys
+
+
 def list_job_entities(db: Session, job_id: int) -> list[dict]:
+    job = db.get(DeidJob, job_id)
+    initial_keys = _canonical_keys(_parse_initial_snapshot(job)) if job else set()
+
     rows = (
         db.query(DeidJobEntity)
         .filter(DeidJobEntity.job_id == job_id, DeidJobEntity.is_merged.is_(False))
@@ -905,6 +1324,10 @@ def list_job_entities(db: Session, job_id: int) -> list[dict]:
                 "aliases": aliases,
                 "confidence": confidence,
                 "low_confidence": confidence is not None and confidence < 0.5,
+                "is_new_since_initial": bool(
+                    initial_keys
+                    and normalize_for_match(r.canonical_name) not in initial_keys
+                ),
             }
         )
     out.sort(key=lambda x: (0 if x["source"] == "manual" else 1, -x["hit_count"]))
@@ -989,18 +1412,45 @@ def _find_library_entity_in_packs(
     return None
 
 
+def _alias_on_entity(db: Session, entity_id: int, alias_text: str) -> bool:
+    if (
+        db.query(DeidEntityAlias)
+        .filter(
+            DeidEntityAlias.entity_id == entity_id,
+            DeidEntityAlias.alias_text == alias_text,
+        )
+        .first()
+    ):
+        return True
+    return any(
+        isinstance(obj, DeidEntityAlias)
+        and obj.entity_id == entity_id
+        and obj.alias_text == alias_text
+        for obj in db.new
+    )
+
+
 def _add_aliases_to_entity(
     db: Session,
     entity_id: int,
     aliases: list[str],
     added_from: str,
 ) -> None:
+    seen: set[str] = set()
     for a in aliases:
         text = a.strip()
-        if not text:
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        if _alias_on_entity(db, entity_id, text):
             continue
         conflict = (
-            db.query(DeidEntityAlias).filter(DeidEntityAlias.alias_text == text).first()
+            db.query(DeidEntityAlias)
+            .filter(
+                DeidEntityAlias.alias_text == text,
+                DeidEntityAlias.entity_id != entity_id,
+            )
+            .first()
         )
         if conflict:
             continue
@@ -1125,17 +1575,85 @@ def _apply_entity_selection(
     return [r for r in rows if not r.is_excluded]
 
 
+def _type_prefix_map(db: Session) -> dict[str, str]:
+    return {code: get_placeholder_prefix(db, code) for code in valid_codes(db)}
+
+
+def _job_pattern_rules(db: Session, job: DeidJob) -> list[dict]:
+    pack_ids = _parse_pack_ids(job)
+    return [
+        {
+            "regex_pattern": r.regex_pattern,
+            "placeholder_prefix": r.placeholder_prefix,
+            "entity_type": r.entity_type,
+            "is_active": r.is_active,
+        }
+        for r in db.query(DeidPatternRule).filter(DeidPatternRule.is_active.is_(True)).all()
+        if not r.pack_id or r.pack_id in pack_ids
+    ]
+
+
+def _job_whitelist_terms(db: Session, job: DeidJob) -> list[dict]:
+    pack_ids = _parse_pack_ids(job)
+    return [
+        {"term": w.term, "term_type": w.term_type, "is_active": w.is_active}
+        for w in db.query(DeidWhitelistTerm).filter(DeidWhitelistTerm.is_active.is_(True)).all()
+        if not w.pack_id or w.pack_id in pack_ids
+    ]
+
+
+def _build_job_preview_text(
+    db: Session,
+    job: DeidJob,
+    path: Path,
+    *,
+    max_chars: int = 50000,
+) -> str:
+    sample = extract_sample_text(path)[:max_chars]
+    entities = _entities_for_plan(db, job.id)
+    return build_preview_text(
+        sample,
+        entities,
+        _job_pattern_rules(db, job),
+        _job_whitelist_terms(db, job),
+        type_prefix_map=_type_prefix_map(db),
+    )
+
+
+def _save_semantic_entity_snapshot(db: Session, job: DeidJob, job_id: int) -> None:
+    active_ids = sorted(
+        r.id
+        for r in db.query(DeidJobEntity)
+        .filter(DeidJobEntity.job_id == job_id, DeidJobEntity.is_excluded.is_(False))
+        .all()
+    )
+    job.semantic_entity_snapshot_json = json.dumps(active_ids, ensure_ascii=False)
+
+
+def _semantic_entity_stale(job: DeidJob, active_entity_ids: set[int]) -> bool:
+    if not job.semantic_entity_snapshot_json or job.semantic_skipped:
+        return False
+    try:
+        snapshot = set(json.loads(job.semantic_entity_snapshot_json))
+    except json.JSONDecodeError:
+        return False
+    return snapshot != active_entity_ids
+
+
 def _assign_placeholders(db: Session, job_id: int) -> None:
     entities = (
         db.query(DeidJobEntity)
         .filter(DeidJobEntity.job_id == job_id, DeidJobEntity.is_excluded.is_(False))
         .all()
     )
-    counters: dict[str, int] = {}
-    for ent in sorted(entities, key=lambda e: (e.entity_type, e.canonical_name)):
-        prefix = get_placeholder_prefix(db, ent.entity_type)
-        counters[prefix] = counters.get(prefix, 0) + 1
-        ent.placeholder = f"[{prefix}_{counters[prefix]}]"
+    ent_dicts = [
+        {"id": e.id, "entity_type": e.entity_type, "canonical_name": e.canonical_name}
+        for e in entities
+    ]
+    ph_map = assign_placeholder_map(ent_dicts, type_prefix_map=_type_prefix_map(db))
+    for ent in entities:
+        if ent.id in ph_map:
+            ent.placeholder = ph_map[ent.id]
 
 
 def _persist_remembered_entities(
@@ -1178,27 +1696,61 @@ def delete_job_entity(db: Session, job_id: int, entity_id: int) -> list[dict]:
     return list_job_entities(db, job_id)
 
 
-def confirm_job(
+def _parse_semantic_pairs(job: DeidJob) -> list[dict]:
+    try:
+        raw = json.loads(job.semantic_selection_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(raw, list):
+        return []
+    pairs: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        if item.get("enabled") is False:
+            continue
+        original = item.get("original") or item.get("risk_original")
+        rewritten = item.get("rewritten") or item.get("suggest")
+        if original and rewritten and original != rewritten:
+            pair: dict[str, Any] = {"original": original, "rewritten": rewritten}
+            if item.get("category"):
+                pair["category"] = item["category"]
+            pairs.append(pair)
+    return pairs
+
+
+async def confirm_job(
     db: Session,
     job_id: int,
     *,
     entity_ids: list[int] | None = None,
     remember_ids: list[int] | None = None,
-) -> list[dict]:
-    """Deprecated thin wrapper — assigns placeholders without running pipeline."""
+    semantic_selection: list[dict] | None = None,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    """Confirm entities + semantic selection, then finish docx in one pass."""
     job = db.get(DeidJob, job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
+    if job.status not in ("scanned", "semantic_review", "confirmed"):
+        raise HTTPException(400, "请先完成实体扫描与语义扫描")
     active = _apply_entity_selection(db, job_id, entity_ids)
     if not active:
         raise HTTPException(400, "请至少选择一个实体")
     _assign_placeholders(db, job_id)
     _persist_active_llm_entities_to_library(db, job)
     _persist_remembered_entities(db, job, remember_ids)
-    job.status = "confirmed"
+    if semantic_selection is not None:
+        job.semantic_selection_json = json.dumps(semantic_selection, ensure_ascii=False)
     job.preview_ack_at = now_beijing()
+    job.status = "confirmed"
     db.commit()
-    return list_job_entities(db, job_id)
+    active_ids = {r.id for r in active}
+    stale = _semantic_entity_stale(job, active_ids)
+    result = await _execute_deid(db, job, job_id, worker_router=worker_router)
+    if stale:
+        result["semantic_stale"] = True
+    return result
 
 
 def preview_job(db: Session, job_id: int) -> dict:
@@ -1226,6 +1778,7 @@ def _entities_for_plan(db: Session, job_id: int) -> list[dict]:
     rows = list_job_entities(db, job_id)
     return [
         {
+            "id": r["id"],
             "canonical_name": r["canonical_name"],
             "entity_type": r["entity_type"],
             "placeholder": r.get("placeholder"),
@@ -1237,35 +1790,30 @@ def _entities_for_plan(db: Session, job_id: int) -> list[dict]:
     ]
 
 
-def _execute_deid(db: Session, job: DeidJob, job_id: int) -> dict:
+async def _execute_deid(
+    db: Session,
+    job: DeidJob,
+    job_id: int,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
     if not job.stored_path:
         raise HTTPException(400, "缺少原文件")
     path = resolve_upload_path(job.stored_path)
     out = job_dir(job_id) / f"desensitized_{job.original_filename}"
     entities = _entities_for_plan(db, job_id)
-    pack_ids = _parse_pack_ids(job)
-    patterns = [
-        {
-            "regex_pattern": r.regex_pattern,
-            "placeholder_prefix": r.placeholder_prefix,
-            "entity_type": r.entity_type,
-            "is_active": r.is_active,
-        }
-        for r in db.query(DeidPatternRule).filter(DeidPatternRule.is_active.is_(True)).all()
-        if not r.pack_id or r.pack_id in pack_ids
-    ]
-    whitelist = [
-        {"term": w.term, "term_type": w.term_type, "is_active": w.is_active}
-        for w in db.query(DeidWhitelistTerm).filter(DeidWhitelistTerm.is_active.is_(True)).all()
-        if not w.pack_id or w.pack_id in pack_ids
-    ]
+    patterns = _job_pattern_rules(db, job)
+    whitelist = _job_whitelist_terms(db, job)
 
-    job.status = "running"
+    job.status = "finishing"
     db.commit()
 
-    result = run_deid_pipeline(path, out, entities, patterns, whitelist)
+    semantic_pairs = _parse_semantic_pairs(job)
+    result = run_deid_pipeline(
+        path, out, entities, patterns, whitelist, semantic_pairs=semantic_pairs or None
+    )
     if result.get("engine") == "failed":
-        job.status = "scanned" if job.preview_ack_at else "scanned"
+        job.status = "confirmed"
         db.commit()
         raise HTTPException(500, result.get("error", "脱敏失败"))
 
@@ -1273,12 +1821,52 @@ def _execute_deid(db: Session, job: DeidJob, job_id: int) -> dict:
 
     job.engine = result.get("engine")
     job.output_path = str(out.relative_to(UPLOADS_DIR)).replace("\\", "/")
-    job.verification_json = json.dumps(result.get("verification", {}), ensure_ascii=False)
+
+    pipe_verification = result.get("verification", {})
+    semantic_applied = int(result.get("semantic_applied_count") or 0)
+    semantic_missed = int(result.get("semantic_missed_count") or 0)
+    semantic_missed_samples = result.get("semantic_missed_samples") or []
+    semantic_scanned = bool(job.deep_risks_json) and not job.semantic_skipped
+    semantic_block: dict[str, Any] = {
+        "scanned": semantic_scanned,
+        "selected_count": len(semantic_pairs),
+        "applied_count": semantic_applied,
+        "missed_count": semantic_missed,
+        "missed_samples": semantic_missed_samples,
+    }
+    if semantic_missed > 0:
+        missed_cats = {
+            normalize_category(s.get("category"))
+            for s in semantic_missed_samples
+            if s.get("category")
+        }
+        if missed_cats & HIGH_RISK_CATEGORIES:
+            semantic_block["readiness"] = "不建议外发"
+        else:
+            semantic_block["readiness"] = "部分语义改写未落地"
+
+    worker_online = bool(
+        job.use_worker
+        and worker_router
+        and worker_router.session
+        and worker_router.session.state == "ready"
+    )
+    # 确认阶段只做 XML 替换 + 程序验漏；Worker 验漏仅在实体扫描阶段（entity_leak）使用。
+    pipe_verification = merge_verification(
+        pipe_verification,
+        worker_available=worker_online,
+        finish_verify_mode="program_only",
+        deep_completed=semantic_scanned and semantic_applied > 0,
+        semantic_block=semantic_block,
+    )
+    job.verification_json = json.dumps(pipe_verification, ensure_ascii=False)
     job.run_summary_json = json.dumps(
         {
             "replacement_count": result.get("replacement_count"),
             "coverage": result.get("coverage"),
             "warning": result.get("warning"),
+            "semantic_applied_count": semantic_applied,
+            "semantic_skipped": bool(job.semantic_skipped),
         },
         ensure_ascii=False,
     )
@@ -1296,32 +1884,31 @@ def _execute_deid(db: Session, job: DeidJob, job_id: int) -> dict:
     }
 
 
-def run_job(
+async def run_job(
     db: Session,
     job_id: int,
     *,
     entity_ids: list[int] | None = None,
     remember_ids: list[int] | None = None,
+    worker_router: WorkerRouter | None = None,
 ) -> dict:
-    job = db.get(DeidJob, job_id)
-    if not job or job.status not in ("scanned", "confirmed"):
-        raise HTTPException(400, "请先完成扫描并确认实体")
-    active = _apply_entity_selection(db, job_id, entity_ids)
-    if not active:
-        raise HTTPException(400, "请至少选择一个实体")
-    _assign_placeholders(db, job_id)
-    _persist_active_llm_entities_to_library(db, job)
-    _persist_remembered_entities(db, job, remember_ids)
-    db.commit()
-    return _execute_deid(db, job, job_id)
+    """Legacy alias — prefer confirm_job."""
+    return await confirm_job(
+        db,
+        job_id,
+        entity_ids=entity_ids,
+        remember_ids=remember_ids,
+        worker_router=worker_router,
+    )
 
 
-def rerun_job(
+async def rerun_job(
     db: Session,
     job_id: int,
     *,
     entity_ids: list[int] | None = None,
     remember_ids: list[int] | None = None,
+    worker_router: WorkerRouter | None = None,
 ) -> dict:
     job = db.get(DeidJob, job_id)
     if not job or job.status != "done":
@@ -1333,7 +1920,7 @@ def rerun_job(
     _persist_active_llm_entities_to_library(db, job)
     _persist_remembered_entities(db, job, remember_ids)
     db.commit()
-    return _execute_deid(db, job, job_id)
+    return await _execute_deid(db, job, job_id, worker_router=worker_router)
 
 
 def _write_mappings(db: Session, job_id: int, entities: list[dict]) -> None:
@@ -1385,8 +1972,13 @@ def export_docx(
     if not out_docx.exists():
         raise HTTPException(404, "输出文件不存在")
 
-    stem = Path(job.original_filename or "document.docx").stem
-    filename = f"{stem}_desensitized.docx"
+    mode = get_export_filename_mode(db)
+    if mode == "neutral":
+        date_str = now_beijing().strftime("%Y%m%d")
+        filename = f"deid_{job_id}_{date_str}_desensitized.docx"
+    else:
+        stem = Path(job.original_filename or "document.docx").stem
+        filename = f"{stem}_desensitized.docx"
     return out_docx, filename
 
 
@@ -1509,6 +2101,390 @@ def delete_job(db: Session, job_id: int) -> None:
     if not db.get(DeidJob, job_id):
         raise HTTPException(404, "任务不存在")
     _purge_job(db, job_id)
+
+
+def list_worker_calls(db: Session, job_id: int, *, limit: int = 200) -> dict:
+    if not db.get(DeidJob, job_id):
+        raise HTTPException(404, "任务不存在")
+    from app.deid.worker_call_store import list_worker_calls as _list
+
+    calls = _list(db, job_id, limit=limit)
+    return {"job_id": job_id, "total": len(calls), "calls": calls}
+
+
+def _load_deep_risks(job: DeidJob) -> list[dict]:
+    if not job.deep_risks_json:
+        return []
+    try:
+        data = json.loads(job.deep_risks_json)
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def get_semantic_risks(db: Session, job_id: int) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status in ("semantic_review", "semantic_scanning", "confirmed", "finishing", "done"):
+        return {"risks": _load_deep_risks(job), "status": job.status}
+    if job.status == "scanned" and job.deep_risks_json:
+        return {"risks": _load_deep_risks(job), "status": "semantic_review"}
+    raise HTTPException(400, "语义扫描未完成或不可用")
+
+
+def get_deep_risks(db: Session, job_id: int) -> dict:
+    return get_semantic_risks(db, job_id)
+
+
+def semantic_skip_job(db: Session, job_id: int) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status not in ("scanned", "semantic_review"):
+        raise HTTPException(400, "当前状态不可跳过语义扫描")
+    job.semantic_skipped = True
+    set_job_progress(
+        db,
+        job,
+        phase="semantic_skipped",
+        percent=100,
+        message="已跳过语义扫描",
+        wizard_step="confirm",
+        log_line="用户跳过语义扫描",
+    )
+    db.commit()
+    return {"status": job.status, "semantic_skipped": True}
+
+
+async def _semantic_generate_rewrites(
+    db: Session,
+    job: DeidJob,
+    job_id: int,
+    risks: list[dict],
+    sample: str,
+    worker_router: WorkerRouter | None,
+    *,
+    bus,
+    start_percent: int = 45,
+) -> list[dict]:
+    pending = [
+        r for r in risks if not (r.get("suggested_rewrite") or r.get("rewritten"))
+    ]
+    if not pending:
+        return risks
+
+    def on_progress(c: int, t: int) -> None:
+        set_job_progress(
+            db,
+            job,
+            phase="semantic_suggest",
+            percent=min(
+                95,
+                start_percent + int((95 - start_percent) * c / max(t, 1)),
+            ),
+            message=f"生成改写建议… {c}/{t}",
+            wizard_step="semantic",
+            commit=True,
+            emit=True,
+        )
+
+    def on_event(ev: dict) -> None:
+        if ev.get("type") in ("log", "token", "metrics"):
+            bus.emit(job_id, ev)
+
+    set_job_progress(
+        db,
+        job,
+        phase="semantic_suggest",
+        percent=start_percent,
+        message=f"生成改写建议… 0/{len(pending)}",
+        wizard_step="semantic",
+        log_line=f"逐段检测完成 {len(risks)} 条，补生成缺失改写",
+        commit=True,
+        emit=True,
+    )
+
+    return await run_deep_suggest_all(
+        risks,
+        sample,
+        worker_router,
+        db,
+        job_id=job_id,
+        on_progress=on_progress,
+        on_event=on_event,
+    )
+
+
+async def semantic_start_job(
+    db: Session,
+    job_id: int,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job or not job.stored_path:
+        raise HTTPException(404, "任务不存在或未上传文件")
+    if job.status not in ("scanned", "semantic_review"):
+        raise HTTPException(400, "请先完成实体扫描")
+    if not job.use_worker or not job_needs_worker_queue(db, job, worker_router):
+        raise HTTPException(503, "Worker 离线，语义扫描不可用")
+
+    path = resolve_upload_path(job.stored_path)
+    if not path.exists():
+        raise HTTPException(400, "原文件已丢失")
+
+    job.semantic_skipped = False
+    job.status = "semantic_scanning"
+    bus = get_scan_event_bus()
+    bus.clear_history(job_id)
+    set_job_progress(
+        db,
+        job,
+        phase="semantic_detect",
+        percent=10,
+        message="语义扫描中…",
+        wizard_step="semantic",
+        log_line="开始语义扫描（检测+改写）",
+    )
+    _save_semantic_entity_snapshot(db, job, job_id)
+    db.commit()
+
+    preview = _build_job_preview_text(db, job, path)
+
+    def on_progress(c: int, t: int) -> None:
+        set_job_progress(
+            db,
+            job,
+            phase="semantic_detect",
+            percent=min(40, 10 + int(30 * c / max(t, 1))),
+            message=f"语义扫描… {c}/{t}",
+            wizard_step="semantic",
+            commit=True,
+            emit=True,
+        )
+
+    def on_event(ev: dict) -> None:
+        if ev.get("type") in ("log", "token", "metrics", "chunk_start", "risk", "stats"):
+            bus.emit(job_id, ev)
+
+    risks, summary = await run_deep_detect(
+        preview,
+        worker_router,
+        db,
+        job_id=job_id,
+        job_extra=job.prompt_extra,
+        scan_chunk_plan=_job_scan_chunk_plan(job),
+        on_progress=on_progress,
+        on_event=on_event,
+    )
+    if risks:
+        risks = await _semantic_generate_rewrites(
+            db,
+            job,
+            job_id,
+            risks,
+            preview,
+            worker_router,
+            bus=bus,
+            start_percent=42,
+        )
+    job.deep_risks_json = json.dumps(risks, ensure_ascii=False)
+    job.status = "semantic_review"
+    filled = sum(1 for r in risks if r.get("suggested_rewrite") or r.get("rewritten"))
+    bus.emit(
+        job_id,
+        {
+            "type": "semantic_done",
+            "risk_count": len(risks),
+            "rewrite_count": filled,
+            "windows": summary.get("windows", 0),
+        },
+    )
+    set_job_progress(
+        db,
+        job,
+        phase="semantic_review",
+        percent=100,
+        message=(
+            f"发现 {len(risks)} 条语义风险，已生成 {filled} 条改写"
+            if risks
+            else "未发现语义指纹"
+        ),
+        wizard_step="semantic",
+        log_line="语义扫描完成，改写已就绪" if filled else "语义扫描完成",
+    )
+    db.commit()
+    return {"risks": risks, "summary": summary, "status": job.status}
+
+
+async def semantic_suggest_all_job(
+    db: Session,
+    job_id: int,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job or not job.stored_path:
+        raise HTTPException(404, "任务不存在或未上传文件")
+    if job.status not in ("semantic_review", "confirmed"):
+        raise HTTPException(400, "当前状态不可生成改写")
+    if not job_needs_worker_queue(db, job, worker_router):
+        raise HTTPException(503, "Worker 离线")
+
+    path = resolve_upload_path(job.stored_path)
+    if not path.exists():
+        raise HTTPException(400, "原文件已丢失")
+
+    risks = _load_deep_risks(job)
+    if not risks:
+        return {"risks": [], "status": job.status}
+
+    bus = get_scan_event_bus()
+    bus.clear_history(job_id)
+    prev_status = job.status
+    job.status = "semantic_scanning"
+    db.commit()
+
+    preview = _build_job_preview_text(db, job, path)
+    try:
+        risks = await _semantic_generate_rewrites(
+            db,
+            job,
+            job_id,
+            risks,
+            preview,
+            worker_router,
+            bus=bus,
+            start_percent=15,
+        )
+        job.deep_risks_json = json.dumps(risks, ensure_ascii=False)
+        job.status = "semantic_review"
+        filled = sum(1 for r in risks if r.get("suggested_rewrite") or r.get("rewritten"))
+        bus.emit(
+            job_id,
+            {
+                "type": "semantic_done",
+                "risk_count": len(risks),
+                "rewrite_count": filled,
+            },
+        )
+        set_job_progress(
+            db,
+            job,
+            phase="semantic_review",
+            percent=100,
+            message=f"已生成 {filled} 条改写建议",
+            wizard_step="semantic",
+            log_line="改写生成完成",
+        )
+        db.commit()
+        return {"risks": risks, "status": job.status}
+    except Exception:
+        job.status = prev_status
+        db.commit()
+        raise
+
+
+async def deep_scan_job(
+    db: Session,
+    job_id: int,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job or job.status != "done":
+        raise HTTPException(400, "请先完成标准脱敏")
+    if not job.use_worker or not job_needs_worker_queue(db, job, worker_router):
+        raise HTTPException(503, "Worker 离线，深度脱敏不可用")
+    if not job.output_path:
+        raise HTTPException(400, "缺少输出文件")
+
+    from app.uploads import UPLOADS_DIR
+
+    out_path = UPLOADS_DIR / job.output_path
+    if not out_path.exists():
+        raise HTTPException(404, "输出文件不存在")
+
+    job.status = "deep_scanning"
+    db.commit()
+
+    sample = extract_sample_text(out_path)[:50000]
+    risks, summary = await run_deep_detect(
+        sample,
+        worker_router,
+        db,
+        job_id=job_id,
+        job_extra=job.prompt_extra,
+        scan_chunk_plan=_job_scan_chunk_plan(job),
+    )
+    job.deep_risks_json = json.dumps(risks, ensure_ascii=False)
+    job.status = "deep_review" if risks else "done"
+    db.commit()
+    return {"risks": risks, "summary": summary, "status": job.status}
+
+
+async def semantic_suggest_risk(
+    db: Session,
+    job_id: int,
+    risk_id: str,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status not in ("semantic_review", "confirmed"):
+        raise HTTPException(400, "当前状态不支持语义改写建议")
+    risks = _load_deep_risks(job)
+    risk = find_risk_by_id(risks, risk_id)
+    if not risk:
+        raise HTTPException(404, "风险项不存在")
+    if risk.get("suggested_rewrite"):
+        return {"risk_id": risk_id, "suggested_rewrite": risk["suggested_rewrite"]}
+
+    if not job_needs_worker_queue(db, job, worker_router):
+        raise HTTPException(503, "Worker 离线")
+
+    path = resolve_upload_path(job.stored_path) if job.stored_path else None
+    preview = (
+        _build_job_preview_text(db, job, path)
+        if path and path.exists()
+        else ""
+    )
+    suggestion = await run_deep_suggest(
+        risk, preview, worker_router, db, job_id=job_id
+    )
+    if suggestion:
+        risks = update_risk_in_list(risks, risk_id, {"suggested_rewrite": suggestion})
+        job.deep_risks_json = json.dumps(risks, ensure_ascii=False)
+        db.commit()
+    return {"risk_id": risk_id, "suggested_rewrite": suggestion}
+
+
+async def deep_suggest_risk(
+    db: Session,
+    job_id: int,
+    risk_id: str,
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    return await semantic_suggest_risk(
+        db, job_id, risk_id, worker_router=worker_router
+    )
+
+
+async def deep_apply_job(
+    db: Session,
+    job_id: int,
+    items: list[dict],
+    *,
+    worker_router: WorkerRouter | None = None,
+) -> dict:
+    raise HTTPException(
+        410,
+        "深度脱敏写回已废弃，请在确认阶段通过 semantic_selection 一次性完成",
+    )
 
 
 def get_scan_prompt_settings(db: Session) -> dict:
