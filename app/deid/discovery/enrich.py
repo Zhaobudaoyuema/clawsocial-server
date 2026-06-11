@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from app.deid.discovery.filters import NOISE_TERMS as _NOISE_TERMS
 from app.deid.discovery.rules import DiscoveredEntity, discover_hereafter_rules
 from app.deid.engine.plan import normalize_for_match
 
@@ -11,22 +12,6 @@ _EMBEDDED_ABBR = re.compile(
     r"[\dA-Za-z\-]*([\u4e00-\u9fff]{2,10})(?:MTN|PPN|SCP|CP|EB|ABN|债|票据)",
     re.IGNORECASE,
 )
-
-# Skip generic tokens that are not organization names
-_NOISE_TERMS = frozenset(
-    {
-        "同花顺",
-        "wind",
-        "东方财富",
-        "企查查",
-        "天眼查",
-        "中国北京市",
-        "中国上海市",
-        "组织结构",
-        "组织结构图",
-    }
-)
-
 
 def _is_noise(name: str) -> bool:
     n = name.strip()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from app.deid.discovery.filters import GENERIC_MERGE_TERMS as _GENERIC_MERGE
 from app.deid.engine.plan import normalize_for_match
 
 SOURCE_PRIORITY = {
@@ -13,28 +14,6 @@ SOURCE_PRIORITY = {
     "leak_verify": 3,
     "llm": 4,
 }
-
-# Generic fragments must not trigger cross-entity merge (enrich may add these).
-_GENERIC_MERGE = frozenset(
-    {
-        "股份",
-        "有限公司",
-        "股份有限公司",
-        "科技股份",
-        "科技公司",
-        "集团",
-        "集团公司",
-        "公司",
-        "有限",
-        "企业",
-        "股份有限",
-        "控股",
-        "投资",
-        "管理",
-        "合伙企业",
-        "有限合伙",
-    }
-)
 _STOCK_CODE = re.compile(r"^\d{5,6}\.[A-Z]{2}$|^\d+\.[A-Z]{2,4}$|^[A-Z0-9]{2,12}$", re.I)
 
 

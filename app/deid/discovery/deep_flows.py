@@ -16,6 +16,10 @@ from typing import Any
 
 
 
+from app.deid.discovery.filters import (
+    BOILERPLATE_PATTERNS as _BOILERPLATE_PATTERNS,
+    GENERIC_HEADERS as _GENERIC_HEADERS,
+)
 from app.deid.discovery.flow_parse import parse_risk_lines, parse_suggest_line
 
 from app.deid.discovery.flows import (
@@ -53,23 +57,6 @@ _MAX_RISKS_PER_UNIT = 3
 
 _PLACEHOLDER_RISK = re.compile(
     r"^\[公司_\d+\](?:\([^)]*\))?$|^\[姓名_\d+\](?:\([^)]*\))?$"
-)
-_GENERIC_HEADERS = frozenset(
-    {
-        "公司名称",
-        "流通a股",
-        "流通b股",
-        "流通h股",
-        "金额单位",
-        "法定代表人",
-        "审计对象",
-        "被审计单位",
-    }
-)
-_BOILERPLATE_PATTERNS = (
-    re.compile(r"导致.*风险警示"),
-    re.compile(r"取数口径"),
-    re.compile(r"公司拟采取.*应对"),
 )
 
 
