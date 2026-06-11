@@ -30,27 +30,18 @@ SEED_CEEC = [
 
 
 def extract_text(path: Path) -> str:
-    if path.suffix.lower() == ".docx":
-        import sys
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from app.deid.convert import convert_to_markdown, ensure_source_markdown
 
-        root = Path(__file__).resolve().parents[1]
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        from app.deid.engine.pipeline import extract_sample_text
-
-        return extract_sample_text(path, max_chars=200_000)
-
-    import win32com.client
-
-    word = win32com.client.Dispatch("Word.Application")
-    word.Visible = False
-    try:
-        doc = word.Documents.Open(str(path.resolve()), ReadOnly=True)
-        text = doc.Content.Text
-        doc.Close(False)
-    finally:
-        word.Quit()
-    return text
+    suffix = path.suffix.lower()
+    if suffix == ".md":
+        return path.read_text(encoding="utf-8", errors="replace")
+    if suffix == ".docx":
+        return convert_to_markdown(path)
+    ensure_source_markdown(path, path.parent)
+    return (path.parent / "source.md").read_text(encoding="utf-8", errors="replace")
 
 
 def main() -> None:

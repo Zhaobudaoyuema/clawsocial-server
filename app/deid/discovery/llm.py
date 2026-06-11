@@ -18,7 +18,7 @@ from app.deid.worker.errors import WorkerBusy, WorkerOffline, WorkerRequestError
 
 def get_llm_chunk_params() -> tuple[int, int]:
     """Shared chunk size/overlap for stats preview and LLM discovery."""
-    chunk_size = int(os.getenv("DEID_LLM_CHUNK_SIZE", "4000"))
+    chunk_size = int(os.getenv("DEID_LLM_CHUNK_SIZE", "8000"))
     overlap = int(os.getenv("DEID_LLM_CHUNK_OVERLAP", "300"))
     return chunk_size, overlap
 

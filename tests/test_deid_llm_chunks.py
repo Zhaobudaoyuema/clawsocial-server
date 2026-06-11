@@ -3,7 +3,7 @@ from app.deid.discovery.llm import count_llm_chunks, get_llm_chunk_params
 
 
 def test_count_llm_chunks_matches_params():
-    text = "段落一\n\n" * 2000
+    text = "段落一\n\n" * 5000
     chunk_size, overlap = get_llm_chunk_params()
     n = count_llm_chunks(text)
     assert n >= 2

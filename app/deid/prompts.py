@@ -56,11 +56,6 @@ def build_default_scan_prompt(entity_types: list[dict] | None = None) -> str:
 
 DEFAULT_SCAN_PROMPT = build_default_scan_prompt()
 
-CHAT_DEFAULT_SYSTEM = """你是审计底稿阅读助手。请基于用户提供的文档内容（如有）回答问题。
-- 只依据文档与对话上下文作答，不要编造事实
-- 若文档中无相关信息，请明确说明
-- 回答简洁、专业"""
-
 SCAN_PROMPT_SETTING_KEY = "scan_prompt"
 FLOW_POST_RUN_VERIFY_KEY = "flow_post_run_verify_prompt"
 FLOW_EXPORT_READINESS_KEY = "flow_export_readiness_prompt"

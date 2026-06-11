@@ -1,10 +1,7 @@
 """Tests for deep candidate extraction, preview bridge, and semantic pipeline helpers."""
-import io
-import zipfile
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from docx import Document
 
 from app.deid.discovery.deep_candidates import extract_deep_candidates
 from app.deid.discovery.deep_flows import (
@@ -13,17 +10,13 @@ from app.deid.discovery.deep_flows import (
     run_deep_suggest_all,
 )
 from app.deid.discovery.semantic_rules import extract_program_risks
-from app.deid.engine.pipeline import partition_semantic_pairs, run_deid_pipeline
+from app.deid.engine.markdown_pipeline import (
+    extract_sample_text,
+    partition_semantic_pairs_text,
+    run_markdown_pipeline,
+)
 from app.deid.engine.preview import assign_placeholder_map, build_preview_text
-from app.deid.engine.pipeline import extract_sample_text
 from app.models_deid import DeidJob, DeidJobEntity
-
-
-def _minimal_docx(path, paragraphs: list[str]) -> None:
-    doc = Document()
-    for p in paragraphs:
-        doc.add_paragraph(p)
-    doc.save(path)
 
 
 def test_extract_windows_finds_project_line():
@@ -76,7 +69,8 @@ def test_placeholder_map_matches_assign(db):
     job = DeidJob(
         status="scanned",
         original_filename="t.docx",
-        stored_path="deid/1/original_t.docx",
+        file_type="markdown",
+        stored_path="deid/1/source.md",
         pack_ids_json="[]",
     )
     db.add(job)
@@ -217,15 +211,15 @@ async def test_run_deep_suggest_all_fills_rewrites():
 
 
 def test_dry_run_reports_missed(tmp_path):
-    doc_path = tmp_path / "sem.docx"
-    _minimal_docx(doc_path, ["项目名称：251231内控审计", "无关段落"])
-    out_path = tmp_path / "out.docx"
+    md_path = tmp_path / "source.md"
+    md_path.write_text("项目名称：251231内控审计\n无关段落\n", encoding="utf-8")
+    out_path = tmp_path / "out.md"
     entities: list[dict] = []
     pairs = [
         {"original": "251231内控审计", "rewritten": "内控审计项目", "category": "project_id"},
         {"original": "不存在的内容", "rewritten": "替换", "category": "table_row"},
     ]
-    result = run_deid_pipeline(doc_path, out_path, entities, [], [], semantic_pairs=pairs)
+    result = run_markdown_pipeline(md_path, out_path, entities, [], [], semantic_pairs=pairs)
     assert result["semantic_applied_count"] == 1
     assert result["semantic_missed_count"] == 1
     assert len(result["semantic_missed_samples"]) == 1
@@ -235,9 +229,9 @@ def test_dry_run_reports_missed(tmp_path):
 
 
 def test_semantic_apply_hits_after_entity_replace(tmp_path):
-    doc_path = tmp_path / "combo.docx"
-    _minimal_docx(doc_path, ["中国能建251231内控审计"])
-    out_path = tmp_path / "out.docx"
+    md_path = tmp_path / "source.md"
+    md_path.write_text("中国能建251231内控审计\n", encoding="utf-8")
+    out_path = tmp_path / "out.md"
     entities = [
         {
             "canonical_name": "中国能建",
@@ -255,8 +249,8 @@ def test_semantic_apply_hits_after_entity_replace(tmp_path):
             "category": "project_id",
         },
     ]
-    result = run_deid_pipeline(
-        doc_path, out_path, entities, [], [], semantic_pairs=pairs
+    result = run_markdown_pipeline(
+        md_path, out_path, entities, [], [], semantic_pairs=pairs
     )
     assert result["semantic_applied_count"] == 1
     assert result["semantic_missed_count"] == 0
@@ -266,20 +260,10 @@ def test_semantic_apply_hits_after_entity_replace(tmp_path):
     assert "251231" not in text
 
 
-def test_partition_semantic_pairs_on_unpacked_workdir(tmp_path):
-    work = tmp_path / "work"
-    work.mkdir()
-    word = work / "word"
-    word.mkdir()
-    doc_xml = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/document/2006/main">'
-        "<w:body><w:p><w:r><w:t>命中段落</w:t></w:r></w:p>"
-        "</w:body></w:document>"
-    )
-    (word / "document.xml").write_text(doc_xml, encoding="utf-8")
-    applicable, missed = partition_semantic_pairs(
-        work,
+def test_partition_semantic_pairs_text():
+    text = "命中段落\n"
+    applicable, missed = partition_semantic_pairs_text(
+        text,
         [
             {"original": "命中段落", "rewritten": "替换"},
             {"original": "缺失", "rewritten": "x"},

@@ -16,7 +16,7 @@ from app.deid.schemas import (
     DeidAccessIn,
     ExperienceConfirmIn,
     GlobalExperienceIn,
-    DeepApplyIn,
+    ProgramScanRevertIn,
     EntityTypeIn,
     EntityTypePatch,
     LibraryEntityIn,
@@ -281,6 +281,39 @@ def preview(job_id: int, db: Session = Depends(get_db)):
     return service.preview_job(db, job_id)
 
 
+@router.get("/jobs/{job_id}/source-markdown")
+def source_markdown(
+    job_id: int,
+    max_chars: int = Query(50000, ge=1000, le=200000),
+    db: Session = Depends(get_db),
+):
+    return service.get_source_markdown(db, job_id, max_chars=max_chars)
+
+
+@router.post("/jobs/{job_id}/program-scan/run")
+def program_scan_run(job_id: int, db: Session = Depends(get_db)):
+    return service.run_program_scan(db, job_id)
+
+
+@router.get("/jobs/{job_id}/program-scan")
+def program_scan_get(job_id: int, db: Session = Depends(get_db)):
+    return service.get_program_scan(db, job_id)
+
+
+@router.post("/jobs/{job_id}/program-scan/revert")
+def program_scan_revert(
+    job_id: int,
+    body: ProgramScanRevertIn,
+    db: Session = Depends(get_db),
+):
+    return service.revert_program_scan_change(db, job_id, body.change_id)
+
+
+@router.post("/jobs/{job_id}/program-scan/confirm")
+def program_scan_confirm(job_id: int, db: Session = Depends(get_db)):
+    return service.confirm_program_scan(db, job_id)
+
+
 @router.post("/jobs/{job_id}/confirm")
 async def confirm(
     job_id: int,
@@ -387,46 +420,6 @@ async def semantic_suggest_all(job_id: int, request: Request, db: Session = Depe
     return await service.semantic_suggest_all_job(db, job_id, worker_router=client)
 
 
-@router.post("/jobs/{job_id}/deep/scan")
-async def deep_scan(job_id: int, request: Request, db: Session = Depends(get_db)):
-    from app.deid.worker.client import get_worker_client
-
-    client = get_worker_client(request.app)
-    return await service.semantic_start_job(db, job_id, worker_router=client)
-
-
-@router.get("/jobs/{job_id}/deep/risks")
-def deep_risks(job_id: int, db: Session = Depends(get_db)):
-    return service.get_deep_risks(db, job_id)
-
-
-@router.post("/jobs/{job_id}/deep/suggest/{risk_id}")
-async def deep_suggest(
-    job_id: int,
-    risk_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    from app.deid.worker.client import get_worker_client
-
-    client = get_worker_client(request.app)
-    return await service.deep_suggest_risk(db, job_id, risk_id, worker_router=client)
-
-
-@router.post("/jobs/{job_id}/deep/apply")
-async def deep_apply(
-    job_id: int,
-    body: DeepApplyIn,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    from app.deid.worker.client import get_worker_client
-
-    client = get_worker_client(request.app)
-    items = [i.model_dump() for i in body.items]
-    return await service.deep_apply_job(db, job_id, items, worker_router=client)
-
-
 @router.get("/jobs/{job_id}/mapping")
 def job_mapping(job_id: int, db: Session = Depends(get_db)):
     return service.get_job_mapping(db, job_id)
@@ -444,7 +437,7 @@ def export_job(
     override_reason: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    path, filename = service.export_docx(
+    path, filename = service.export_markdown(
         db,
         job_id,
         override_ack=override_ack,
@@ -452,7 +445,7 @@ def export_job(
     )
     return FileResponse(
         path,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        media_type="text/markdown; charset=utf-8",
         filename=filename,
     )
 

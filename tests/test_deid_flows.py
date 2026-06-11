@@ -79,22 +79,3 @@ def test_flow_items_from_chunks():
     assert len(units) == 2
     assert isinstance(units[0], FlowItem)
     assert units[0].text == "aaa"
-
-
-def test_scrub_docprops_clears_creator(tmp_path):
-    from app.deid.engine.metadata import scrub_docprops, scan_metadata_residuals
-
-    work = tmp_path / "work"
-    props = work / "docProps"
-    props.mkdir(parents=True)
-    core = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
- xmlns:dc="http://purl.org/dc/elements/1.1/">
-  <dc:creator>张晓平</dc:creator>
-  <cp:lastModifiedBy>1667226511@qq.com</cp:lastModifiedBy>
-</cp:coreProperties>"""
-    (props / "core.xml").write_text(core, encoding="utf-8")
-    cleared = scrub_docprops(work, label="脱敏工具")
-    assert any("creator" in c for c in cleared)
-    residuals = scan_metadata_residuals(work)
-    assert not any("@" in r.get("value", "") for r in residuals)

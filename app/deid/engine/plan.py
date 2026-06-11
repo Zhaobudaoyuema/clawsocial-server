@@ -246,7 +246,15 @@ def build_plan_from_job_entities(
         if ent.get("is_excluded"):
             continue
         ph = ent.get("placeholder") or "[实体_1]"
+        names: list[str] = []
+        canonical = (ent.get("canonical_name") or "").strip()
+        if canonical:
+            names.append(canonical)
         for alias in ent.get("aliases", []):
+            a = (alias or "").strip()
+            if a and a not in names:
+                names.append(a)
+        for alias in names:
             aliases.append((alias, ph, ent.get("entity_type", "company"), ent.get("source", "preset")))
     patterns = [
         (r["regex_pattern"], r["placeholder_prefix"], r["entity_type"], "pattern")

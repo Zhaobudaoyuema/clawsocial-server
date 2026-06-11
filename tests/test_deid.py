@@ -28,48 +28,24 @@ def _entity_ids(client: TestClient, job_id: int) -> list[int]:
     return [e["id"] for e in ents if not e.get("is_excluded")]
 
 
+def _complete_program_scan(client: TestClient, job_id: int) -> None:
+    """Run program scan and ack before confirm/run."""
+    r = client.post(f"/api/deid/jobs/{job_id}/program-scan/run")
+    assert r.status_code == 200, r.text
+    r = client.post(f"/api/deid/jobs/{job_id}/program-scan/confirm")
+    assert r.status_code == 200, r.text
+
+
 def test_normalize_for_match():
     assert normalize_for_match("国家 电投") == normalize_for_match("国家电投")
 
 
-def test_extract_sample_text_strict_ooxml(tmp_path):
-    """Strict OOXML (purl.oclc.org) namespace must be readable."""
-    import io
-    import zipfile
+def test_extract_sample_text_from_markdown(tmp_path):
+    from app.deid.engine.markdown_pipeline import extract_sample_text
 
-    from app.deid.engine.pipeline import extract_sample_text
-
-    doc_xml = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main">'
-        "<w:body><w:p><w:r><w:t>中国能源建设股份有限公司审计报告</w:t></w:r></w:p>"
-        "</w:body></w:document>"
-    )
-    content_types = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        '<Default Extension="xml" ContentType="application/xml"/>'
-        '<Override PartName="/word/document.xml" '
-        'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-        "</Types>"
-    )
-    rels = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
-        'Target="word/document.xml"/>'
-        "</Relationships>"
-    )
-    doc_path = tmp_path / "strict.docx"
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("[Content_Types].xml", content_types)
-        zf.writestr("_rels/.rels", rels)
-        zf.writestr("word/document.xml", doc_xml)
-    doc_path.write_bytes(buf.getvalue())
-
-    sample = extract_sample_text(doc_path)
+    md_path = tmp_path / "source.md"
+    md_path.write_text("中国能源建设股份有限公司审计报告\n", encoding="utf-8")
+    sample = extract_sample_text(md_path)
     assert "中国能源建设股份有限公司" in sample
 
 
@@ -109,6 +85,16 @@ def test_job_scan_run_flow(client: TestClient, db, seeded_db):
     assert r.status_code == 200
     job = r.json()
     job_id = job["id"]
+    assert job.get("file_type") == "markdown"
+
+    r = client.get(f"/api/deid/jobs/{job_id}/source-markdown")
+    assert r.status_code == 200
+    md = r.json()
+    assert md["source_format"] == "docx"
+    assert md["source_format_label"] == "Word"
+    assert md["file_type"] == "markdown"
+    assert "content" in md
+    assert md["stats"]["char_count"] >= 50
 
     r = client.post(f"/api/deid/jobs/{job_id}/scan")
     assert r.status_code == 200
@@ -121,6 +107,7 @@ def test_job_scan_run_flow(client: TestClient, db, seeded_db):
 
     ids = _entity_ids(client, job_id)
     assert ids
+    _complete_program_scan(client, job_id)
     r = client.post(f"/api/deid/jobs/{job_id}/run", json={"entity_ids": ids})
     assert r.status_code == 200
     result = r.json()
@@ -129,10 +116,10 @@ def test_job_scan_run_flow(client: TestClient, db, seeded_db):
     r = client.get(f"/api/deid/jobs/{job_id}/export?override_ack=true")
     assert r.status_code == 200
     ct = r.headers.get("content-type", "")
-    assert "wordprocessingml" in ct or "octet-stream" in ct
+    assert "markdown" in ct or "text/plain" in ct or "octet-stream" in ct
     cd = r.headers.get("content-disposition", "")
     assert "deid_" in cd
-    assert "_desensitized.docx" in cd
+    assert "_desensitized.md" in cd
 
 
 def _ensure_ceec_fixture():
@@ -302,6 +289,7 @@ def test_llm_entities_auto_saved_to_library(client: TestClient, db, seeded_db, m
     client.post(f"/api/deid/jobs/{job_id}/scan")
     ents = client.get(f"/api/deid/jobs/{job_id}/entities").json()
     ids = [e["id"] for e in ents if not e.get("is_excluded")]
+    _complete_program_scan(client, job_id)
     client.post(
         f"/api/deid/jobs/{job_id}/run",
         json={"entity_ids": ids},
@@ -353,6 +341,7 @@ def test_confirm_with_remember_ids_no_duplicate_alias(client: TestClient, db, se
     client.post(f"/api/deid/jobs/{job_id}/scan")
     ents = client.get(f"/api/deid/jobs/{job_id}/entities").json()
     ids = [e["id"] for e in ents if not e.get("is_excluded")]
+    _complete_program_scan(client, job_id)
     r = client.post(
         f"/api/deid/jobs/{job_id}/confirm",
         json={"entity_ids": ids, "remember_ids": ids},
@@ -381,6 +370,7 @@ def test_list_jobs_includes_incomplete(client: TestClient, db, seeded_db):
 
     client.post(f"/api/deid/jobs/{draft_id}/scan")
     ids = _entity_ids(client, draft_id)
+    _complete_program_scan(client, draft_id)
     client.post(f"/api/deid/jobs/{draft_id}/run", json={"entity_ids": ids})
     listed = client.get("/api/deid/jobs").json()
     assert any(j["id"] == draft_id and j["status"] == "done" for j in listed)
@@ -406,6 +396,7 @@ def test_list_jobs_includes_archived(client: TestClient, db, seeded_db):
     job_id = r.json()["id"]
     client.post(f"/api/deid/jobs/{job_id}/scan")
     ids = _entity_ids(client, job_id)
+    _complete_program_scan(client, job_id)
     client.post(f"/api/deid/jobs/{job_id}/run", json={"entity_ids": ids})
     job = db.get(DeidJob, job_id)
     archive_job_files(db, job)
@@ -433,6 +424,7 @@ def test_list_jobs_after_run(client: TestClient, db, seeded_db):
     job_id = r.json()["id"]
     client.post(f"/api/deid/jobs/{job_id}/scan")
     ids = _entity_ids(client, job_id)
+    _complete_program_scan(client, job_id)
     client.post(f"/api/deid/jobs/{job_id}/run", json={"entity_ids": ids})
     r = client.get("/api/deid/jobs")
     assert r.status_code == 200

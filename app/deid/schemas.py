@@ -156,19 +156,11 @@ class RehydrateIn(BaseModel):
     text: str = Field(..., min_length=1)
 
 
+class ProgramScanRevertIn(BaseModel):
+    change_id: str = Field(..., min_length=1, max_length=64)
+
+
 class RehydrateOut(BaseModel):
     text: str
     resolved: list[str] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
-
-
-class DeepApplyItemIn(BaseModel):
-    risk_id: str
-    enabled: bool = True
-    original: str | None = None
-    rewritten: str | None = None
-    suggested_rewrite: str | None = None
-
-
-class DeepApplyIn(BaseModel):
-    items: list[DeepApplyItemIn] = Field(default_factory=list)

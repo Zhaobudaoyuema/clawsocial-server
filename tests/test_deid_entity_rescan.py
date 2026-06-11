@@ -78,7 +78,7 @@ async def test_re_run_scan_offline(db, seeded_db):
         status="scanned",
         pack_ids_json="[]",
         original_filename="t.docx",
-        stored_path="deid/1/original_t.docx",
+        stored_path="deid/1/source.md",
         use_worker=True,
         initial_entities_snapshot_json='[{"canonical_name":"A","entity_type":"company","aliases":[]}]',
     )

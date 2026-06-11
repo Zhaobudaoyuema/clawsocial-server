@@ -174,7 +174,7 @@ async function confirmDelete() {
       <DeidEmptyState
         v-else-if="!store.jobsLoading"
         title="还没有任务"
-        hint="上传 Word 文档开始第一份脱敏"
+        hint="上传文档开始第一份脱敏"
         cta-label="上传第一份文档"
         @action="onNewTask"
       />

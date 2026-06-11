@@ -24,10 +24,9 @@ import importlib
 
 importlib.import_module("app.models_deid")  # register deid tables with Base.metadata
 from app.migrate import run_migrations
-from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid, deid_chat
+from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid
 from app.deid.worker.router import WorkerRouter
 from app.deid.scan_queue import ScanQueue
-from app.deid.chat.session import ChatSessionStore
 from app.api.client import history as client_history
 from app.crawfish.world.state import WorldConfig, WorldState
 
@@ -126,18 +125,15 @@ async def lifespan(app: FastAPI):
     app.state.worker_router = WorkerRouter()
     app.state.worker_relay = RemoteWorkerRelay()
     app.state.scan_queue = ScanQueue(app=app)
-    app.state.chat_session_store = ChatSessionStore()
     await bootstrap_worker_relay(app.state.worker_relay)
     ping_task = asyncio.create_task(_worker_ping_loop(app))
     relay_status_task = asyncio.create_task(_relay_status_loop(app))
-    chat_cleanup_task = asyncio.create_task(_chat_session_cleanup_loop(app))
 
     yield
 
     ping_task.cancel()
     relay_status_task.cancel()
-    chat_cleanup_task.cancel()
-    for task in (ping_task, relay_status_task, chat_cleanup_task):
+    for task in (ping_task, relay_status_task):
         try:
             await task
         except asyncio.CancelledError:
@@ -148,16 +144,6 @@ async def lifespan(app: FastAPI):
 
     stop_deid_cleanup()
     stop_scheduler()
-
-
-async def _chat_session_cleanup_loop(app: FastAPI) -> None:
-    import asyncio
-
-    while True:
-        await asyncio.sleep(600)
-        store = getattr(app.state, "chat_session_store", None)
-        if store:
-            store.cleanup_expired()
 
 
 async def _worker_ping_loop(app: FastAPI) -> None:
@@ -281,7 +267,6 @@ app.include_router(share.router)
 app.include_router(client_history.router)
 app.include_router(blog.router)
 app.include_router(deid.router)
-app.include_router(deid_chat.router)
 app.include_router(ws_worker.router)
 
 from app.api.deid_dev import include_dev_relay_routes

@@ -62,3 +62,24 @@ def test_deep_completed_can_export():
     )
     assert out["readiness"]["ready"] is True
     assert "可外发" in out["summary"]
+
+
+def test_finish_suppresses_entity_residuals_after_program_scan():
+    """Entity alias residuals belong to program scan, not completion hero."""
+    out = merge_verification(
+        {
+            "alias_residuals": [{"text": "中国能建", "snippet": "…中国能建…"}],
+            "pattern_residuals": [],
+            "metadata_clean": True,
+        },
+        worker_available=False,
+        finish_verify_mode="program_only",
+        deep_completed=True,
+        semantic_block={"scanned": True, "applied_count": 2, "missed_count": 0, "selected_count": 2},
+        program_scan_acknowledged=True,
+        program_scan_residual_after=0,
+    )
+    assert out["passed"] is True
+    assert out["summary"] == "程序扫描已通过"
+    assert out["residuals"] == []
+    assert len(out["alias_residuals"]) == 1

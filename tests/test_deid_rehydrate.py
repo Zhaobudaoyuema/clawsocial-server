@@ -15,7 +15,7 @@ from app.deid.service import (
 from app.deid.storage import DEID_ROOT
 from app.models_deid import DeidEntityMapping, DeidJob
 from app.time_utils import now_beijing
-from tests.test_deid import _ensure_fixture, _entity_ids
+from tests.test_deid import _complete_program_scan, _ensure_fixture, _entity_ids
 
 
 class _Row:
@@ -98,6 +98,7 @@ def _run_done_job(client: TestClient) -> int:
     job_id = r.json()["id"]
     client.post(f"/api/deid/jobs/{job_id}/scan")
     ids = _entity_ids(client, job_id)
+    _complete_program_scan(client, job_id)
     r = client.post(f"/api/deid/jobs/{job_id}/run", json={"entity_ids": ids})
     assert r.status_code == 200
     assert r.json()["status"] == "done"

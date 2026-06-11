@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { semanticCatLabel } from '../components/deid/semanticCategories'
 import { deidEventSourceUrl, deidFetch, getDeidAccessToken } from '../utils/deidAccess'
+import type { SourceMarkdownPayload } from '../utils/deidFormats'
 
 const API = '/api/deid'
 
@@ -78,15 +79,15 @@ export const useDeidStore = defineStore('deid', () => {
     streamTail: '',
   })
   let scanEventSource: EventSource | null = null
-  const showDeepReview = ref(false)
-  const deepRisks = ref<Record<string, unknown>[]>([])
   const workerCalls = ref<Record<string, unknown>[]>([])
-  const deepLoading = ref(false)
   const semanticRisks = ref<Record<string, unknown>[]>([])
   const semanticLoading = ref(false)
   const semanticSelection = ref<Record<string, unknown>[]>([])
   const scanSnapshotEntities = ref<Record<string, unknown>[]>([])
   const semanticStageEntered = ref(false)
+  const markdownStageEntered = ref(false)
+  const sourceMarkdown = ref<SourceMarkdownPayload | null>(null)
+  const sourceMarkdownLoading = ref(false)
   const reScanning = ref(false)
   const scanSession = ref<'initial' | 'rescan' | 'semantic' | null>(null)
   const rescanGateOpen = ref(false)
@@ -345,15 +346,39 @@ export const useDeidStore = defineStore('deid', () => {
 
   type WizardPhase =
     | 'upload'
+    | 'markdown-preview'
     | 'scan-draft'
     | 'scanning'
     | 'entity-scanned'
     | 'semantic-idle'
     | 'semantic-scanning'
     | 'semantic-review'
+    | 'program-running'
+    | 'program-review'
     | 'confirm-detail'
     | 'finishing'
     | 'done'
+
+  type ProgramScanChange = {
+    id: string
+    action: 'add_alias' | 'new_entity'
+    entity_id?: number
+    canonical_name?: string
+    text: string
+    hit_count?: number
+    reverted?: boolean
+  }
+
+  type ProgramScanPayload = {
+    run_at?: string | null
+    residual_before?: number
+    residual_after?: number
+    changes?: ProgramScanChange[]
+  }
+
+  const programStageEntered = ref(false)
+  const programScanRunning = ref(false)
+  const programScan = ref<ProgramScanPayload | null>(null)
 
   function wizardPhase(): WizardPhase {
     if (showEntitiesPanel.value || showRehydratePanel.value) return 'upload'
@@ -364,6 +389,8 @@ export const useDeidStore = defineStore('deid', () => {
     if (st === 'done' || st === 'archived') return 'done'
     if (st === 'finishing' || st === 'running') return 'finishing'
     if (st === 'semantic_scanning') return 'semantic-scanning'
+    if (programScanRunning.value) return 'program-running'
+    if (st === 'program_review') return 'program-review'
     if (st === 'semantic_review') return 'semantic-review'
     if (
       (st === 'scanned' || st === 're_scanning' || st === 'confirmed') &&
@@ -375,7 +402,10 @@ export const useDeidStore = defineStore('deid', () => {
     if (st === 'scanning' || st === 'queued' || reScanning.value) return 'scanning'
     const sp = scanProgress.value
     if (sp && sp.phase !== 'error' && sp.phase !== 'done') return 'scanning'
-    if (st === 'draft') return 'scan-draft'
+    if (st === 'draft') {
+      if (!markdownStageEntered.value) return 'markdown-preview'
+      return 'scan-draft'
+    }
     return 'upload'
   }
 
@@ -406,13 +436,26 @@ export const useDeidStore = defineStore('deid', () => {
     semanticStageEntered.value = true
   }
 
-  function wizardStep(): 'upload' | 'entity_scan' | 'semantic' | 'confirm' | 'finish' {
+  function enterMarkdownStage() {
+    markdownStageEntered.value = true
+  }
+
+  function wizardStep():
+    | 'upload'
+    | 'convert'
+    | 'entity_scan'
+    | 'semantic'
+    | 'program_scan'
+    | 'confirm'
+    | 'finish' {
     const phase = wizardPhase()
-    if (phase === 'upload' || phase === 'scan-draft') return 'upload'
+    if (phase === 'upload') return 'upload'
+    if (phase === 'markdown-preview' || phase === 'scan-draft') return 'convert'
     if (phase === 'scanning' || phase === 'entity-scanned') return 'entity_scan'
     if (phase === 'semantic-idle' || phase === 'semantic-scanning' || phase === 'semantic-review') {
       return 'semantic'
     }
+    if (phase === 'program-running' || phase === 'program-review') return 'program_scan'
     if (phase === 'confirm-detail') return 'confirm'
     return 'finish'
   }
@@ -580,15 +623,22 @@ export const useDeidStore = defineStore('deid', () => {
     if (status === 'semantic_review' || status === 'semantic_scanning') {
       await loadEntities(incomplete.id)
       await fetchSemanticRisks(incomplete.id)
+    } else if (status === 'program_review') {
+      programStageEntered.value = true
+      await loadEntities(incomplete.id)
+      await fetchProgramScan(incomplete.id)
     } else if (status === 'scanned' || status === 'confirmed') {
       await loadEntities(incomplete.id)
-      if ((currentJob.value as { semantic_skipped?: boolean })?.semantic_skipped) {
+      const ack = (currentJob.value as { program_scan_ack_at?: string | null } | null)
+        ?.program_scan_ack_at
+      if (ack) {
         openConclusionView()
-      } else if (!needsConclusionStep(currentJob.value)) {
-        await autoRunAfterScan(incomplete.id)
       }
     } else if (status === 'scanning' || status === 'queued') {
       await pollScanUntilDone(incomplete.id)
+    } else if (status === 'draft') {
+      markdownStageEntered.value = false
+      await fetchSourceMarkdown(incomplete.id)
     } else if (status === 'done') {
       await loadEntities(incomplete.id)
       await fetchPreview(incomplete.id)
@@ -620,13 +670,20 @@ export const useDeidStore = defineStore('deid', () => {
       await fetchSemanticRisks(id)
       return
     }
+    if (status === 'program_review') {
+      programStageEntered.value = true
+      await fetchJob(id)
+      await loadEntities(id)
+      await fetchProgramScan(id)
+      return
+    }
     if (status === 'scanned' || status === 'confirmed') {
       await fetchJob(id)
       await loadEntities(id)
-      if ((currentJob.value as { semantic_skipped?: boolean })?.semantic_skipped) {
+      const ack = (currentJob.value as { program_scan_ack_at?: string | null } | null)
+        ?.program_scan_ack_at
+      if (ack) {
         openConclusionView()
-      } else if (!needsConclusionStep(currentJob.value)) {
-        await autoRunAfterScan(id)
       }
       return
     }
@@ -634,7 +691,23 @@ export const useDeidStore = defineStore('deid', () => {
       await pollScanUntilDone(id)
       return
     }
+    if (status === 'draft') {
+      markdownStageEntered.value = false
+      await fetchSourceMarkdown(id)
+    }
     entities.value = []
+  }
+
+  async function fetchSourceMarkdown(jobId: number) {
+    sourceMarkdownLoading.value = true
+    try {
+      sourceMarkdown.value = await readJson<SourceMarkdownPayload>(
+        await deidFetch(`${API}/jobs/${jobId}/source-markdown`),
+      )
+      return sourceMarkdown.value
+    } finally {
+      sourceMarkdownLoading.value = false
+    }
   }
 
   async function newTask() {
@@ -650,6 +723,11 @@ export const useDeidStore = defineStore('deid', () => {
     showEntitiesPanel.value = false
     showRehydratePanel.value = false
     entityDirty.value = false
+    markdownStageEntered.value = false
+    sourceMarkdown.value = null
+    programStageEntered.value = false
+    programScanRunning.value = false
+    programScan.value = null
   }
 
   async function uploadJob(
@@ -673,6 +751,7 @@ export const useDeidStore = defineStore('deid', () => {
       showEntitiesPanel.value = false
       showRehydratePanel.value = false
       await fetchJobs()
+      await fetchSourceMarkdown((currentJob.value as { id: number }).id)
       return currentJob.value
     } catch (e) {
       error.value = e instanceof Error ? e.message : '上传失败'
@@ -897,12 +976,6 @@ export const useDeidStore = defineStore('deid', () => {
     return `${API}/jobs/${jobId}/export?${q}`
   }
 
-  function patchDeepRisk(riskId: string, patch: Record<string, unknown>) {
-    deepRisks.value = deepRisks.value.map((r) =>
-      r.risk_id === riskId ? { ...r, ...patch } : r,
-    )
-  }
-
   function patchSemanticRisk(riskId: string, patch: Record<string, unknown>) {
     semanticRisks.value = semanticRisks.value.map((r) =>
       r.risk_id === riskId ? { ...r, ...patch } : r,
@@ -918,9 +991,88 @@ export const useDeidStore = defineStore('deid', () => {
     }))
   }
 
+  function proceedToProgramScan() {
+    saveSemanticSelection()
+    enterSemanticStage()
+    programStageEntered.value = true
+    const id = (currentJob.value as { id?: number } | null)?.id
+    if (id) void runProgramScan(id)
+  }
+
   function proceedToConfirm() {
+    const ack = (currentJob.value as { program_scan_ack_at?: string | null } | null)
+      ?.program_scan_ack_at
+    if (!ack) {
+      proceedToProgramScan()
+      return
+    }
     saveSemanticSelection()
     openConclusionView()
+  }
+
+  async function fetchProgramScan(jobId: number) {
+    const data = await readJson<ProgramScanPayload & { entities?: Record<string, unknown>[] }>(
+      await deidFetch(`${API}/jobs/${jobId}/program-scan`),
+    )
+    programScan.value = data
+    if (data.entities) entities.value = data.entities
+    return data
+  }
+
+  async function runProgramScan(jobId: number) {
+    programScanRunning.value = true
+    error.value = null
+    try {
+      const data = await readJson<
+        ProgramScanPayload & { status?: string; entities?: Record<string, unknown>[] }
+      >(await deidFetch(`${API}/jobs/${jobId}/program-scan/run`, { method: 'POST' }))
+      programScan.value = data
+      if (data.entities) entities.value = data.entities
+      if (currentJob.value) {
+        currentJob.value = {
+          ...currentJob.value,
+          status: data.status || 'program_review',
+          program_scan_ack_at: null,
+        }
+      }
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : '程序扫描失败'
+      throw e
+    } finally {
+      programScanRunning.value = false
+    }
+  }
+
+  async function revertProgramScanChange(jobId: number, changeId: string) {
+    const data = await readJson<ProgramScanPayload & { entities?: Record<string, unknown>[] }>(
+      await deidFetch(`${API}/jobs/${jobId}/program-scan/revert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ change_id: changeId }),
+      }),
+    )
+    programScan.value = data
+    if (data.entities) entities.value = data.entities
+    if (currentJob.value) {
+      currentJob.value = { ...currentJob.value, program_scan_ack_at: null }
+    }
+    return data
+  }
+
+  async function confirmProgramScan(jobId: number) {
+    const data = await readJson<{ program_scan_ack_at?: string | null; status?: string }>(
+      await deidFetch(`${API}/jobs/${jobId}/program-scan/confirm`, { method: 'POST' }),
+    )
+    if (currentJob.value) {
+      currentJob.value = {
+        ...currentJob.value,
+        program_scan_ack_at: data.program_scan_ack_at,
+        status: data.status || currentJob.value.status,
+      }
+    }
+    openConclusionView()
+    return data
   }
 
   async function fetchSemanticRisks(jobId: number) {
@@ -1169,87 +1321,6 @@ export const useDeidStore = defineStore('deid', () => {
     await fetchGlobalExperience()
   }
 
-  async function fetchDeepRisks(jobId: number) {
-    const data = await readJson<{ risks: Record<string, unknown>[] }>(
-      await deidFetch(`${API}/jobs/${jobId}/deep/risks`),
-    )
-    deepRisks.value = data.risks ?? []
-    return deepRisks.value
-  }
-
-  async function deepScan(jobId: number) {
-    deepLoading.value = true
-    error.value = null
-    try {
-      const data = await readJson<{ risks: Record<string, unknown>[]; status: string }>(
-        await deidFetch(`${API}/jobs/${jobId}/deep/scan`, { method: 'POST' }),
-      )
-      deepRisks.value = data.risks ?? []
-      showDeepReview.value = true
-      if (currentJob.value) {
-        currentJob.value = { ...currentJob.value, status: data.status }
-      }
-      return data
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : '深度扫描失败'
-      throw e
-    } finally {
-      deepLoading.value = false
-    }
-  }
-
-  async function deepSuggest(jobId: number, riskId: string) {
-    const data = await readJson<{ risk_id: string; suggested_rewrite: string | null }>(
-      await deidFetch(`${API}/jobs/${jobId}/deep/suggest/${encodeURIComponent(riskId)}`, {
-        method: 'POST',
-      }),
-    )
-    if (data.suggested_rewrite) {
-      patchDeepRisk(riskId, { suggested_rewrite: data.suggested_rewrite })
-    }
-    return data
-  }
-
-  async function deepApply(jobId: number) {
-    deepLoading.value = true
-    error.value = null
-    try {
-      const items = deepRisks.value.map((r) => ({
-        risk_id: r.risk_id as string,
-        enabled: r.enabled !== false,
-        original: r.original as string,
-        rewritten: (r.rewritten as string) || (r.suggested_rewrite as string) || undefined,
-      }))
-      const data = await readJson<Record<string, unknown>>(
-        await deidFetch(`${API}/jobs/${jobId}/deep/apply`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items }),
-        }),
-      )
-      showDeepReview.value = false
-      if (currentJob.value) {
-        currentJob.value = {
-          ...currentJob.value,
-          status: data.status as string,
-          verification: data.verification,
-        }
-      }
-      await fetchJob(jobId)
-      await fetchPreview(jobId)
-      return data
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : '深度应用失败'
-      throw e
-    } finally {
-      deepLoading.value = false
-    }
-  }
-
-  function closeDeepReview() {
-    showDeepReview.value = false
-  }
-
   async function fetchLibrary(q?: string) {
     const url = q ? `${API}/entities?q=${encodeURIComponent(q)}` : `${API}/entities`
     libraryEntities.value = await readJson(await deidFetch(url))
@@ -1368,20 +1439,19 @@ export const useDeidStore = defineStore('deid', () => {
     updateEntityType,
     deleteEntityType,
     DEFAULT_ENTITY_TYPES,
-    showDeepReview,
-    deepRisks,
-    deepLoading,
-    deepScan,
-    fetchDeepRisks,
-    deepSuggest,
-    deepApply,
-    patchDeepRisk,
-    closeDeepReview,
     semanticRisks,
     semanticLoading,
     semanticSelection,
     scanSnapshotEntities,
     semanticStageEntered,
+    programStageEntered,
+    programScanRunning,
+    programScan,
+    markdownStageEntered,
+    sourceMarkdown,
+    sourceMarkdownLoading,
+    enterMarkdownStage,
+    fetchSourceMarkdown,
     reScanning,
     scanSession,
     lastRescanResult,
@@ -1391,6 +1461,11 @@ export const useDeidStore = defineStore('deid', () => {
     patchSemanticRisk,
     saveSemanticSelection,
     proceedToConfirm,
+    proceedToProgramScan,
+    fetchProgramScan,
+    runProgramScan,
+    revertProgramScanChange,
+    confirmProgramScan,
     fetchSemanticRisks,
     semanticStart,
     semanticSuggestAll,

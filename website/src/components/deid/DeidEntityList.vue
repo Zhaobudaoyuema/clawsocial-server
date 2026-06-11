@@ -22,7 +22,7 @@ const props = withDefaults(
 const emit = defineEmits<{ delete: [id: number] }>()
 
 const searchQuery = ref('')
-const sourceFilter = ref<'all' | 'llm' | 'remembered' | 'manual' | 'leak_verify'>('all')
+const sourceFilter = ref<'all' | 'llm' | 'remembered' | 'manual' | 'leak_verify' | 'program_scan'>('all')
 const newOnly = ref(false)
 
 const filteredEntities = computed(() => {
@@ -70,6 +70,7 @@ function sourceBadge(e: Record<string, unknown>) {
   if (src === 'llm') return { variant: 'llm' as const, label: 'AI 识别' }
   if (src === 'remembered') return { variant: 'preset' as const, label: '词库' }
   if (src === 'leak_verify') return { variant: 'llm' as const, label: '验漏' }
+  if (src === 'program_scan') return { variant: 'llm' as const, label: '程序扫描' }
   return { variant: 'preset' as const, label: label || src }
 }
 
@@ -83,6 +84,7 @@ const sourceChips = [
   { id: 'remembered' as const, label: '词库' },
   { id: 'manual' as const, label: '手动' },
   { id: 'leak_verify' as const, label: '验漏' },
+  { id: 'program_scan' as const, label: '程序扫描' },
 ]
 </script>
 

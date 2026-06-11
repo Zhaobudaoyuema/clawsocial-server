@@ -105,6 +105,8 @@ def merge_verification(
     deep_completed: bool = False,
     semantic_block: dict[str, Any] | None = None,
     finish_verify_mode: str | None = None,
+    program_scan_acknowledged: bool = False,
+    program_scan_residual_after: int | None = None,
 ) -> dict[str, Any]:
     """Build extended verification_json per spec §7."""
     leaks = leaks or []
@@ -113,6 +115,10 @@ def merge_verification(
     pattern_residuals = pipeline_verification.get("pattern_residuals") or []
     metadata_clean = pipeline_verification.get("metadata_clean", True)
     confirmed_clean = len(alias_residuals) == 0 and len(pattern_residuals) == 0
+    suppress_finish_entity_residuals = (
+        finish_verify_mode == "program_only" and program_scan_acknowledged
+    )
+    entity_check_clean = True if suppress_finish_entity_residuals else confirmed_clean
     entity_leaks = [lk for lk in leaks if (lk.get("category") or "") == "entity_leak"]
     worker_entity_clean = len(entity_leaks) == 0
 
@@ -131,9 +137,9 @@ def merge_verification(
         blockers.append("未进行语义扫描")
     readiness_ready = readiness.get("ready")
     if readiness_ready is None:
-        if deep_completed and confirmed_clean and metadata_clean:
+        if deep_completed and entity_check_clean and metadata_clean:
             readiness_ready = True
-        elif semantic_skipped or not confirmed_clean or not metadata_clean:
+        elif semantic_skipped or not entity_check_clean or not metadata_clean:
             readiness_ready = False
         else:
             readiness_ready = None
@@ -141,13 +147,15 @@ def merge_verification(
     level = readiness.get("level") or ("deep" if deep_completed else "standard")
     notes = list(readiness.get("notes") or [])
     if finish_verify_mode == "program_only" and not any("仅程序验漏" in str(n) for n in notes):
-        notes.insert(0, "完成阶段仅程序验漏，建议人工审阅后外发")
+        notes.insert(0, "完成阶段仅程序验漏，实体残留已在程序扫描处理")
+    if program_scan_acknowledged and not any("程序扫描" in str(n) for n in notes):
+        notes.append("确认前已完成程序扫描")
     if semantic_skipped and not any("语义扫描" in str(n) for n in notes):
         notes.append("未进行语义扫描")
     if not worker_available and finish_verify_mode != "program_only" and not notes:
         notes.append("Worker 离线：未完成 AI 验漏")
 
-    passed = confirmed_clean and metadata_clean and readiness_ready is not False
+    passed = entity_check_clean and metadata_clean and readiness_ready is not False
 
     out: dict[str, Any] = {
         "passed": passed,
@@ -174,6 +182,8 @@ def merge_verification(
         "pattern_residuals": pattern_residuals,
         "metadata_residuals": pipeline_verification.get("metadata_residuals") or [],
         "finish_verify_mode": finish_verify_mode,
+        "program_scan_acknowledged": program_scan_acknowledged,
+        "program_scan_residual_after": program_scan_residual_after,
         "summary": _build_summary(
             {
                 "passed": passed,
@@ -190,7 +200,16 @@ def merge_verification(
     }
     if semantic_block:
         out["semantic"] = semantic_block
-    out["residuals"] = _format_residuals_ui(out)
+    ui_source = out
+    if suppress_finish_entity_residuals:
+        ui_source = {**out, "alias_residuals": [], "pattern_residuals": []}
+    out["residuals"] = _format_residuals_ui(ui_source)
+    if suppress_finish_entity_residuals and metadata_clean and readiness_ready is not False:
+        out["passed"] = True
+        if program_scan_residual_after == 0:
+            out["summary"] = "程序扫描已通过"
+        else:
+            out["summary"] = "程序扫描已确认，建议人工审阅后外发"
     return out
 
 
@@ -307,7 +326,7 @@ async def run_standard_verify(
     semantic_block: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run Flow 3+4 and merge into verification_json."""
-    from app.deid.engine.pipeline import extract_sample_text
+    from app.deid.engine.markdown_pipeline import extract_sample_text
 
     worker_available = _worker_available(router)
     sample = extract_sample_text(output_path)[:50000] if output_path.exists() else ""

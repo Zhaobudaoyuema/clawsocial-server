@@ -91,6 +91,9 @@ def resolve_dev_relay_token() -> str:
     explicit = os.getenv("DEID_WORKER_RELAY_TOKEN", "").strip()
     if explicit:
         return explicit
+    if os.getenv("TESTING"):
+        # 测试环境只认显式配置，避免因本机 GUID 在白名单而触发真实网络请求
+        return ""
     return get_local_dev_relay_token() or ""
 
 
@@ -98,6 +101,8 @@ def resolve_dev_relay_url() -> str:
     explicit = os.getenv("DEID_WORKER_RELAY_URL", "").strip().rstrip("/")
     if explicit:
         return explicit
+    if os.getenv("TESTING"):
+        return ""
     if get_local_dev_relay_token():
         return DEFAULT_RELAY_URL
     return ""

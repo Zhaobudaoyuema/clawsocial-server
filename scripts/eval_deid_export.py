@@ -1,10 +1,9 @@
-"""Evaluate a desensitized docx for export readiness leaks."""
+"""Evaluate a desensitized markdown export for readiness leaks."""
 from __future__ import annotations
 
 import json
 import re
 import sys
-import zipfile
 from collections import Counter
 from pathlib import Path
 
@@ -34,46 +33,33 @@ HIGH_RISK_PATTERNS = [
 ]
 
 
-def extract_text(docx_path: Path) -> str:
-    with zipfile.ZipFile(docx_path) as z:
-        xml = z.read("word/document.xml").decode("utf-8")
-        text = re.sub(r"</w:p>", "\n", xml)
-        text = re.sub(r"<[^>]+>", "", text)
-        for ent, ch in [("&lt;", "<"), ("&gt;", ">"), ("&amp;", "&"), ("&quot;", '"')]:
-            text = text.replace(ent, ch)
-        return text
+def extract_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
-def evaluate(docx_path: Path) -> dict:
-    text = extract_text(docx_path)
+def evaluate(md_path: Path) -> dict:
+    text = extract_text(md_path)
     leaks = {t: text.count(t) for t in TARGETS if text.count(t)}
     pattern_hits = {}
-    for pat, cat in HIGH_RISK_PATTERNS:
-        found = re.findall(pat, text)
-        if found:
-            pattern_hits[cat] = pattern_hits.get(cat, []) + found[:5]
-
-    ph = Counter(re.findall(r"\[(?:公司|姓名)_\d+\]", text))
-    report = {
-        "file": str(docx_path),
-        "text_length": len(text),
+    for pat, label in HIGH_RISK_PATTERNS:
+        hits = re.findall(pat, text)
+        if hits:
+            pattern_hits[label] = hits[:10]
+    ph = re.findall(r"\[(?:公司|姓名|机构|实体|人员)_\d+\]", text)
+    return {
+        "file": str(md_path),
+        "char_count": len(text),
+        "placeholder_count": len(ph),
+        "placeholder_top": Counter(ph).most_common(10),
         "target_leaks": leaks,
         "pattern_hits": pattern_hits,
-        "placeholder_count": sum(ph.values()),
-        "export_ready": not leaks and not pattern_hits,
     }
-    return report
 
 
 def main() -> None:
-    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
-        r"C:\Users\16672\Downloads\deid_55_20260610_desensitized.docx"
-    )
+    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("desensitized.md")
     report = evaluate(path)
-    out = Path(__file__).resolve().parent.parent / "_debug_eval_export.json"
-    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"wrote {out}")
 
 
 if __name__ == "__main__":

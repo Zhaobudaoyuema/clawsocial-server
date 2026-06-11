@@ -35,7 +35,17 @@ from app.deid.discovery.deep_flows import (
 )
 from app.deid.discovery.llm import build_scan_chunk_plan, count_llm_chunks
 from app.deid.discovery.merge import MergedEntity, merge_entities
-from app.deid.engine.pipeline import extract_doc_sample_and_stats, extract_sample_text, run_deid_pipeline
+from app.deid.discovery.program_scan import (
+    count_residuals,
+    dry_run_preview,
+    new_change_id,
+    simulate_run,
+)
+from app.deid.engine.markdown_pipeline import (
+    extract_md_sample_and_stats,
+    extract_sample_text,
+    run_markdown_pipeline,
+)
 from app.deid.engine.plan import normalize_for_match
 from app.deid.engine.preview import assign_placeholder_map, build_preview_text
 from app.deid.prompts import (
@@ -62,7 +72,7 @@ from app.deid.storage import (
     delete_job_files,
     job_dir,
     resolve_upload_path,
-    save_job_docx,
+    save_job_file,
 )
 from app.deid.worker.router import WorkerRouter
 from app.models_deid import (
@@ -83,6 +93,8 @@ SOURCE_UI = {
     "manual": "手动",
     "llm": "AI 识别",
     "remembered": "已记住",
+    "program_scan": "程序扫描",
+    "leak_verify": "验漏",
 }
 
 _AUTO_SOURCES = frozenset({"llm", "remembered", "leak_verify"})
@@ -339,6 +351,7 @@ def _job_to_dict(job: DeidJob, db: Session | None = None) -> dict[str, Any]:
         "status": job.status,
         "pack_ids": _parse_pack_ids(job),
         "original_filename": job.original_filename,
+        "file_type": job.file_type,
         "engine": job.engine,
         "verification": verification,
         "run_summary": run_summary,
@@ -351,6 +364,8 @@ def _job_to_dict(job: DeidJob, db: Session | None = None) -> dict[str, Any]:
         "semantic_skipped": bool(job.semantic_skipped),
         "re_run_count": job.re_run_count or 0,
         "experience_eligible": bool(job.experience_eligible),
+        "program_scan_ack_at": _dt_iso(job.program_scan_ack_at),
+        "program_scan": _parse_program_scan(job),
         "initial_entity_count": len(_parse_initial_snapshot(job)),
         "delta_vs_initial_count": _delta_vs_initial_count(
             job, _job_entities_as_merged(db, job.id) if db else []
@@ -468,14 +483,15 @@ async def create_job(
     job = DeidJob(
         status="draft",
         pack_ids_json=json.dumps(pack_ids),
-        original_filename=file.filename or "document.docx",
+        original_filename=file.filename or "document",
+        file_type="markdown",
         prompt_extra=extra,
         use_worker=use_worker,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
-    rel, original = await save_job_docx(job.id, file)
+    rel, original, _original_path = await save_job_file(job.id, file)
     job.stored_path = rel
     job.original_filename = original
     db.commit()
@@ -702,13 +718,13 @@ async def _scan_job_impl(
         phase="extract",
         percent=5,
         message="提取文档文本…",
-        log_line="正在解压并读取文档…",
+        log_line="正在读取 Markdown 文档…",
         commit=True,
     )
 
     import os
 
-    sample, doc_stats = extract_doc_sample_and_stats(path)
+    sample, doc_stats = extract_md_sample_and_stats(path)
     text_norm = normalize_for_match(sample)
     scan_chunk_plan = build_scan_chunk_plan(sample)
     llm_chunk_count = count_llm_chunks(sample)
@@ -841,55 +857,8 @@ async def _scan_job_impl(
         set_job_progress(
             db,
             job,
-            phase="re_discover_auto",
-            percent=75,
-            message="自动再识别中…",
-            stats=stats_payload,
-            log_line="启动自动再识别（补漏简称与别名）…",
-        )
-        re_prompt = get_flow_prompt(db, FLOW_RE_DISCOVER_KEY)
-        if job.prompt_extra:
-            from app.deid.prompts import JOB_EXTRA_SEPARATOR
-
-            re_prompt = f"{re_prompt}{JOB_EXTRA_SEPARATOR}{job.prompt_extra.strip()}"
-
-        def progress_auto_rescan(c: int, t: int) -> None:
-            on_scan_progress(c, t, phase="re_discover_auto")
-
-        auto_result = await run_re_scan(
-            sample,
-            merged,
-            worker_router,
-            db,
-            job_id=job_id,
-            re_discover_prompt=re_prompt,
-            valid_entity_types=valid_types,
-            on_progress=progress_auto_rescan,
-            on_event=on_scan_event,
-        )
-        merged = auto_result.entities
-        bus.emit(
-            job_id,
-            {
-                "type": "entities_snapshot",
-                "round": "auto_rescan",
-                "entities": _merged_entities_snapshot(merged),
-            },
-        )
-        if auto_result.new_canonicals:
-            bus.emit(
-                job_id,
-                {
-                    "type": "log",
-                    "line": f"自动再识别新增 {len(auto_result.new_canonicals)} 个实体",
-                },
-            )
-
-        set_job_progress(
-            db,
-            job,
             phase="entity_leak_verify",
-            percent=85,
+            percent=75,
             message="实体验漏检查中…",
             stats=stats_payload,
             log_line="Worker 检查字面残留…",
@@ -1052,7 +1021,7 @@ async def re_run_scan_job(
         raise HTTPException(503, "Worker 离线，无法再识别")
 
     path = resolve_upload_path(job.stored_path)
-    sample, _ = extract_doc_sample_and_stats(path)
+    sample, _ = extract_md_sample_and_stats(path)
     base_entities = _job_entities_as_merged(db, job_id)
     manual = [e for e in base_entities if e.source == "manual"]
     auto = [e for e in base_entities if e.source != "manual"]
@@ -1179,7 +1148,7 @@ async def generate_experience_job(
         raise HTTPException(400, "缺少原文件")
 
     path = resolve_upload_path(job.stored_path)
-    sample, _ = extract_doc_sample_and_stats(path)
+    sample, _ = extract_md_sample_and_stats(path)
     current = _job_entities_as_merged(db, job_id)
 
     line = await run_scan_experience(
@@ -1719,6 +1688,226 @@ def _parse_semantic_pairs(job: DeidJob) -> list[dict]:
     return pairs
 
 
+def _parse_program_scan(job: DeidJob) -> dict[str, Any] | None:
+    if not job.program_scan_json:
+        return None
+    try:
+        data = json.loads(job.program_scan_json)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _program_scan_status_before(job: DeidJob) -> str:
+    if job.semantic_skipped:
+        return "scanned"
+    return "semantic_review"
+
+
+def _apply_program_scan_fix(
+    db: Session,
+    job_id: int,
+    fix: dict[str, Any],
+    *,
+    seen_aliases: dict[int, set[str]],
+) -> dict[str, Any]:
+    cid = new_change_id()
+    text = str(fix.get("text") or "").strip()
+    action = fix["action"]
+    if action == "add_alias":
+        entity_id = fix.get("entity_id")
+        je = db.get(DeidJobEntity, entity_id) if entity_id else None
+        if not je or je.job_id != job_id:
+            raise HTTPException(500, "程序扫描归属实体无效")
+        _add_job_entity_alias(db, seen_aliases, je.id, text)
+        return {
+            "id": cid,
+            "action": "add_alias",
+            "entity_id": je.id,
+            "canonical_name": je.canonical_name,
+            "text": text,
+            "hit_count": fix.get("hit_count", 0),
+            "reverted": False,
+        }
+    je = DeidJobEntity(
+        job_id=job_id,
+        entity_type="company",
+        canonical_name=text,
+        source="program_scan",
+        hit_count=int(fix.get("hit_count") or 0),
+    )
+    db.add(je)
+    db.flush()
+    _add_job_entity_alias(db, seen_aliases, je.id, text)
+    return {
+        "id": cid,
+        "action": "new_entity",
+        "entity_id": je.id,
+        "text": text,
+        "hit_count": fix.get("hit_count", 0),
+        "reverted": False,
+    }
+
+
+def _revert_program_scan_change(db: Session, job_id: int, change: dict[str, Any]) -> None:
+    if change.get("reverted"):
+        return
+    action = change.get("action")
+    entity_id = change.get("entity_id")
+    text = str(change.get("text") or "").strip()
+    if action == "add_alias" and entity_id and text:
+        db.query(DeidJobEntityAlias).filter(
+            DeidJobEntityAlias.job_entity_id == entity_id,
+            DeidJobEntityAlias.alias_text == text,
+        ).delete(synchronize_session=False)
+        return
+    if action == "new_entity" and entity_id:
+        je = db.get(DeidJobEntity, entity_id)
+        if je and je.job_id == job_id and je.source == "program_scan":
+            db.query(DeidJobEntityAlias).filter(
+                DeidJobEntityAlias.job_entity_id == entity_id
+            ).delete(synchronize_session=False)
+            db.delete(je)
+
+
+def _rollback_program_scan_changes(db: Session, job_id: int, payload: dict[str, Any]) -> None:
+    for change in payload.get("changes") or []:
+        if change.get("reverted"):
+            continue
+        _revert_program_scan_change(db, job_id, change)
+
+
+def _recalc_program_scan_after(
+    db: Session,
+    job: DeidJob,
+    sample: str,
+) -> int:
+    entities = _entities_for_plan(db, job.id)
+    preview = dry_run_preview(
+        sample,
+        entities,
+        _job_pattern_rules(db, job),
+        _job_whitelist_terms(db, job),
+        type_prefix_map=_type_prefix_map(db),
+    )
+    return count_residuals(preview, entities).get("residual_count", 0)
+
+
+def run_program_scan(db: Session, job_id: int) -> dict[str, Any]:
+    job = db.get(DeidJob, job_id)
+    if not job or not job.stored_path:
+        raise HTTPException(404, "任务不存在")
+    if job.status not in ("semantic_review", "scanned", "program_review"):
+        raise HTTPException(400, "当前状态不可程序扫描")
+
+    prev = _parse_program_scan(job)
+    if prev:
+        _rollback_program_scan_changes(db, job_id, prev)
+
+    path = resolve_upload_path(job.stored_path)
+    sample = path.read_text(encoding="utf-8", errors="replace")
+    entities = _entities_for_plan(db, job_id)
+    patterns = _job_pattern_rules(db, job)
+    whitelist = _job_whitelist_terms(db, job)
+    prefix_map = _type_prefix_map(db)
+
+    before, fixes = simulate_run(
+        sample, entities, patterns, whitelist, type_prefix_map=prefix_map
+    )
+    residual_before = before.get("residual_count", 0)
+
+    seen_aliases: dict[int, set[str]] = {}
+    changes: list[dict[str, Any]] = []
+    for fix in fixes:
+        change = _apply_program_scan_fix(db, job_id, fix, seen_aliases=seen_aliases)
+        changes.append(change)
+
+    db.flush()
+    entities = _entities_for_plan(db, job_id)
+    preview_after = dry_run_preview(
+        sample, entities, patterns, whitelist, type_prefix_map=prefix_map
+    )
+    after = count_residuals(preview_after, entities)
+    residual_after = after.get("residual_count", 0)
+
+    payload: dict[str, Any] = {
+        "run_at": _dt_iso(now_beijing()),
+        "residual_before": residual_before,
+        "residual_after": residual_after,
+        "alias_count_before": before.get("alias_count", 0),
+        "pattern_count_before": before.get("pattern_count", 0),
+        "changes": changes,
+    }
+    job.program_scan_json = json.dumps(payload, ensure_ascii=False)
+    job.program_scan_ack_at = None
+    job.status = "program_review"
+    db.commit()
+
+    return {
+        **payload,
+        "status": job.status,
+        "entities": list_job_entities(db, job_id),
+    }
+
+
+def get_program_scan(db: Session, job_id: int) -> dict[str, Any]:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    payload = _parse_program_scan(job) or {
+        "run_at": None,
+        "residual_before": 0,
+        "residual_after": 0,
+        "changes": [],
+    }
+    return {
+        **payload,
+        "status": job.status,
+        "program_scan_ack_at": _dt_iso(job.program_scan_ack_at),
+        "entities": list_job_entities(db, job_id),
+    }
+
+
+def revert_program_scan_change(db: Session, job_id: int, change_id: str) -> dict[str, Any]:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    payload = _parse_program_scan(job)
+    if not payload:
+        raise HTTPException(400, "无程序扫描记录")
+    changes = payload.get("changes") or []
+    target = next((c for c in changes if c.get("id") == change_id), None)
+    if not target:
+        raise HTTPException(404, "变更项不存在")
+    if target.get("reverted"):
+        return get_program_scan(db, job_id)
+
+    _revert_program_scan_change(db, job_id, target)
+    target["reverted"] = True
+    job.program_scan_ack_at = None
+
+    path = resolve_upload_path(job.stored_path)
+    sample = path.read_text(encoding="utf-8", errors="replace")
+    payload["residual_after"] = _recalc_program_scan_after(db, job, sample)
+    job.program_scan_json = json.dumps(payload, ensure_ascii=False)
+    db.commit()
+    return get_program_scan(db, job_id)
+
+
+def confirm_program_scan(db: Session, job_id: int) -> dict[str, Any]:
+    job = db.get(DeidJob, job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    if job.status != "program_review":
+        raise HTTPException(400, "请先完成程序扫描")
+    if not job.program_scan_json:
+        raise HTTPException(400, "无程序扫描记录")
+    job.program_scan_ack_at = now_beijing()
+    job.status = _program_scan_status_before(job)
+    db.commit()
+    return get_program_scan(db, job_id)
+
+
 async def confirm_job(
     db: Session,
     job_id: int,
@@ -1728,12 +1917,14 @@ async def confirm_job(
     semantic_selection: list[dict] | None = None,
     worker_router: WorkerRouter | None = None,
 ) -> dict:
-    """Confirm entities + semantic selection, then finish docx in one pass."""
+    """Confirm entities + semantic selection, then finish markdown in one pass."""
     job = db.get(DeidJob, job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
     if job.status not in ("scanned", "semantic_review", "confirmed"):
         raise HTTPException(400, "请先完成实体扫描与语义扫描")
+    if not job.program_scan_ack_at:
+        raise HTTPException(400, "请先完成程序扫描")
     active = _apply_entity_selection(db, job_id, entity_ids)
     if not active:
         raise HTTPException(400, "请至少选择一个实体")
@@ -1774,6 +1965,30 @@ def preview_job(db: Session, job_id: int) -> dict:
     return {"previews": previews}
 
 
+def get_source_markdown(db: Session, job_id: int, *, max_chars: int = 50000) -> dict:
+    from app.deid.convert import source_format_from_filename
+    from app.deid.engine.markdown_pipeline import extract_md_sample_and_stats
+
+    job = db.get(DeidJob, job_id)
+    if not job or not job.stored_path:
+        raise HTTPException(404, "任务不存在")
+    path = resolve_upload_path(job.stored_path)
+    if not path.is_file():
+        raise HTTPException(404, "源 Markdown 不存在")
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    content, stats = extract_md_sample_and_stats(path, max_chars=max_chars)
+    ext, label = source_format_from_filename(job.original_filename or "")
+    return {
+        "original_filename": job.original_filename,
+        "source_format": ext,
+        "source_format_label": label,
+        "file_type": job.file_type or "markdown",
+        "truncated": len(raw) > max_chars,
+        "stats": stats,
+        "content": content,
+    }
+
+
 def _entities_for_plan(db: Session, job_id: int) -> list[dict]:
     rows = list_job_entities(db, job_id)
     return [
@@ -1800,7 +2015,8 @@ async def _execute_deid(
     if not job.stored_path:
         raise HTTPException(400, "缺少原文件")
     path = resolve_upload_path(job.stored_path)
-    out = job_dir(job_id) / f"desensitized_{job.original_filename}"
+    stem = Path(job.original_filename or "document").stem
+    out = job_dir(job_id) / f"desensitized_{stem}.md"
     entities = _entities_for_plan(db, job_id)
     patterns = _job_pattern_rules(db, job)
     whitelist = _job_whitelist_terms(db, job)
@@ -1809,7 +2025,7 @@ async def _execute_deid(
     db.commit()
 
     semantic_pairs = _parse_semantic_pairs(job)
-    result = run_deid_pipeline(
+    result = run_markdown_pipeline(
         path, out, entities, patterns, whitelist, semantic_pairs=semantic_pairs or None
     )
     if result.get("engine") == "failed":
@@ -1851,13 +2067,16 @@ async def _execute_deid(
         and worker_router.session
         and worker_router.session.state == "ready"
     )
-    # 确认阶段只做 XML 替换 + 程序验漏；Worker 验漏仅在实体扫描阶段（entity_leak）使用。
+    # 确认阶段只做文本替换 + 程序验漏；Worker 验漏仅在实体扫描阶段（entity_leak）使用。
+    ps = _parse_program_scan(job)
     pipe_verification = merge_verification(
         pipe_verification,
         worker_available=worker_online,
         finish_verify_mode="program_only",
         deep_completed=semantic_scanned and semantic_applied > 0,
         semantic_block=semantic_block,
+        program_scan_acknowledged=bool(job.program_scan_ack_at),
+        program_scan_residual_after=ps.get("residual_after") if ps else None,
     )
     job.verification_json = json.dumps(pipe_verification, ensure_ascii=False)
     job.run_summary_json = json.dumps(
@@ -1941,14 +2160,14 @@ def _write_mappings(db: Session, job_id: int, entities: list[dict]) -> None:
             )
 
 
-def export_docx(
+def export_markdown(
     db: Session,
     job_id: int,
     *,
     override_ack: bool = False,
     override_reason: str | None = None,
 ) -> tuple[Path, str]:
-    """Return (path, download_filename) for the de-identified docx only."""
+    """Return (path, download_filename) for the de-identified markdown file."""
     job = db.get(DeidJob, job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
@@ -1968,18 +2187,18 @@ def export_docx(
 
     from app.uploads import UPLOADS_DIR
 
-    out_docx = UPLOADS_DIR / (job.output_path or "")
-    if not out_docx.exists():
+    out_md = UPLOADS_DIR / (job.output_path or "")
+    if not out_md.exists():
         raise HTTPException(404, "输出文件不存在")
 
     mode = get_export_filename_mode(db)
     if mode == "neutral":
         date_str = now_beijing().strftime("%Y%m%d")
-        filename = f"deid_{job_id}_{date_str}_desensitized.docx"
+        filename = f"deid_{job_id}_{date_str}_desensitized.md"
     else:
-        stem = Path(job.original_filename or "document.docx").stem
-        filename = f"{stem}_desensitized.docx"
-    return out_docx, filename
+        stem = Path(job.original_filename or "document").stem
+        filename = f"{stem}_desensitized.md"
+    return out_md, filename
 
 
 def archive_job_files(db: Session, job: DeidJob) -> None:
@@ -2131,10 +2350,6 @@ def get_semantic_risks(db: Session, job_id: int) -> dict:
     if job.status == "scanned" and job.deep_risks_json:
         return {"risks": _load_deep_risks(job), "status": "semantic_review"}
     raise HTTPException(400, "语义扫描未完成或不可用")
-
-
-def get_deep_risks(db: Session, job_id: int) -> dict:
-    return get_semantic_risks(db, job_id)
 
 
 def semantic_skip_job(db: Session, job_id: int) -> dict:
@@ -2386,44 +2601,6 @@ async def semantic_suggest_all_job(
         raise
 
 
-async def deep_scan_job(
-    db: Session,
-    job_id: int,
-    *,
-    worker_router: WorkerRouter | None = None,
-) -> dict:
-    job = db.get(DeidJob, job_id)
-    if not job or job.status != "done":
-        raise HTTPException(400, "请先完成标准脱敏")
-    if not job.use_worker or not job_needs_worker_queue(db, job, worker_router):
-        raise HTTPException(503, "Worker 离线，深度脱敏不可用")
-    if not job.output_path:
-        raise HTTPException(400, "缺少输出文件")
-
-    from app.uploads import UPLOADS_DIR
-
-    out_path = UPLOADS_DIR / job.output_path
-    if not out_path.exists():
-        raise HTTPException(404, "输出文件不存在")
-
-    job.status = "deep_scanning"
-    db.commit()
-
-    sample = extract_sample_text(out_path)[:50000]
-    risks, summary = await run_deep_detect(
-        sample,
-        worker_router,
-        db,
-        job_id=job_id,
-        job_extra=job.prompt_extra,
-        scan_chunk_plan=_job_scan_chunk_plan(job),
-    )
-    job.deep_risks_json = json.dumps(risks, ensure_ascii=False)
-    job.status = "deep_review" if risks else "done"
-    db.commit()
-    return {"risks": risks, "summary": summary, "status": job.status}
-
-
 async def semantic_suggest_risk(
     db: Session,
     job_id: int,
@@ -2460,31 +2637,6 @@ async def semantic_suggest_risk(
         job.deep_risks_json = json.dumps(risks, ensure_ascii=False)
         db.commit()
     return {"risk_id": risk_id, "suggested_rewrite": suggestion}
-
-
-async def deep_suggest_risk(
-    db: Session,
-    job_id: int,
-    risk_id: str,
-    *,
-    worker_router: WorkerRouter | None = None,
-) -> dict:
-    return await semantic_suggest_risk(
-        db, job_id, risk_id, worker_router=worker_router
-    )
-
-
-async def deep_apply_job(
-    db: Session,
-    job_id: int,
-    items: list[dict],
-    *,
-    worker_router: WorkerRouter | None = None,
-) -> dict:
-    raise HTTPException(
-        410,
-        "深度脱敏写回已废弃，请在确认阶段通过 semantic_selection 一次性完成",
-    )
 
 
 def get_scan_prompt_settings(db: Session) -> dict:

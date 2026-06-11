@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { ACCEPT_ATTR, FORMAT_HINT } from '../../utils/deidFormats'
 
 const props = defineProps<{ disabled?: boolean; embedded?: boolean }>()
 const emit = defineEmits<{ select: [file: File] }>()
@@ -25,7 +26,7 @@ function onDrop(e: DragEvent) {
     :class="{ over: dragOver, disabled: props.disabled, embedded: props.embedded }"
     role="button"
     tabindex="0"
-    aria-label="上传 Word 文档"
+    aria-label="上传文档"
     @dragover.prevent="dragOver = true"
     @dragleave="dragOver = false"
     @drop="props.disabled ? undefined : onDrop($event)"
@@ -35,7 +36,7 @@ function onDrop(e: DragEvent) {
     <input
       ref="inputRef"
       type="file"
-      accept=".docx"
+      :accept="ACCEPT_ATTR"
       class="hidden"
       :disabled="props.disabled"
       @change="onPick"
@@ -51,8 +52,8 @@ function onDrop(e: DragEvent) {
         <path d="M14 2v6h6M8 13h8M8 17h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
       </svg>
     </div>
-    <p class="title">拖放 Word 文档到此处</p>
-    <p class="hint">或点击选择文件 · 仅支持 .docx 格式</p>
+    <p class="title">拖放文档到此处</p>
+    <p class="hint">或点击选择文件 · 支持 {{ FORMAT_HINT }}</p>
   </div>
 </template>
 

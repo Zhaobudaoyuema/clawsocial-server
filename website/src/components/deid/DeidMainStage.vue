@@ -15,6 +15,9 @@ import DeidScanErrorPanel from './DeidScanErrorPanel.vue'
 import DeidModal from './DeidModal.vue'
 import DeidEntityScanStage from './DeidEntityScanStage.vue'
 import DeidSemanticScanStage from './DeidSemanticScanStage.vue'
+import DeidMarkdownStage from './DeidMarkdownStage.vue'
+import DeidProgramScanStage from './DeidProgramScanStage.vue'
+import { validateDeidFile } from '../../utils/deidFormats'
 
 const store = useDeidStore()
 
@@ -97,8 +100,8 @@ const semanticMissedWarning = computed(() => {
   return readiness || `${missed} 条语义改写未能写入文档`
 })
 
-function onSemanticProceedConfirm() {
-  store.proceedToConfirm()
+function onSemanticProceedProgramScan() {
+  store.proceedToProgramScan()
 }
 
 function onEntityScanProceedSemantic() {
@@ -127,7 +130,7 @@ const showJobsError = computed(
 
 const showWorkerToast = computed(() => {
   const phase = wizardPhase.value
-  const toastPhases = ['upload', 'scan-draft', 'scanning', 'entity-scanned']
+  const toastPhases = ['upload', 'markdown-preview', 'scan-draft', 'scanning', 'entity-scanned']
   return (
     store.workerWasOffline &&
     store.workerStatus.online &&
@@ -168,8 +171,9 @@ watch(
 
 function onSelect(file: File) {
   uploadError.value = null
-  if (!file.name.toLowerCase().endsWith('.docx')) {
-    uploadError.value = '仅支持 .docx'
+  const err = validateDeidFile(file)
+  if (err) {
+    uploadError.value = err
     selectedFile.value = null
     return
   }
@@ -201,6 +205,11 @@ async function doScan() {
     }
     store.scanProgress = null
   }
+}
+
+async function onMarkdownProceed() {
+  store.enterMarkdownStage()
+  await doScan()
 }
 
 async function onDeleteEntity(id: number) {
@@ -289,7 +298,7 @@ function confirmOverrideDownload() {
               :href="store.exportUrl(jobId, false, undefined)"
               download
             >
-              下载文档
+              下载 Markdown
             </a>
             <button
               v-else-if="jobId"
@@ -297,7 +306,7 @@ function confirmOverrideDownload() {
               class="deid-btn deid-btn--primary"
               @click="openOverrideModal"
             >
-              下载文档
+              下载 Markdown
             </button>
           </template>
           <p v-else-if="filesPurged" class="archived-hint">文件已清理，可使用左侧「结论回显」还原外部结论</p>
@@ -337,8 +346,8 @@ function confirmOverrideDownload() {
 
         <div v-if="wizardPhase === 'upload'" class="upload-stage">
           <div class="upload-head">
-            <h2 class="deid-page-title">上传 Word 文档</h2>
-            <p class="deid-page-sub">选择 .docx 文件，自动上传并开始流程</p>
+            <h2 class="deid-page-title">上传文档</h2>
+            <p class="deid-page-sub">支持 PDF、Word、Excel 等格式，自动转换为 Markdown 后脱敏</p>
           </div>
           <label v-if="workerOnline" class="worker-opt">
             <input v-model="useWorker" type="checkbox" :disabled="store.loading" />
@@ -360,6 +369,20 @@ function confirmOverrideDownload() {
             <span class="deid-spinner" aria-hidden="true" />
             <p class="confirm-text">替换敏感实体中</p>
           </div>
+        </div>
+
+        <div v-else-if="wizardPhase === 'markdown-preview'" class="job-stage">
+          <div v-if="store.sourceMarkdownLoading || !store.sourceMarkdown" class="job-card deid-panel">
+            <span class="deid-spinner" aria-hidden="true" />
+            <p class="confirm-text">正在加载 Markdown 预览…</p>
+          </div>
+          <DeidMarkdownStage
+            v-else
+            :payload="store.sourceMarkdown"
+            :loading="store.loading || isScanning"
+            :worker-online="workerOnline"
+            @proceed="onMarkdownProceed"
+          />
         </div>
 
         <div v-else-if="wizardPhase === 'scan-draft'" class="job-stage">
@@ -415,8 +438,15 @@ function confirmOverrideDownload() {
           v-else-if="(wizardPhase === 'semantic-idle' || wizardPhase === 'semantic-scanning' || wizardPhase === 'semantic-review') && jobId"
           :job-id="jobId"
           :mode="wizardPhase === 'semantic-scanning' ? 'scanning' : wizardPhase === 'semantic-review' ? 'review' : 'idle'"
-          @proceed-confirm="onSemanticProceedConfirm"
+          @proceed-program-scan="onSemanticProceedProgramScan"
         />
+
+        <div
+          v-else-if="(wizardPhase === 'program-running' || wizardPhase === 'program-review') && jobId"
+          class="job-stage"
+        >
+          <DeidProgramScanStage :job-id="jobId" />
+        </div>
         </div>
       </div>
     </Transition>

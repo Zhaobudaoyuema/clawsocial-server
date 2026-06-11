@@ -12,7 +12,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  proceedConfirm: []
+  proceedProgramScan: []
 }>()
 
 const store = useDeidStore()
@@ -86,7 +86,8 @@ async function onStart() {
 
 async function onSkip() {
   await store.semanticSkip(props.jobId)
-  emit('proceedConfirm')
+  store.enterSemanticStage()
+  emit('proceedProgramScan')
 }
 
 function toggleEnabled(riskId: string, enabled: boolean) {
@@ -103,7 +104,7 @@ function rewriteValue(r: Record<string, unknown>) {
 
 function onProceed() {
   store.saveSemanticSelection()
-  emit('proceedConfirm')
+  emit('proceedProgramScan')
 }
 </script>
 
@@ -129,7 +130,7 @@ function onProceed() {
         {{ store.semanticLoading ? '启动中…' : '开始语义扫描' }}
       </button>
       <button type="button" class="deid-btn deid-btn--lg" @click="onSkip">
-        跳过，直接确认
+        跳过，进入程序扫描
       </button>
       <p v-if="!workerOnline" class="offline-hint">Worker 离线，请跳过语义扫描</p>
     </div>
@@ -173,7 +174,7 @@ function onProceed() {
     </div>
 
     <div v-else class="review">
-      <p v-if="!risks.length" class="empty">未发现需改写的语义指纹，可直接进入确认。</p>
+      <p v-if="!risks.length" class="empty">未发现需改写的语义指纹，可进入程序扫描。</p>
       <p v-else-if="missingRewrite && store.semanticLoading" class="empty">正在批量生成改写，请稍候…</p>
       <p v-else-if="missingRewrite" class="empty warn">部分条目未能自动生成改写，可直接取消勾选或手动编辑。</p>
       <table v-if="risks.length" class="table">
@@ -220,7 +221,7 @@ function onProceed() {
       </table>
       <footer class="foot">
         <button type="button" class="deid-btn deid-btn--primary" @click="onProceed">
-          下一步：确认
+          下一步：程序扫描
         </button>
       </footer>
     </div>

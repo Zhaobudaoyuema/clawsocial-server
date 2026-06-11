@@ -12,7 +12,7 @@ def _make_job(db, job_id: int = 1) -> DeidJob:
         id=job_id,
         status="scanned",
         original_filename="t.docx",
-        stored_path="deid/1/original_t.docx",
+        stored_path="deid/1/source.md",
         pack_ids_json="[]",
     )
     db.add(job)

@@ -11,7 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.deid.discovery.llm import _chunk_text, discover_llm
 from app.deid.discovery.llm_parse import parse_llm_entities
-from app.deid.engine.pipeline import extract_sample_text
+from app.deid.engine.markdown_pipeline import extract_sample_text
 from app.deid.prompts import build_default_scan_prompt, build_scan_user_message
 from app.deid.worker.relay_client import RemoteWorkerRelay
 

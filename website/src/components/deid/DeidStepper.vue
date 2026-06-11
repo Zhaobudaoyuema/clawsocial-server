@@ -1,5 +1,12 @@
 <script setup lang="ts">
-export type WizardStepId = 'upload' | 'entity_scan' | 'semantic' | 'confirm' | 'finish'
+export type WizardStepId =
+  | 'upload'
+  | 'convert'
+  | 'entity_scan'
+  | 'semantic'
+  | 'program_scan'
+  | 'confirm'
+  | 'finish'
 
 const props = withDefaults(
   defineProps<{
@@ -14,13 +21,23 @@ const props = withDefaults(
 
 const steps = [
   { id: 'upload' as const, label: '上传', short: '传' },
+  { id: 'convert' as const, label: '文档转换', short: '转' },
   { id: 'entity_scan' as const, label: '实体扫描', short: '实' },
   { id: 'semantic' as const, label: '语义扫描', short: '义' },
+  { id: 'program_scan' as const, label: '程序扫描', short: '程' },
   { id: 'confirm' as const, label: '确认', short: '认' },
   { id: 'finish' as const, label: '完成', short: '完' },
 ]
 
-const order: WizardStepId[] = ['upload', 'entity_scan', 'semantic', 'confirm', 'finish']
+const order: WizardStepId[] = [
+  'upload',
+  'convert',
+  'entity_scan',
+  'semantic',
+  'program_scan',
+  'confirm',
+  'finish',
+]
 
 function stepIndex(id: string) {
   return order.indexOf(id as WizardStepId)

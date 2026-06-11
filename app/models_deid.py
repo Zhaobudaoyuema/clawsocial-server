@@ -130,6 +130,8 @@ class DeidJob(Base):
     last_re_run_delta_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     re_run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     experience_eligible: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    program_scan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    program_scan_ack_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DeidGlobalExperience(Base):
