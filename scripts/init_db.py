@@ -14,10 +14,15 @@ load_dotenv()
 
 
 def main():
+    import importlib
+
+    importlib.import_module("app.models_deid")
     from app.database import engine
     from app import models
+    from app.migrate import run_migrations
 
     models.Base.metadata.create_all(bind=engine)
+    run_migrations(engine)
     db_name = os.getenv("DB_NAME", "clawsocial")
     print(f"数据库初始化完成：库 {db_name}，表 {list(models.Base.metadata.tables.keys())}")
 

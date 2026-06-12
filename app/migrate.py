@@ -24,6 +24,7 @@ def run_migrations(engine: Engine) -> None:
     _ensure_deid_jobs_ai_summary(engine)
     _ensure_deid_jobs_files_purged_at(engine)
     _ensure_deid_jobs_semantic_snapshot(engine)
+    _ensure_deid_jobs_pipeline_columns(engine)
     _ensure_deid_jobs_program_scan(engine)
     _ensure_deid_worker_calls_table(engine)
 
@@ -488,6 +489,115 @@ def _ensure_deid_jobs_semantic_snapshot(engine: Engine) -> None:
             conn.execute(
                 text("ALTER TABLE deid_jobs ADD COLUMN semantic_entity_snapshot_json TEXT NULL")
             )
+        conn.commit()
+
+
+def _add_deid_jobs_text_column(
+    conn,
+    dialect: str,
+    columns: set[str],
+    name: str,
+) -> None:
+    if name in columns:
+        return
+    if dialect == "mysql":
+        conn.execute(text(f"ALTER TABLE deid_jobs ADD COLUMN {name} TEXT NULL"))
+    elif dialect == "sqlite":
+        conn.execute(text(f"ALTER TABLE deid_jobs ADD COLUMN {name} TEXT"))
+    else:
+        conn.execute(text(f"ALTER TABLE deid_jobs ADD COLUMN {name} TEXT NULL"))
+
+
+def _ensure_deid_jobs_pipeline_columns(engine: Engine) -> None:
+    """deid v5 pipeline columns on deid_jobs (semantic scan, rescan, experience)."""
+    insp = inspect(engine)
+    if "deid_jobs" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("deid_jobs")}
+    with engine.connect() as conn:
+        dialect = engine.dialect.name
+        for col in (
+            "scan_entities_json",
+            "deep_risks_json",
+            "deep_pairs_json",
+            "experience_lines_json",
+            "semantic_selection_json",
+            "gaps_json",
+            "initial_entities_snapshot_json",
+            "last_re_run_delta_json",
+        ):
+            _add_deid_jobs_text_column(conn, dialect, columns, col)
+            columns.add(col)
+        if "reflect_round_count" not in columns:
+            if dialect == "mysql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN reflect_round_count INT NOT NULL DEFAULT 0"
+                    )
+                )
+            elif dialect == "sqlite":
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN reflect_round_count INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN reflect_round_count INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
+        if "semantic_skipped" not in columns:
+            if dialect == "mysql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN semantic_skipped TINYINT(1) NOT NULL DEFAULT 0"
+                    )
+                )
+            elif dialect == "sqlite":
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN semantic_skipped BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN semantic_skipped BOOLEAN NOT NULL DEFAULT FALSE"
+                    )
+                )
+        if "re_run_count" not in columns:
+            if dialect == "mysql":
+                conn.execute(
+                    text("ALTER TABLE deid_jobs ADD COLUMN re_run_count INT NOT NULL DEFAULT 0")
+                )
+            elif dialect == "sqlite":
+                conn.execute(
+                    text("ALTER TABLE deid_jobs ADD COLUMN re_run_count INTEGER NOT NULL DEFAULT 0")
+                )
+            else:
+                conn.execute(
+                    text("ALTER TABLE deid_jobs ADD COLUMN re_run_count INTEGER NOT NULL DEFAULT 0")
+                )
+        if "experience_eligible" not in columns:
+            if dialect == "mysql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN experience_eligible TINYINT(1) NOT NULL DEFAULT 0"
+                    )
+                )
+            elif dialect == "sqlite":
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN experience_eligible BOOLEAN NOT NULL DEFAULT 0"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "ALTER TABLE deid_jobs ADD COLUMN experience_eligible BOOLEAN NOT NULL DEFAULT FALSE"
+                    )
+                )
         conn.commit()
 
 
