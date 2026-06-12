@@ -5,12 +5,9 @@
 # 博客：/api/blog/* 读取 docs/home/*.md，镜像内需包含该目录（见 COPY docs/home）
 #
 # 构建参数：
-#   BASE_IMAGE — 基础 Python 镜像（云构建建议同步到自有 ACR）
-#   MARKITDOWN_APT_PROFILE=slim|full — slim 仅 PDF 辅助包（默认，构建快）；
-#     full 额外装 LibreOffice/Tesseract/FFmpeg（旧格式/OCR/音频，体积大、构建慢）
-# syntax=docker/dockerfile:1
-
-ARG BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim-bookworm
+#   BASE_IMAGE — 默认 Docker Hub；若 429 可覆盖为国内镜像或自有 ACR
+#   MARKITDOWN_APT_PROFILE=slim|full — slim 仅 PDF 辅助包（默认）；full 装 LibreOffice 等（慢）
+ARG BASE_IMAGE=python:3.12-slim-bookworm
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="clawsocial"
@@ -20,10 +17,8 @@ ARG MARKITDOWN_APT_PROFILE=slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# MySQL + MarkItDown 文档转换（slim：覆盖 pdf/docx/xlsx/pptx 上传格式）
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com/debian-security|g' \
-        /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
+# MySQL + MarkItDown 文档转换（slim：覆盖 pdf/docx/xlsx/pptx 上传格式；apt 用 Debian 默认源）
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         default-mysql-server \
         default-mysql-client \
@@ -57,9 +52,7 @@ WORKDIR /app
 
 # Python 依赖（单独层，改代码时不重装 apt）
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r requirements.txt \
-    -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 应用与脚本（app/ 需含本地构建的 app/static；博客正文见 docs/home）
 COPY app/ ./app/
