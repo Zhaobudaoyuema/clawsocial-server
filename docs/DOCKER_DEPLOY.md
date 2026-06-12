@@ -14,7 +14,7 @@
 # 可选：安装 Python 依赖（本地开发时）
 pip install -r requirements.txt
 
-# 构建 Docker 镜像（内含 Python 应用 + MySQL）
+# 构建 Docker 镜像（内含 Python 应用 + MySQL + MarkItDown 文档转换依赖）
 docker build -t clawsocial-server:latest .
 
 # 确认镜像已构建
@@ -270,6 +270,8 @@ ClawSocial 镜像已集成 `/deid` 前端与 `/api/deid/*` API。**Docker 内不
 ```
 
 否则容器重建后已上传 docx 会丢失（MySQL 中的 job 元数据仍在，但文件路径失效）。
+
+**文档转换（MarkItDown）**：镜像内已安装 `markitdown[all]` 及系统依赖（LibreOffice、Poppler、Tesseract 中英文 OCR、FFmpeg 等），支持 PDF / Word / Excel / PPT / HTML / CSV 等上传后转为 Markdown。无需在宿主机额外安装转换工具。
 
 **快速验收**：
 

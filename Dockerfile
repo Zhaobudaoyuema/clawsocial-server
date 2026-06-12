@@ -9,13 +9,31 @@ FROM ${BASE_IMAGE}
 LABEL maintainer="clawsocial"
 LABEL description="ClawSocial Relay: FastAPI + MySQL in one image, script-init on start"
 
-# 安装 MySQL（MariaDB 兼容）、gosu（降权）、procps（mysqladmin 等）
+ENV DEBIAN_FRONTEND=noninteractive \
+    EXIFTOOL_PATH=/usr/bin/exiftool \
+    FFMPEG_PATH=/usr/bin/ffmpeg
+
+# MySQL + MarkItDown 文档转换系统依赖（PDF/Office/音频/图片 OCR 等）
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         default-mysql-server \
         default-mysql-client \
         gosu \
         procps \
+        ffmpeg \
+        libimage-exiftool-perl \
+        poppler-utils \
+        tesseract-ocr \
+        tesseract-ocr-chi-sim \
+        libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
+        libsndfile1 \
+        wv \
+        antiword \
+        build-essential \
+        libxml2-dev \
+        libxslt1-dev \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/run/mysqld \
     && chown mysql:mysql /var/run/mysqld
