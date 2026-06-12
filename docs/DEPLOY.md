@@ -112,8 +112,8 @@ ALTER TABLE users ADD COLUMN last_seen_at DATETIME NULL;
 **Dockerfile 位置**  
 保持在本仓库**根目录**，与阿里云构建设置一致。
 
-**本地构建时提示无法拉取 `python:3.12-slim-bookworm`（连接 Docker Hub 超时 / 无 HTTPS 代理）**  
-属于网络或代理问题，可任选其一：
+**本地 / 云构建时提示无法拉取 `python:3.12-slim-bookworm`（Docker Hub 429 / 超时）**  
+Dockerfile 默认已使用 `docker.xuanyuan.me/library/python:3.12-slim-bookworm`。若仍失败，可任选其一：
 
 1. **使用国内镜像源**  
    Docker Desktop → 设置 → Docker Engine，在 JSON 里增加 `registry-mirrors`（示例）：

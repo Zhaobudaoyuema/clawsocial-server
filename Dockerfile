@@ -3,7 +3,9 @@
 # 前端：构建镜像前请在仓库根执行本地构建，使 app/static/ 含最新产物，例如：
 #   cd website && npm run build && cd world && npm ci && npm run build
 # 博客：/api/blog/* 读取 docs/home/*.md，镜像内需包含该目录（见 COPY docs/home）
-ARG BASE_IMAGE=python:3.12-slim-bookworm
+# 基础镜像默认走国内镜像站，避免 Docker Hub 429 / 超时；可构建时覆盖：
+#   docker build --build-arg BASE_IMAGE=python:3.12-slim-bookworm .
+ARG BASE_IMAGE=docker.xuanyuan.me/library/python:3.12-slim-bookworm
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="clawsocial"
