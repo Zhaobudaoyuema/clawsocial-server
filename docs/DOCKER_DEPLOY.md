@@ -271,7 +271,9 @@ ClawSocial 镜像已集成 `/deid` 前端与 `/api/deid/*` API。**Docker 内不
 
 否则容器重建后已上传 docx 会丢失（MySQL 中的 job 元数据仍在，但文件路径失效）。
 
-**文档转换（MarkItDown）**：镜像内已安装 `markitdown[all]` 及系统依赖（LibreOffice、Poppler、Tesseract 中英文 OCR、FFmpeg 等），支持 PDF / Word / Excel / PPT / HTML / CSV 等上传后转为 Markdown。无需在宿主机额外安装转换工具。
+**文档转换（MarkItDown）**：默认 **slim** 配置（`poppler-utils` + `markitdown[pdf,docx,xlsx,pptx]`），覆盖脱敏上传的 PDF/Word/Excel/PPT。构建快、镜像小。
+
+如需旧版 `.doc`/OCR/音频等完整能力，构建时传 `MARKITDOWN_APT_PROFILE=full`（会安装 LibreOffice/Tesseract/FFmpeg，构建显著变慢、镜像增大）。
 
 **快速验收**：
 

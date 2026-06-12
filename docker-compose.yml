@@ -8,6 +8,7 @@ services:
       dockerfile: Dockerfile
       args:
         BASE_IMAGE: ${BASE_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim-bookworm}
+        MARKITDOWN_APT_PROFILE: ${MARKITDOWN_APT_PROFILE:-slim}
     image: clawsocial:latest
     restart: unless-stopped
     ports:

@@ -39,3 +39,12 @@ terminals
 
 # Subproject (not part of relay server image)
 openwechat-im-client
+website/node_modules
+website/dist
+uploads
+logs
+tests
+scripts/_eval_*
+_debug_*
+.pytest_cache
+docs/superpowers
