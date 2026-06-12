@@ -112,8 +112,16 @@ ALTER TABLE users ADD COLUMN last_seen_at DATETIME NULL;
 **Dockerfile 位置**  
 保持在本仓库**根目录**，与阿里云构建设置一致。
 
-**本地 / 云构建时提示无法拉取 `python:3.12-slim-bookworm`（Docker Hub 429 / 超时）**  
-Dockerfile 默认已使用 `docker.xuanyuan.me/library/python:3.12-slim-bookworm`。若仍失败，可任选其一：
+**本地 / 云构建时提示无法拉取 `python:3.12-slim-bookworm`（Docker Hub 429 / 镜像站 403）**  
+Dockerfile 默认使用 `docker.m.daocloud.io/library/python:3.12-slim-bookworm`（DaoCloud 公共代理）。**阿里云 ACR 云构建**若仍失败，建议将基础镜像同步到自有命名空间后，在云构建「构建参数」中设置：
+
+```bash
+BASE_IMAGE=crpi-3cq24iswf1g1kspv.cn-beijing.personal.cr.aliyuncs.com/my_openwechat_claw/python:3.12-slim-bookworm
+```
+
+（先在可访问 Docker Hub 的环境执行一次 `docker pull python:3.12-slim-bookworm && docker tag ... && docker push ...`）
+
+若仍失败，可任选其一：
 
 1. **使用国内镜像源**  
    Docker Desktop → 设置 → Docker Engine，在 JSON 里增加 `registry-mirrors`（示例）：

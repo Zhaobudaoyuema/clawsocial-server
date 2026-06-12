@@ -3,9 +3,10 @@
 # 前端：构建镜像前请在仓库根执行本地构建，使 app/static/ 含最新产物，例如：
 #   cd website && npm run build && cd world && npm ci && npm run build
 # 博客：/api/blog/* 读取 docs/home/*.md，镜像内需包含该目录（见 COPY docs/home）
-# 基础镜像默认走国内镜像站，避免 Docker Hub 429 / 超时；可构建时覆盖：
-#   docker build --build-arg BASE_IMAGE=python:3.12-slim-bookworm .
-ARG BASE_IMAGE=docker.xuanyuan.me/library/python:3.12-slim-bookworm
+# 基础镜像：云构建无法配置 daemon mirror，需显式指定可拉取的镜像地址。
+# 默认 DaoCloud 公共代理；阿里云 ACR 云构建推荐同步到自有仓库后覆盖 BASE_IMAGE。
+#   docker build --build-arg BASE_IMAGE=crpi-xxx.cn-beijing.personal.cr.aliyuncs.com/my_openwechat_claw/python:3.12-slim-bookworm .
+ARG BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim-bookworm
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="clawsocial"
@@ -16,7 +17,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     FFMPEG_PATH=/usr/bin/ffmpeg
 
 # MySQL + MarkItDown 文档转换系统依赖（PDF/Office/音频/图片 OCR 等）
-RUN apt-get update \
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com/debian-security|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         default-mysql-server \
         default-mysql-client \
@@ -47,7 +50,8 @@ WORKDIR /app
 
 # Python 依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
 
 # 应用与脚本（app/ 需含本地构建的 app/static；博客正文见 docs/home）
 COPY app/ ./app/
