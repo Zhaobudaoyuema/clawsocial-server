@@ -7,7 +7,7 @@ import re
 import uuid
 from pathlib import Path
 
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Request, UploadFile
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +19,24 @@ ALLOWED_EXTENSIONS = None  # None 表示不限制扩展名
 
 # 在线访问的基础 URL 前缀，可通过 FILES_BASE_URL 环境变量覆盖
 # 默认从 SITE_URL 推导，最终回退到 http://localhost:8000
+# 注意：运行时应优先用 build_files_base_url(request) 从请求推导，此值仅作兜底
 _SITE_URL = os.getenv("SITE_URL", os.getenv("BASE_URL", "http://localhost:8000"))
 FILES_BASE_URL = os.getenv("FILES_BASE_URL", f"{_SITE_URL.rstrip('/')}/files")
+
+
+def build_files_base_url(request: Request) -> str:
+    """从请求上下文推导 /files 的完整 URL 前缀。
+
+    优先级：
+    1. 环境变量 FILES_BASE_URL（显式配置最高优先）
+    2. 请求的 scheme + host + /files（自动适配 HTTP/HTTPS、域名、端口）
+    3. 模块级 FILES_BASE_URL 兜底
+    """
+    if os.getenv("FILES_BASE_URL"):
+        return FILES_BASE_URL
+    # request.base_url 形如 http://clawsocial.world/ 或 https://...
+    base = str(request.base_url).rstrip("/")
+    return f"{base}/files"
 
 
 def _sanitize_filename(name: str) -> str:
@@ -33,7 +49,7 @@ def _sanitize_filename(name: str) -> str:
     return safe.strip() or "file"
 
 
-async def save_upload(file: UploadFile, user_id: int | None = None) -> tuple[str, str, str]:
+async def save_upload(file: UploadFile, user_id: int | None = None, request: Request | None = None) -> tuple[str, str, str]:
     """
     保存上传文件，返回 (url, stored_name, original_filename)。
     - url: 完整在线访问 URL（https://clawsocial.world/files/{user_id}/{uuid}_{filename}）
@@ -67,7 +83,8 @@ async def save_upload(file: UploadFile, user_id: int | None = None) -> tuple[str
             detail=f"文件保存失败：{str(e)}",
         ) from e
 
-    url = f"{FILES_BASE_URL}/{rel_path}"
+    base_url = build_files_base_url(request) if request else FILES_BASE_URL
+    url = f"{base_url}/{rel_path}"
     return url, rel_path, original
 
 
@@ -81,7 +98,7 @@ def delete_upload(stored_name: str) -> None:
         pass
 
 
-async def save_drop_upload(file: UploadFile) -> tuple[str, str, str, int]:
+async def save_drop_upload(file: UploadFile, request: Request | None = None) -> tuple[str, str, str, int]:
     """
     保存 /drop 页面上传的文件。无用户 ID，使用 drop 子目录。
     返回 (url, stored_path, original_filename, file_size_bytes)。
@@ -111,5 +128,6 @@ async def save_drop_upload(file: UploadFile) -> tuple[str, str, str, int]:
             detail=f"文件保存失败：{str(e)}",
         ) from e
 
-    url = f"{FILES_BASE_URL}/{rel_path}"
+    base_url = build_files_base_url(request) if request else FILES_BASE_URL
+    url = f"{base_url}/{rel_path}"
     return url, rel_path, original, len(content)

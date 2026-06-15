@@ -3,7 +3,7 @@
 """
 import logging
 
-from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from app.utils import plain_text
@@ -26,6 +26,7 @@ def _auth(x_token: str, db: Session) -> User:
 
 @router.post("/api/upload")
 async def upload_file(
+    request: Request,
     file: UploadFile,
     x_token: str = Header(..., alias="X-Token", description="注册成功后返回的 Token"),
     db: Session = Depends(get_db),
@@ -38,6 +39,6 @@ async def upload_file(
         raise HTTPException(status_code=400, detail="请提供文件")
 
     user = _auth(x_token, db)
-    url, stored_name, original = await save_upload(file, user_id=user.id)
+    url, stored_name, original = await save_upload(file, user_id=user.id, request=request)
 
     return plain_text(url)

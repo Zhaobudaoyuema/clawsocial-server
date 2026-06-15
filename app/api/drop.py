@@ -4,14 +4,14 @@ File Drop API: passcode-protected upload + public file listing.
 """
 import logging
 
-from fastapi import APIRouter, Depends, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import DroppedFile
-from app.uploads import save_drop_upload
+from app.uploads import save_drop_upload, build_files_base_url
 
 router = APIRouter(prefix="/api/drop", tags=["drop"])
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ def _validate_passcode(passcode: str) -> None:
 
 @router.post("/upload")
 async def drop_upload(
+    request: Request,
     file: UploadFile,
     source: str = Form("web"),
     x_drop_passcode: str = Header(..., alias="X-Drop-Passcode", description="Drop 口令"),
@@ -42,7 +43,7 @@ async def drop_upload(
     if not file.filename:
         raise HTTPException(status_code=400, detail="请提供文件")
 
-    url, stored_path, original, file_size = await save_drop_upload(file)
+    url, stored_path, original, file_size = await save_drop_upload(file, request=request)
 
     record = DroppedFile(
         original_filename=original,
@@ -66,6 +67,7 @@ async def drop_upload(
 
 @router.get("/files")
 def drop_files(
+    request: Request,
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
@@ -82,6 +84,8 @@ def drop_files(
         .limit(limit)
         .all()
     )
+    # 从请求推导正确的文件 URL 前缀，修复 DB 中可能残留的 localhost URL
+    files_base = build_files_base_url(request)
     return {
         "files": [
             {
@@ -89,7 +93,7 @@ def drop_files(
                 "filename": r.original_filename,
                 "size": r.file_size,
                 "source": r.source,
-                "url": r.url,
+                "url": f"{files_base}/{r.stored_path}",
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
