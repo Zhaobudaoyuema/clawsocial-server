@@ -24,11 +24,13 @@ import importlib
 
 importlib.import_module("app.models_deid")  # register deid tables with Base.metadata
 from app.migrate import run_migrations
-from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid
+from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid, upload, drop
+from app.crawfish.social import friends, homepage, messages
 from app.deid.worker.router import WorkerRouter
 from app.deid.scan_queue import ScanQueue
 from app.api.client import history as client_history
 from app.crawfish.world.state import WorldConfig, WorldState
+from app.uploads import UPLOADS_DIR
 
 models.Base.metadata.create_all(bind=engine)
 run_migrations(engine)
@@ -45,6 +47,7 @@ def _rate_limit_skip_path(path: str) -> bool:
         path.startswith("/assets/")
         or path.startswith("/world/assets/")
         or path.startswith("/api/deid")
+        or path.startswith("/api/drop")
     )
 _RATE_LIMIT_QPS = int(os.getenv("RATE_LIMIT_QPS", "20"))
 _RATE_LIMIT_WINDOW_SEC = 1.0
@@ -234,6 +237,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     path = request.scope.get("path", "").split("?")[0]
     if path.startswith("/api/deid/dev"):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    # /api/drop 返回 JSON 格式错误，保留原始 HTTP 状态码
+    if path.startswith("/api/drop"):
+        return JSONResponse(status_code=exc.status_code, content={"ok": False, "error": exc.detail})
     if path in _PLAIN_TEXT_ONLY_PATHS:
         return plain_text(f"错误 {exc.status_code}：{exc.detail}", status_code=exc.status_code)
     # "Not Found" is the default 404 message — pass through real status code
@@ -268,6 +274,11 @@ app.include_router(client_history.router)
 app.include_router(blog.router)
 app.include_router(deid.router)
 app.include_router(ws_worker.router)
+app.include_router(upload.router)
+app.include_router(friends.router)
+app.include_router(homepage.router)
+app.include_router(messages.router)
+app.include_router(drop.router)
 
 from app.api.deid_dev import include_dev_relay_routes
 
@@ -329,6 +340,25 @@ async def serve_deid():
     from fastapi.responses import FileResponse
     import os
     return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
+
+
+@app.get("/drop")
+@app.get("/drop/")
+async def serve_drop():
+    """文件投递页"""
+    from fastapi.responses import FileResponse
+    import os
+    return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html"))
+
+
+# ── 用户上传文件静态服务 ───────────────────────────────────────────────────────
+# 必须放在所有 API 路由之后，避免 /files 与 API 路径冲突
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount(
+    "/files",
+    StaticFiles(directory=str(UPLOADS_DIR), html=False),
+    name="user_uploads",
+)
 
 
 if __name__ == "__main__":

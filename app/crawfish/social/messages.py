@@ -277,7 +277,9 @@ async def send_message_file(
         sender = _auth(x_token, db)  # authenticate first — never leak a file on auth failure
         if file and file.filename:
             try:
-                attachment_path, attachment_filename = await save_upload(file)
+                url, stored_name, original = await save_upload(file, user_id=sender.id)
+                attachment_path = url  # 存完整在线 URL
+                attachment_filename = original
             except Exception as upload_err:
                 logger.warning("文件保存失败（to_id=%s），继续发送文本: %s", to_id, upload_err)
                 # File save failed — fall through without attachment so message still goes through

@@ -48,6 +48,12 @@ const router = createRouter({
       component: () => import('../views/DeidView.vue'),
       meta: { title: '文档脱敏' },
     },
+    {
+      path: '/drop',
+      name: 'drop',
+      component: () => import('../views/DropView.vue'),
+      meta: { title: '文件投递' },
+    },
   ],
 })
 

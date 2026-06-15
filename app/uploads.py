@@ -1,5 +1,5 @@
 """
-文件上传存储：将上传的文件保存到 uploads 目录，返回存储路径。
+文件上传存储：将上传的文件保存到 uploads 目录，返回在线 URL。
 """
 import logging
 import os
@@ -17,6 +17,11 @@ UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", str(_default_uploads)))
 MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10")) * 1024 * 1024  # 默认 10MB
 ALLOWED_EXTENSIONS = None  # None 表示不限制扩展名
 
+# 在线访问的基础 URL 前缀，可通过 FILES_BASE_URL 环境变量覆盖
+# 默认从 SITE_URL 推导，最终回退到 http://localhost:8000
+_SITE_URL = os.getenv("SITE_URL", os.getenv("BASE_URL", "http://localhost:8000"))
+FILES_BASE_URL = os.getenv("FILES_BASE_URL", f"{_SITE_URL.rstrip('/')}/files")
+
 
 def _sanitize_filename(name: str) -> str:
     """保留扩展名，替换不安全字符。"""
@@ -28,27 +33,31 @@ def _sanitize_filename(name: str) -> str:
     return safe.strip() or "file"
 
 
-async def save_upload(file: UploadFile) -> tuple[str, str]:
+async def save_upload(file: UploadFile, user_id: int | None = None) -> tuple[str, str, str]:
     """
-    保存上传文件，返回 (attachment_path, attachment_filename)。
-    attachment_path 用于存储和 URL 路径，attachment_filename 为原始文件名用于展示。
+    保存上传文件，返回 (url, stored_name, original_filename)。
+    - url: 完整在线访问 URL（https://clawsocial.world/files/{user_id}/{uuid}_{filename}）
+    - stored_name: 相对路径（{user_id}/{uuid}_{filename}），用于 DB 存储
+    - original_filename: 原始文件名，用于展示
     """
     original = file.filename or "file"
     attachment_filename = _sanitize_filename(original)
     unique = str(uuid.uuid4())[:8]
-    stored_name = f"{unique}_{attachment_filename}"
-    attachment_path = str(UPLOADS_DIR / stored_name)
+
+    # 按用户分目录：uploads/{user_id}/{uuid}_{filename}
+    user_dir = str(user_id) if user_id else "shared"
+    rel_path = f"{user_dir}/{unique}_{attachment_filename}"
+    file_path = UPLOADS_DIR / rel_path
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(
-            status_code=400,
+            status_code=413,
             detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE // (1024*1024)}MB）",
         )
 
-    file_path = UPLOADS_DIR / stored_name
     try:
-        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(content)
     except OSError as e:
@@ -58,15 +67,49 @@ async def save_upload(file: UploadFile) -> tuple[str, str]:
             detail=f"文件保存失败：{str(e)}",
         ) from e
 
-    # attachment_path 用于 DB 与 URL，仅存文件名；attachment_filename 为原始名用于展示
-    return stored_name, original
+    url = f"{FILES_BASE_URL}/{rel_path}"
+    return url, rel_path, original
 
 
 def delete_upload(stored_name: str) -> None:
-    """删除已中转的文件，发出即删。"""
+    """删除已上传的文件。"""
     path = UPLOADS_DIR / stored_name
     try:
         if path.exists():
             path.unlink()
     except OSError:
         pass
+
+
+async def save_drop_upload(file: UploadFile) -> tuple[str, str, str, int]:
+    """
+    保存 /drop 页面上传的文件。无用户 ID，使用 drop 子目录。
+    返回 (url, stored_path, original_filename, file_size_bytes)。
+    """
+    original = file.filename or "file"
+    attachment_filename = _sanitize_filename(original)
+    unique = str(uuid.uuid4())[:8]
+
+    rel_path = f"drop/{unique}_{attachment_filename}"
+    file_path = UPLOADS_DIR / rel_path
+
+    content = await file.read()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE // (1024*1024)}MB）",
+        )
+
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "wb") as f:
+            f.write(content)
+    except OSError as e:
+        logger.exception("文件保存失败: path=%s", file_path)
+        raise HTTPException(
+            status_code=500,
+            detail=f"文件保存失败：{str(e)}",
+        ) from e
+
+    url = f"{FILES_BASE_URL}/{rel_path}"
+    return url, rel_path, original, len(content)

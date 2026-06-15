@@ -523,3 +523,178 @@ def test_world_homepage_not_found(client: TestClient):
     """不存在的用户返回 404"""
     r = client.get("/api/world/homepage/99999")
     assert r.status_code == 404
+
+
+# ─── POST /api/upload ────────────────────────────────────────────────────────
+
+
+def test_upload_file_success(client: TestClient, token):
+    """认证用户上传文件，返回在线 URL"""
+    uid, tk = token
+    import io
+    content = b"hello world test file"
+    r = client.post(
+        "/api/upload",
+        files={"file": ("test.txt", io.BytesIO(content), "text/plain")},
+        headers={"X-Token": tk},
+    )
+    assert r.status_code == 200
+    url = r.text
+    assert "/files/" in url
+    assert f"{uid}/" in url
+    assert url.endswith("test.txt") or "_test.txt" in url
+
+
+def test_upload_file_accessible(client: TestClient, token):
+    """上传后的文件可通过 URL 公开访问"""
+    uid, tk = token
+    import io
+    content = b"accessible content here"
+    r = client.post(
+        "/api/upload",
+        files={"file": ("access.txt", io.BytesIO(content), "text/plain")},
+        headers={"X-Token": tk},
+    )
+    assert r.status_code == 200
+    url = r.text
+    # 从 URL 提取路径部分（去掉 http://host 前缀）
+    from urllib.parse import urlparse
+    path = urlparse(url).path
+    r2 = client.get(path)
+    assert r2.status_code == 200
+    assert r2.content == content
+
+
+def test_upload_file_unauthorized(client: TestClient, db):
+    """未认证用户上传返回错误"""
+    import io
+    r = client.post(
+        "/api/upload",
+        files={"file": ("noauth.txt", io.BytesIO(b"x"), "text/plain")},
+        headers={"X-Token": "invalid_token"},
+    )
+    # http_exception_handler 把非 404 异常包装为 200 + 错误文本
+    assert "401" in r.text or r.status_code == 401
+
+
+def test_upload_file_no_file(client: TestClient, token):
+    """不上传文件返回错误"""
+    uid, tk = token
+    r = client.post(
+        "/api/upload",
+        headers={"X-Token": tk},
+    )
+    # 缺少 file 字段 → FastAPI 422 验证错误，被异常处理器包装
+    assert r.status_code in (200, 422)  # 422 或被包装为 200
+
+
+# ─── PUT /homepage — bleach 增强 ─────────────────────────────────────────────
+
+
+def test_homepage_style_attribute(client: TestClient, token):
+    """homepage 中的 style 属性不被 bleach 清除"""
+    uid, tk = token
+    html = '<div style="color:red;font-size:20px;">Hello</div>'
+    r = client.put(
+        "/homepage",
+        content=html.encode("utf-8"),
+        headers={"X-Token": tk, "Content-Type": "text/html; charset=utf-8"},
+    )
+    assert r.status_code == 200
+    # 读取渲染结果
+    r2 = client.get(f"/homepage/{uid}")
+    assert r2.status_code == 200
+    assert "style" in r2.text
+    assert "color:red" in r2.text or "color: red" in r2.text
+
+
+def test_homepage_style_tag(client: TestClient, token):
+    """homepage 中的 <style> 标签不被 bleach 清除"""
+    uid, tk = token
+    html = '<style>.test{background:#fff;}</style><p class="test">Styled</p>'
+    r = client.put(
+        "/homepage",
+        content=html.encode("utf-8"),
+        headers={"X-Token": tk, "Content-Type": "text/html; charset=utf-8"},
+    )
+    assert r.status_code == 200
+    r2 = client.get(f"/homepage/{uid}")
+    assert r2.status_code == 200
+    assert "<style>" in r2.text
+    assert ".test" in r2.text
+
+
+# ─── /api/drop — 文件投递 ──────────────────────────────────────────────────
+
+import io as _io
+
+# 口令写死在 app/api/drop.py 中，测试直接使用
+_DROP_PASS = "claw2026drop"
+
+
+def test_drop_upload_success(client: TestClient, db):
+    """口令正确时上传文件成功，返回 JSON 含 url"""
+    content = b"drop file content"
+    r = client.post(
+        "/api/drop/upload",
+        files={"file": ("drop_test.txt", _io.BytesIO(content), "text/plain")},
+        data={"source": "agent"},
+        headers={"X-Drop-Passcode": _DROP_PASS},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert "/files/drop/" in data["url"]
+    assert data["filename"] == "drop_test.txt"
+    assert data["size"] == len(content)
+    assert data["source"] == "agent"
+
+
+def test_drop_upload_wrong_passcode(client: TestClient, db):
+    """口令错误返回 401"""
+    r = client.post(
+        "/api/drop/upload",
+        files={"file": ("f.txt", _io.BytesIO(b"x"), "text/plain")},
+        headers={"X-Drop-Passcode": "wrong"},
+    )
+    assert r.status_code == 401
+    assert r.json()["ok"] is False
+
+
+def test_drop_files_list(client: TestClient, db):
+    """GET /api/drop/files 返回公开文件列表"""
+    # 上传一个文件
+    client.post(
+        "/api/drop/upload",
+        files={"file": ("list_test.txt", _io.BytesIO(b"hello"), "text/plain")},
+        headers={"X-Drop-Passcode": _DROP_PASS},
+    )
+    # 获取列表
+    r = client.get("/api/drop/files")
+    assert r.status_code == 200
+    data = r.json()
+    assert "files" in data
+    assert "total" in data
+    assert data["total"] >= 1
+    f = data["files"][0]
+    assert "filename" in f
+    assert "url" in f
+    assert "source" in f
+    assert "size" in f
+
+
+def test_drop_upload_file_accessible(client: TestClient, db):
+    """上传的文件可通过 URL 公开下载"""
+    content = b"downloadable content"
+    r = client.post(
+        "/api/drop/upload",
+        files={"file": ("dl_test.txt", _io.BytesIO(content), "text/plain")},
+        headers={"X-Drop-Passcode": _DROP_PASS},
+    )
+    assert r.status_code == 200
+    url = r.json()["url"]
+    from urllib.parse import urlparse
+    path = urlparse(url).path
+    r2 = client.get(path)
+    assert r2.status_code == 200
+    assert r2.content == content

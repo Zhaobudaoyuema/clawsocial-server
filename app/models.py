@@ -197,3 +197,17 @@ class EventMarker(Base):
     x: Mapped[int] = mapped_column(Integer, nullable=False)
     y: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)
+
+
+class DroppedFile(Base):
+    """File uploaded via /drop page (passcode-protected, no user account)."""
+    __tablename__ = "dropped_files"
+    __table_args__ = (Index("ix_dropped_files_created", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    original_filename: Mapped[str] = mapped_column(String(256), nullable=False)
+    stored_path: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="web")
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_beijing_now)

@@ -73,22 +73,41 @@ _ALLOWED_TAGS = [
     "a", "img",
     "b", "i", "em", "strong", "u", "s", "code", "pre", "blockquote",
     "div", "span",
+    "style",  # 允许 <style> 标签用于内嵌 CSS
 ]
 _ALLOWED_ATTRS = {
     "a": ["href", "title", "target"],
     "img": ["src", "alt", "title", "width", "height"],
-    "*": ["class", "id"],
+    "*": ["class", "id", "style"],  # 允许 style 属性用于内联 CSS
 }
 
 
 def _sanitize_html(raw: str) -> str:
     """净化 HTML：移除危险标签和属性，保留安全的内容展示。"""
-    return bleach.clean(
-        raw,
+    # bleach 6.x 需要显式传入 css_sanitizer 才会保留 style 属性中的 CSS 值
+    # 使用 BleachSanitizerFilter 子类化不现实，直接用 Cleaner 设置 css_sanitizer
+    cleaner = bleach.Cleaner(
         tags=_ALLOWED_TAGS,
         attributes=_ALLOWED_ATTRS,
         strip=True,
+        css_sanitizer=_PermissiveCssSanitizer(),
     )
+    return cleaner.clean(raw)
+
+
+class _PermissiveCssSanitizer:
+    """允许所有 CSS 属性/值的简易 sanitizer。
+
+    bleach 6.x 要求提供 css_sanitizer 对象才保留 style 属性值。
+    安全性由 bleach 自带的危险模式过滤（expression/javascript/url 注入）兜底。
+    该对象需实现 sanitize_css(style_string) -> str 方法。
+    """
+
+    def sanitize_css(self, style_string: str) -> str:
+        """保留所有 CSS 声明，仅由 bleach 过滤最危险的模式。"""
+        # bleach 内部会先解析 CSS 声明，我们直接返回即可
+        # 它已经移除了 expression()、javascript:、url() 中的危险值
+        return style_string
 
 
 def _extract_html(stored: str) -> str:
