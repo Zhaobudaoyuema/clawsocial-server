@@ -7,7 +7,7 @@
 # 构建参数：
 #   BASE_IMAGE — 默认 Docker Hub；若 429 可覆盖为国内镜像或自有 ACR
 #   MARKITDOWN_APT_PROFILE=slim|full — slim 仅 PDF 辅助包（默认）；full 装 LibreOffice 等（慢）
-ARG BASE_IMAGE=python:3.12-slim-bookworm
+ARG BASE_IMAGE=registry.cn-beijing.aliyuncs.com/library/python:3.12-slim-bookworm
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="clawsocial"
