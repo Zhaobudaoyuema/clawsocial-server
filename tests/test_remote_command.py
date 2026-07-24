@@ -25,6 +25,7 @@ def test_register_target_returns_id(client):
     status_data = status.json()
     assert status_data["id"] == "pc-home"
     assert status_data["online"] is False
+    assert status_data["state"] == "offline_authorized"
     assert status_data["registered"] is True
     assert status_data["expired"] is False
     assert status_data["expires_at"] == data["expires_at"]
@@ -35,6 +36,13 @@ def test_register_target_accepts_half_hour(client):
 
     assert resp.status_code == 200
     assert resp.json()["expires_in_minutes"] == 30
+
+
+def test_register_target_accepts_three_hours(client):
+    resp = _register(client, expires_in_minutes=180)
+
+    assert resp.status_code == 200
+    assert resp.json()["expires_in_minutes"] == 180
 
 
 def test_rejects_invalid_target_id(client):
@@ -148,6 +156,41 @@ def test_execute_defaults_to_cmd(client):
         thread.join(timeout=5)
 
     assert result_box["resp"].status_code == 200
+
+
+def test_status_tracks_offline_after_window_closed(client):
+    registered_target = _register(client).json()
+    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
+        assert ws.receive_json()["type"] == "registered"
+        ws.send_json(
+            {
+                "type": "hello",
+                "hostname": "workstation",
+                "platform": "Windows",
+                "shell": "cmd",
+            }
+        )
+        online = client.get("/api/remote-command/targets/pc-home").json()
+        assert online["state"] == "online"
+        assert online["online"] is True
+        assert online["hostname"] == "workstation"
+
+    offline = client.get("/api/remote-command/targets/pc-home").json()
+    assert offline["state"] == "offline_authorized"
+    assert offline["online"] is False
+    assert offline["registered"] is True
+    assert offline["expired"] is False
+    assert offline["expires_at"] == registered_target["expires_at"]
+    assert offline["hostname"] == "workstation"
+    assert offline["disconnected_at"]
+
+    resp = client.post(
+        "/api/remote-command/execute",
+        json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json() == {"detail": "target_offline"}
 
 
 def test_execute_rejects_expired_target(client):

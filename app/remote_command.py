@@ -16,7 +16,7 @@ TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$")
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_SHELL = "cmd"
 _DEFAULT_EXPIRES_IN_MINUTES = 10
-_ALLOWED_EXPIRES_IN_MINUTES = {10, 30}
+_ALLOWED_EXPIRES_IN_MINUTES = {10, 30, 180}
 
 
 class RemoteCommandError(Exception):
@@ -31,18 +31,32 @@ class RemoteCommandGrant:
     target_id: str
     expires_at: datetime
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    connected_at: datetime | None = None
+    disconnected_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    hostname: str | None = None
+    platform: str | None = None
+    shell: str | None = None
 
     @property
     def expired(self) -> bool:
         return datetime.now(timezone.utc) >= self.expires_at
 
     def status_dict(self) -> dict[str, Any]:
+        expired = self.expired
         return {
             "id": self.target_id,
             "online": False,
+            "state": "expired" if expired else "offline_authorized",
             "registered": True,
-            "expired": self.expired,
+            "expired": expired,
+            "hostname": self.hostname,
+            "platform": self.platform,
+            "shell": self.shell,
             "created_at": self.created_at.isoformat(),
+            "connected_at": self.connected_at.isoformat() if self.connected_at else None,
+            "disconnected_at": self.disconnected_at.isoformat() if self.disconnected_at else None,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
             "expires_at": self.expires_at.isoformat(),
         }
 
@@ -61,6 +75,8 @@ class RemoteCommandSession:
         return {
             "id": self.target_id,
             "online": True,
+            "state": "online",
+            "registered": True,
             "hostname": self.hostname,
             "platform": self.platform,
             "shell": self.shell,
@@ -101,7 +117,7 @@ class RemoteCommandRelay:
     ) -> RemoteCommandGrant:
         target_id = self.normalize_target_id(target_id)
         if expires_in_minutes not in _ALLOWED_EXPIRES_IN_MINUTES:
-            raise RemoteCommandError(400, "expires_in_minutes must be 10 or 30")
+            raise RemoteCommandError(400, "expires_in_minutes must be 10, 30, or 180")
         now = datetime.now(timezone.utc)
         grant = RemoteCommandGrant(
             target_id=target_id,
@@ -124,6 +140,9 @@ class RemoteCommandRelay:
                 expires_at=grant.expires_at,
             )
             self._sessions[target_id] = session
+            grant.connected_at = session.connected_at
+            grant.disconnected_at = None
+            grant.last_seen_at = session.connected_at
             return session
 
     async def detach(self, ws: WebSocket) -> None:
@@ -133,7 +152,12 @@ class RemoteCommandRelay:
                 for target_id, session in self._sessions.items()
                 if session.ws is ws
             ]
+            now = datetime.now(timezone.utc)
             for target_id in disconnected_ids:
+                grant = self._grants.get(target_id)
+                if grant:
+                    grant.disconnected_at = now
+                    grant.last_seen_at = now
                 self._sessions.pop(target_id, None)
             for fut in self._pending.values():
                 if not fut.done():
@@ -158,6 +182,12 @@ class RemoteCommandRelay:
         session.hostname = _optional_str(raw.get("hostname"))
         session.platform = _optional_str(raw.get("platform"))
         session.shell = _optional_str(raw.get("shell"))
+        grant = self._grants.get(target_id)
+        if grant:
+            grant.hostname = session.hostname
+            grant.platform = session.platform
+            grant.shell = session.shell
+            grant.last_seen_at = datetime.now(timezone.utc)
 
     def list_targets(self) -> list[dict[str, Any]]:
         targets = []
@@ -175,7 +205,13 @@ class RemoteCommandRelay:
         grant = self._grants.get(target_id)
         if grant:
             return grant.status_dict()
-        return {"id": target_id, "online": False, "registered": False, "expired": False}
+        return {
+            "id": target_id,
+            "online": False,
+            "state": "unregistered",
+            "registered": False,
+            "expired": False,
+        }
 
     def _active_grant(self, target_id: str) -> RemoteCommandGrant:
         grant = self._grants.get(target_id)
@@ -197,7 +233,7 @@ class RemoteCommandRelay:
         self._active_grant(target_id)
         session = self._sessions.get(target_id)
         if not session:
-            raise RemoteCommandError(404, "target_offline")
+            raise RemoteCommandError(409, "target_offline")
         if datetime.now(timezone.utc) >= session.expires_at:
             self._sessions.pop(target_id, None)
             try:

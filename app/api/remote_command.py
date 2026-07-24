@@ -15,7 +15,7 @@ ws_router = APIRouter(tags=["remote-command"])
 
 class RegisterTargetIn(BaseModel):
     target_id: str | None = Field(default=None, min_length=3, max_length=64)
-    expires_in_minutes: Literal[10, 30] = 10
+    expires_in_minutes: Literal[10, 30, 180] = 10
 
 
 class ExecuteCommandIn(BaseModel):
