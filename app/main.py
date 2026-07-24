@@ -24,7 +24,7 @@ import importlib
 
 importlib.import_module("app.models_deid")  # register deid tables with Base.metadata
 from app.migrate import run_migrations
-from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid, upload, drop
+from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid, upload, drop, remote_command
 from app.crawfish.social import friends, homepage, messages
 from app.deid.worker.router import WorkerRouter
 from app.deid.scan_queue import ScanQueue
@@ -126,6 +126,9 @@ async def lifespan(app: FastAPI):
     from app.deid.worker.relay_client import RemoteWorkerRelay, bootstrap_worker_relay
 
     app.state.worker_router = WorkerRouter()
+    from app.remote_command import RemoteCommandRelay
+
+    app.state.remote_command_relay = RemoteCommandRelay()
     app.state.worker_relay = RemoteWorkerRelay()
     app.state.scan_queue = ScanQueue(app=app)
     await bootstrap_worker_relay(app.state.worker_relay)
@@ -235,7 +238,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     from fastapi.responses import JSONResponse
 
     path = request.scope.get("path", "").split("?")[0]
-    if path.startswith("/api/deid/dev"):
+    if path.startswith("/api/deid/dev") or path.startswith("/api/remote-command"):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     # /api/drop 返回 JSON 格式错误，保留原始 HTTP 状态码
     if path.startswith("/api/drop"):
@@ -253,6 +256,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         for e in exc.errors()
     )
     path = request.scope.get("path", "").split("?")[0]
+    if path.startswith("/api/remote-command"):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
     if path in _PLAIN_TEXT_ONLY_PATHS:
         return plain_text(f"请求格式错误：{errors}", status_code=422)
     return plain_text(f"请求格式错误：{errors}", status_code=200)
@@ -274,6 +281,8 @@ app.include_router(client_history.router)
 app.include_router(blog.router)
 app.include_router(deid.router)
 app.include_router(ws_worker.router)
+app.include_router(remote_command.router)
+app.include_router(remote_command.ws_router)
 app.include_router(upload.router)
 app.include_router(friends.router)
 app.include_router(homepage.router)
