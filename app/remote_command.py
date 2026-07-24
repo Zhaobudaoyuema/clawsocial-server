@@ -6,7 +6,7 @@ import re
 import secrets
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import WebSocket
@@ -15,6 +15,8 @@ from fastapi import WebSocket
 TARGET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$")
 _DEFAULT_TIMEOUT = 60.0
 _DEFAULT_SHELL = "cmd"
+_DEFAULT_EXPIRES_IN_MINUTES = 10
+_ALLOWED_EXPIRES_IN_MINUTES = {10, 30}
 
 
 class RemoteCommandError(Exception):
@@ -25,9 +27,31 @@ class RemoteCommandError(Exception):
 
 
 @dataclass
+class RemoteCommandGrant:
+    target_id: str
+    expires_at: datetime
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def expired(self) -> bool:
+        return datetime.now(timezone.utc) >= self.expires_at
+
+    def status_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.target_id,
+            "online": False,
+            "registered": True,
+            "expired": self.expired,
+            "created_at": self.created_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+        }
+
+
+@dataclass
 class RemoteCommandSession:
     target_id: str
     ws: WebSocket
+    expires_at: datetime
     connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     hostname: str | None = None
     platform: str | None = None
@@ -41,6 +65,8 @@ class RemoteCommandSession:
             "platform": self.platform,
             "shell": self.shell,
             "connected_at": self.connected_at.isoformat(),
+            "expires_at": self.expires_at.isoformat(),
+            "expired": datetime.now(timezone.utc) >= self.expires_at,
         }
 
 
@@ -48,7 +74,7 @@ class RemoteCommandRelay:
     """Tracks controlled machines and routes command requests to them."""
 
     def __init__(self) -> None:
-        self._known_ids: set[str] = set()
+        self._grants: dict[str, RemoteCommandGrant] = {}
         self._sessions: dict[str, RemoteCommandSession] = {}
         self._pending: dict[str, asyncio.Future] = {}
         self._lock = asyncio.Lock()
@@ -67,19 +93,36 @@ class RemoteCommandRelay:
             )
         return target_id
 
-    async def register_target_id(self, target_id: str | None) -> str:
+    async def register_target_id(
+        self,
+        target_id: str | None,
+        *,
+        expires_in_minutes: int = _DEFAULT_EXPIRES_IN_MINUTES,
+    ) -> RemoteCommandGrant:
         target_id = self.normalize_target_id(target_id)
+        if expires_in_minutes not in _ALLOWED_EXPIRES_IN_MINUTES:
+            raise RemoteCommandError(400, "expires_in_minutes must be 10 or 30")
+        now = datetime.now(timezone.utc)
+        grant = RemoteCommandGrant(
+            target_id=target_id,
+            created_at=now,
+            expires_at=now + timedelta(minutes=expires_in_minutes),
+        )
         async with self._lock:
-            self._known_ids.add(target_id)
-        return target_id
+            self._grants[target_id] = grant
+        return grant
 
     async def attach(self, ws: WebSocket, target_id: str) -> RemoteCommandSession:
         async with self._lock:
-            self._known_ids.add(target_id)
+            grant = self._active_grant(target_id)
             old = self._sessions.get(target_id)
             if old and old.ws is not ws:
                 await old.ws.close(code=1012, reason="target replaced")
-            session = RemoteCommandSession(target_id=target_id, ws=ws)
+            session = RemoteCommandSession(
+                target_id=target_id,
+                ws=ws,
+                expires_at=grant.expires_at,
+            )
             self._sessions[target_id] = session
             return session
 
@@ -118,18 +161,30 @@ class RemoteCommandRelay:
 
     def list_targets(self) -> list[dict[str, Any]]:
         targets = []
-        for target_id in sorted(self._known_ids):
+        for target_id in sorted(self._grants):
             targets.append(self.target_status(target_id))
         for target_id, session in self._sessions.items():
-            if target_id not in self._known_ids:
+            if target_id not in self._grants:
                 targets.append(session.status_dict())
         return targets
 
     def target_status(self, target_id: str) -> dict[str, Any]:
         session = self._sessions.get(target_id)
-        if not session:
-            return {"id": target_id, "online": False, "registered": target_id in self._known_ids}
-        return session.status_dict()
+        if session and datetime.now(timezone.utc) < session.expires_at:
+            return session.status_dict()
+        grant = self._grants.get(target_id)
+        if grant:
+            return grant.status_dict()
+        return {"id": target_id, "online": False, "registered": False, "expired": False}
+
+    def _active_grant(self, target_id: str) -> RemoteCommandGrant:
+        grant = self._grants.get(target_id)
+        if not grant:
+            raise RemoteCommandError(404, "target_not_registered")
+        if grant.expired:
+            self._sessions.pop(target_id, None)
+            raise RemoteCommandError(410, "target_expired")
+        return grant
 
     async def execute(
         self,
@@ -139,9 +194,16 @@ class RemoteCommandRelay:
         shell: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
     ) -> dict[str, Any]:
+        self._active_grant(target_id)
         session = self._sessions.get(target_id)
         if not session:
             raise RemoteCommandError(404, "target_offline")
+        if datetime.now(timezone.utc) >= session.expires_at:
+            self._sessions.pop(target_id, None)
+            try:
+                await session.ws.close(code=1008, reason="target expired")
+            finally:
+                raise RemoteCommandError(410, "target_expired")
         command = command.strip()
         if not command:
             raise RemoteCommandError(400, "command_required")

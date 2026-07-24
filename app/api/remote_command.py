@@ -15,6 +15,7 @@ ws_router = APIRouter(tags=["remote-command"])
 
 class RegisterTargetIn(BaseModel):
     target_id: str | None = Field(default=None, min_length=3, max_length=64)
+    expires_in_minutes: Literal[10, 30] = 10
 
 
 class ExecuteCommandIn(BaseModel):
@@ -28,10 +29,18 @@ class ExecuteCommandIn(BaseModel):
 async def register_target(request: Request, payload: RegisterTargetIn):
     relay = _relay_from_request(request)
     try:
-        target_id = await relay.register_target_id(payload.target_id)
+        grant = await relay.register_target_id(
+            payload.target_id,
+            expires_in_minutes=payload.expires_in_minutes,
+        )
     except RemoteCommandError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    return {"id": target_id, "websocket_path": f"/ws/remote-command/target?id={target_id}"}
+    return {
+        "id": grant.target_id,
+        "expires_at": grant.expires_at.isoformat(),
+        "expires_in_minutes": payload.expires_in_minutes,
+        "websocket_path": f"/ws/remote-command/target?id={grant.target_id}",
+    }
 
 
 @router.get("/targets")
@@ -65,13 +74,19 @@ async def ws_remote_target(ws: WebSocket, id: str = Query(default="")):
     relay = ws.app.state.remote_command_relay
     try:
         target_id = relay.normalize_target_id(id)
+        session = await relay.attach(ws, target_id)
     except RemoteCommandError as exc:
         await ws.close(code=1008, reason=exc.detail)
         return
 
     await ws.accept()
-    await relay.attach(ws, target_id)
-    await ws.send_json({"type": "registered", "id": target_id})
+    await ws.send_json(
+        {
+            "type": "registered",
+            "id": target_id,
+            "expires_at": session.expires_at.isoformat(),
+        }
+    )
     try:
         while True:
             raw = await ws.receive_text()
