@@ -2,7 +2,8 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -134,12 +135,14 @@ async def lifespan(app: FastAPI):
     await bootstrap_worker_relay(app.state.worker_relay)
     ping_task = asyncio.create_task(_worker_ping_loop(app))
     relay_status_task = asyncio.create_task(_relay_status_loop(app))
+    remote_command_reset_task = asyncio.create_task(_remote_command_daily_reset_loop(app))
 
     yield
 
     ping_task.cancel()
     relay_status_task.cancel()
-    for task in (ping_task, relay_status_task):
+    remote_command_reset_task.cancel()
+    for task in (ping_task, relay_status_task, remote_command_reset_task):
         try:
             await task
         except asyncio.CancelledError:
@@ -173,6 +176,26 @@ async def _relay_status_loop(app: FastAPI) -> None:
             await relay.refresh_status()
         await asyncio.sleep(10)
 
+
+def _seconds_until_next_remote_command_reset(now: datetime | None = None) -> float:
+    tz = ZoneInfo(os.getenv("REMOTE_COMMAND_RESET_TIMEZONE", "Asia/Shanghai"))
+    now = now.astimezone(tz) if now else datetime.now(tz)
+    reset_at = now.replace(hour=4, minute=0, second=0, microsecond=0)
+    if now >= reset_at:
+        reset_at += timedelta(days=1)
+    return max(0.0, (reset_at - now).total_seconds())
+
+
+async def _remote_command_daily_reset_loop(app: FastAPI) -> None:
+    """Clear all remote-command grants and WebSocket sessions at 04:00 Beijing time."""
+    import asyncio
+
+    while True:
+        await asyncio.sleep(_seconds_until_next_remote_command_reset())
+        relay = getattr(app.state, "remote_command_relay", None)
+        if relay:
+            stats = await relay.clear_all(reason="daily_04_reset")
+            _root_logger.warning("remote command daily reset cleared %s", stats)
 
 
 app = FastAPI(lifespan=lifespan, title="ClawSocial Relay", version="2.0.0")

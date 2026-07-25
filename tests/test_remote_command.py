@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
+
+from app.main import _seconds_until_next_remote_command_reset
+from app.remote_command import RemoteCommandRelay
 
 
 def _register(client, target_id="pc-home", expires_in_minutes=10):
@@ -205,3 +209,105 @@ def test_execute_rejects_expired_target(client):
 
     assert resp.status_code == 410
     assert resp.json() == {"detail": "target_expired"}
+
+
+def test_execute_requires_operator_token_when_configured(client, monkeypatch):
+    monkeypatch.setenv("REMOTE_COMMAND_OPERATOR_TOKEN", "secret-token")
+
+    resp = client.post(
+        "/api/remote-command/execute",
+        json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json() == {"detail": "remote_command_operator_token_required"}
+
+
+def test_execute_does_not_require_operator_token_when_unconfigured(client, monkeypatch):
+    monkeypatch.delenv("REMOTE_COMMAND_OPERATOR_TOKEN", raising=False)
+    _register(client)
+    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
+        assert ws.receive_json()["type"] == "registered"
+
+        result_box = {}
+
+        def post_execute():
+            result_box["resp"] = client.post(
+                "/api/remote-command/execute",
+                json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
+            )
+
+        thread = threading.Thread(target=post_execute)
+        thread.start()
+        request = ws.receive_json()
+        ws.send_json(
+            {
+                "type": "result",
+                "request_id": request["request_id"],
+                "exit_code": 0,
+                "stdout": "hello\r\n",
+                "stderr": "",
+            }
+        )
+        thread.join(timeout=5)
+
+    assert result_box["resp"].status_code == 200
+
+
+def test_execute_accepts_operator_token_when_configured(client, monkeypatch):
+    monkeypatch.setenv("REMOTE_COMMAND_OPERATOR_TOKEN", "secret-token")
+    _register(client)
+    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
+        assert ws.receive_json()["type"] == "registered"
+
+        result_box = {}
+
+        def post_execute():
+            result_box["resp"] = client.post(
+                "/api/remote-command/execute",
+                headers={"Authorization": "Bearer secret-token"},
+                json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
+            )
+
+        thread = threading.Thread(target=post_execute)
+        thread.start()
+        request = ws.receive_json()
+        ws.send_json(
+            {
+                "type": "result",
+                "request_id": request["request_id"],
+                "exit_code": 0,
+                "stdout": "hello\r\n",
+                "stderr": "",
+            }
+        )
+        thread.join(timeout=5)
+
+    assert result_box["resp"].status_code == 200
+
+
+def test_clear_all_removes_grants():
+    async def scenario():
+        relay = RemoteCommandRelay()
+        await relay.register_target_id("pc-home", expires_in_minutes=180)
+
+        stats = await relay.clear_all(reason="test_reset")
+
+        assert stats == {"grants": 1, "sessions": 0, "pending": 0}
+        assert relay.target_status("pc-home") == {
+            "id": "pc-home",
+            "online": False,
+            "state": "unregistered",
+            "registered": False,
+            "expired": False,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_remote_command_reset_runs_at_next_beijing_4am():
+    now = datetime(2026, 7, 25, 3, 30, tzinfo=timezone(timedelta(hours=8)))
+    assert _seconds_until_next_remote_command_reset(now) == 30 * 60
+
+    now = datetime(2026, 7, 25, 4, 0, tzinfo=timezone(timedelta(hours=8)))
+    assert _seconds_until_next_remote_command_reset(now) == 24 * 60 * 60

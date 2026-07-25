@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from app.remote_command import RemoteCommandError
@@ -56,7 +58,12 @@ async def target_status(request: Request, target_id: str):
 
 
 @router.post("/execute")
-async def execute_command(request: Request, payload: ExecuteCommandIn):
+async def execute_command(
+    request: Request,
+    payload: ExecuteCommandIn,
+    authorization: str | None = Header(default=None),
+):
+    _require_operator_token(authorization)
     relay = _relay_from_request(request)
     try:
         return await relay.execute(
@@ -108,3 +115,12 @@ def _relay_from_request(request: Request):
     if relay is None:
         raise HTTPException(status_code=503, detail="remote_command_relay_not_ready")
     return relay
+
+
+def _require_operator_token(authorization: str | None) -> None:
+    expected = os.getenv("REMOTE_COMMAND_OPERATOR_TOKEN")
+    if not expected:
+        return
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="remote_command_operator_token_required")

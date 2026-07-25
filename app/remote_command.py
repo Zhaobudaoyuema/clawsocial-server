@@ -163,6 +163,32 @@ class RemoteCommandRelay:
                 if not fut.done():
                     fut.set_exception(RemoteCommandError(503, "target_disconnected"))
 
+    async def clear_all(self, *, reason: str = "remote_command_reset") -> dict[str, int]:
+        """Drop all grants, sessions, and pending command requests."""
+        async with self._lock:
+            sessions = list(self._sessions.values())
+            pending = list(self._pending.values())
+            grant_count = len(self._grants)
+            session_count = len(sessions)
+            pending_count = len(pending)
+            self._grants.clear()
+            self._sessions.clear()
+            self._pending.clear()
+
+        for fut in pending:
+            if not fut.done():
+                fut.set_exception(RemoteCommandError(503, reason))
+        for session in sessions:
+            try:
+                await session.ws.close(code=1012, reason=reason)
+            except Exception:
+                pass
+        return {
+            "grants": grant_count,
+            "sessions": session_count,
+            "pending": pending_count,
+        }
+
     async def handle_message(self, raw: dict[str, Any]) -> None:
         msg_type = raw.get("type")
         if msg_type == "hello":
