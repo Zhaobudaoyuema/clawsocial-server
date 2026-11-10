@@ -1,0 +1,19 @@
+[Unit]
+Description=ClawSocial serialized ACR deployment
+Requires=docker.service
+After=docker.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/clawsocial-deploy/deploy.py worker
+TimeoutStartSec=20min
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/clawsocial-deploy
