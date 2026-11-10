@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import secrets
 import uuid
@@ -30,6 +31,7 @@ class RemoteCommandError(Exception):
 class RemoteCommandGrant:
     target_id: str
     expires_at: datetime
+    connection_token_hash: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     connected_at: datetime | None = None
     disconnected_at: datetime | None = None
@@ -92,11 +94,23 @@ class RemoteCommandRelay:
     def __init__(self) -> None:
         self._grants: dict[str, RemoteCommandGrant] = {}
         self._sessions: dict[str, RemoteCommandSession] = {}
-        self._pending: dict[str, asyncio.Future] = {}
+        self._pending: dict[str, tuple[str, asyncio.Future]] = {}
         self._lock = asyncio.Lock()
 
+    def issue_connection_token(self, target_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        self._active_grant(target_id).connection_token_hash = hashlib.sha256(token.encode()).hexdigest()
+        return token
+
+    def verify_connection_token(self, target_id: str, authorization: str | None) -> None:
+        grant = self._active_grant(target_id)
+        scheme, _, token = (authorization or "").partition(" ")
+        hashed = hashlib.sha256(token.encode()).hexdigest()
+        if scheme.lower() != "bearer" or not grant.connection_token_hash or not secrets.compare_digest(hashed, grant.connection_token_hash):
+            raise RemoteCommandError(403, "target_connection_token_required")
+
     def generate_target_id(self) -> str:
-        return f"rc-{secrets.token_urlsafe(6).replace('-', '').replace('_', '')}"
+        return f"rc-{secrets.token_urlsafe(16).replace('-', '').replace('_', '')}"
 
     def normalize_target_id(self, target_id: str | None) -> str:
         target_id = (target_id or "").strip()
@@ -133,7 +147,7 @@ class RemoteCommandRelay:
             grant = self._active_grant(target_id)
             old = self._sessions.get(target_id)
             if old and old.ws is not ws:
-                await old.ws.close(code=1012, reason="target replaced")
+                raise RemoteCommandError(409, "target_already_connected")
             session = RemoteCommandSession(
                 target_id=target_id,
                 ws=ws,
@@ -159,15 +173,15 @@ class RemoteCommandRelay:
                     grant.disconnected_at = now
                     grant.last_seen_at = now
                 self._sessions.pop(target_id, None)
-            for fut in self._pending.values():
-                if not fut.done():
+            for owner, fut in self._pending.values():
+                if owner in disconnected_ids and not fut.done():
                     fut.set_exception(RemoteCommandError(503, "target_disconnected"))
 
     async def clear_all(self, *, reason: str = "remote_command_reset") -> dict[str, int]:
         """Drop all grants, sessions, and pending command requests."""
         async with self._lock:
             sessions = list(self._sessions.values())
-            pending = list(self._pending.values())
+            pending = [fut for _, fut in self._pending.values()]
             grant_count = len(self._grants)
             session_count = len(sessions)
             pending_count = len(pending)
@@ -196,9 +210,11 @@ class RemoteCommandRelay:
             return
         if msg_type == "result":
             req_id = str(raw.get("request_id") or "")
-            fut = self._pending.get(req_id)
-            if fut and not fut.done():
-                fut.set_result(raw)
+            pending = self._pending.get(req_id)
+            if pending:
+                owner, fut = pending
+                if owner == raw.get("target_id") and not fut.done():
+                    fut.set_result(raw)
 
     async def _update_metadata(self, raw: dict[str, Any]) -> None:
         target_id = str(raw.get("target_id") or "")
@@ -275,7 +291,9 @@ class RemoteCommandRelay:
         request_id = f"cmd-{uuid.uuid4().hex[:12]}"
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
-        self._pending[request_id] = fut
+        if len(self._pending) >= 32 or any(owner == target_id for owner, _ in self._pending.values()):
+            raise RemoteCommandError(429, "target_busy_or_server_limit")
+        self._pending[request_id] = (target_id, fut)
         try:
             await session.ws.send_json(
                 {

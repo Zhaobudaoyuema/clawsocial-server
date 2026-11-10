@@ -17,6 +17,7 @@ def main():
     import importlib
 
     importlib.import_module("app.models_deid")
+    importlib.import_module("app.remote_command_security")
     from app.database import engine
     from app import models
     from app.migrate import run_migrations
