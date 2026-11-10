@@ -32,11 +32,8 @@ def state(tmp_path, monkeypatch):
         (tmp_path / name).mkdir()
     config = tmp_path / 'config.json'
     config.write_text(json.dumps(CONFIG))
-    token = tmp_path / 'token'
-    token.write_text('test-webhook-token')
     monkeypatch.setattr(deploy, 'STATE', tmp_path)
     monkeypatch.setattr(deploy, 'CONFIG', config)
-    monkeypatch.setattr(deploy, 'TOKEN', token)
     return tmp_path
 
 
@@ -53,14 +50,14 @@ def test_unapproved_events_rejected(section, key, value):
         deploy.validate_event(payload, CONFIG)
 
 
-def test_receiver_auth_rotation_and_duplicate_queue(state):
+def test_receiver_accepts_only_notification_path_and_valid_events(state):
     server = deploy.HTTPServer(('127.0.0.1', 0), deploy.Receiver)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
-    url = f'http://127.0.0.1:{server.server_port}/hooks/acr/clawsocial?token='
+    url = f'http://127.0.0.1:{server.server_port}'
 
-    def post(token, payload):
-        request = Request(url + token, json.dumps(payload).encode(), method='POST')
+    def post(path, payload):
+        request = Request(url + path, json.dumps(payload).encode(), method='POST')
         try:
             with urlopen(request, timeout=5) as response:
                 return response.status
@@ -68,14 +65,14 @@ def test_receiver_auth_rotation_and_duplicate_queue(state):
             return exc.code
 
     try:
-        assert post('wrong', event()) == 403
-        assert post('test-webhook-token', event()) == 202
-        assert post('test-webhook-token', event()) == 202
+        assert post('/hooks/acr/clawsocial?token=ignored', event()) == 404
+        path = '/hooks/acr/clawsocial-notify'
+        assert post(path, event()) == 202
+        assert post(path, event()) == 202
         assert len(list((state / 'queue').glob('*.json'))) == 1
-        assert post('test-webhook-token', []) == 400
-        deploy.TOKEN.write_text('replacement')
-        assert post('test-webhook-token', event()) == 403
-        assert post('replacement', event()) == 202
+        assert post(path, []) == 400
+        assert post(path, {'repository': {}, 'push_data': {}}) == 400
+        assert post(path + '?token=unused', event()) == 404
     finally:
         server.shutdown()
         server.server_close()

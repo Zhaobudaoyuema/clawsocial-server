@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ACR receiver and serialized Docker deployment worker (Python stdlib only)."""
+"""Untrusted ACR hints; authenticated registry remains the deployment authority."""
 import copy
 import gzip
 import http.client
@@ -14,11 +14,10 @@ import socket
 import subprocess
 import sys
 import time
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 CONFIG = Path('/etc/clawsocial-deploy/config.json')
 STATE = Path('/var/lib/clawsocial-deploy')
-TOKEN = Path('/etc/clawsocial-deploy/webhook.token')
 
 
 def validate_event(payload, config):
@@ -44,7 +43,6 @@ def save_json(path, value):
 
 class Receiver(BaseHTTPRequestHandler):
     def log_message(self, *_args):
-        # Default access logs include the URL credential.
         pass
 
     def reply(self, code, status):
@@ -57,11 +55,8 @@ class Receiver(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlsplit(self.path)
-        supplied = parse_qs(url.query).get('token', [])
-        expected = TOKEN.read_text().strip()
-        if (url.path != '/hooks/acr/clawsocial' or not expected or len(supplied) != 1
-                or not secrets.compare_digest(supplied[0], expected)):
-            self.reply(403, 'forbidden')
+        if url.path != '/hooks/acr/clawsocial-notify' or url.query:
+            self.reply(404, 'not_found')
             return
         try:
             length = int(self.headers.get('Content-Length', '0'))
@@ -74,6 +69,8 @@ class Receiver(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             self.reply(400, 'invalid_event')
             return
+        # No payload grants deployment authority. The worker independently pulls
+        # the fixed private repository over TLS and checks the current tag digest.
         queue = STATE / 'queue'
         path = queue / (digest.split(':')[1] + '.json')
         if not path.exists():
