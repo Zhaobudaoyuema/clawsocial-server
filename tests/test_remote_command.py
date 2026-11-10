@@ -4,310 +4,206 @@ import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 
-from app.main import _seconds_until_next_remote_command_reset
-from app.remote_command import RemoteCommandRelay
+import pytest
+from fastapi import WebSocketDisconnect
+
+from app.api import remote_command_v11
+from app.remote_command import RemoteCommandError, RemoteCommandRelay
+from app.remote_command_security import RemoteCommandInvite, token_hash
 
 
-def _register(client, target_id="pc-home", expires_in_minutes=10):
-    return client.post(
+@pytest.fixture
+def operator(monkeypatch):
+    monkeypatch.setenv("REMOTE_COMMAND_OPERATOR_TOKEN", "test-operator")
+    return {"Authorization": "Bearer test-operator"}
+
+
+def register(client, operator, minutes=30):
+    invite = client.post(
+        "/api/remote-command/invites", headers=operator,
+        json={"session_minutes": minutes},
+    )
+    assert invite.status_code == 200
+    response = client.post(
         "/api/remote-command/targets/register",
-        json={"target_id": target_id, "expires_in_minutes": expires_in_minutes},
+        json={"invite_token": invite.json()["invite_token"]},
     )
+    assert response.status_code == 200
+    return response.json()
 
 
-def test_register_target_returns_id(client):
-    resp = _register(client)
-
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["id"] == "pc-home"
-    assert data["expires_in_minutes"] == 10
-    assert data["expires_at"]
-    assert data["websocket_path"] == "/ws/remote-command/target?id=pc-home"
-
-    status = client.get("/api/remote-command/targets/pc-home")
-    status_data = status.json()
-    assert status_data["id"] == "pc-home"
-    assert status_data["online"] is False
-    assert status_data["state"] == "offline_authorized"
-    assert status_data["registered"] is True
-    assert status_data["expired"] is False
-    assert status_data["expires_at"] == data["expires_at"]
-
-
-def test_register_target_accepts_half_hour(client):
-    resp = _register(client, expires_in_minutes=30)
-
-    assert resp.status_code == 200
-    assert resp.json()["expires_in_minutes"] == 30
+@pytest.mark.parametrize("minutes", [10, 30, 180])
+def test_register_consumes_persistent_invite(client, operator, db, minutes):
+    invite = client.post(
+        "/api/remote-command/invites", headers=operator,
+        json={"session_minutes": minutes},
+    ).json()
+    payload = {"invite_token": invite["invite_token"]}
+    response = client.post("/api/remote-command/targets/register", json=payload)
+    assert response.status_code == 200
+    target = response.json()
+    assert target["expires_in_minutes"] == minutes
+    assert target["connection_token"]
+    assert target["websocket_path"] == f"/ws/remote-command/target?id={target['id']}"
+    stored = db.get(RemoteCommandInvite, token_hash(invite["invite_token"]))
+    assert stored.consumed_at is not None
+    assert stored.token_hash != invite["invite_token"]
+    assert client.post("/api/remote-command/targets/register", json=payload).status_code == 403
 
 
-def test_register_target_accepts_three_hours(client):
-    resp = _register(client, expires_in_minutes=180)
-
-    assert resp.status_code == 200
-    assert resp.json()["expires_in_minutes"] == 180
-
-
-def test_rejects_invalid_target_id(client):
-    resp = _register(client, target_id="../bad")
-
-    assert resp.status_code == 400
-
-
-def test_rejects_invalid_expiration(client):
-    resp = client.post(
-        "/api/remote-command/targets/register",
-        json={"target_id": "pc-home", "expires_in_minutes": 60},
+def test_expired_invite_cannot_register(client, operator, db):
+    invite = client.post("/api/remote-command/invites", headers=operator, json={}).json()
+    stored = db.get(RemoteCommandInvite, token_hash(invite["invite_token"]))
+    stored.expires_at = 0
+    db.commit()
+    response = client.post(
+        "/api/remote-command/targets/register", json={"invite_token": invite["invite_token"]},
     )
-
-    assert resp.status_code == 422
-
-
-def test_execute_round_trip(client):
-    registered_target = _register(client).json()
-    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
-        registered = ws.receive_json()
-        assert registered == {
-            "type": "registered",
-            "id": "pc-home",
-            "expires_at": registered_target["expires_at"],
-        }
-        ws.send_json(
-            {
-                "type": "hello",
-                "hostname": "workstation",
-                "platform": "Windows",
-                "shell": "cmd",
-            }
-        )
-
-        result_box = {}
-
-        def post_execute():
-            result_box["resp"] = client.post(
-                "/api/remote-command/execute",
-                json={
-                    "target_id": "pc-home",
-                    "command": "echo hello",
-                    "shell": "cmd",
-                    "timeout": 5,
-                },
-            )
-
-        thread = threading.Thread(target=post_execute)
-        thread.start()
-
-        request = ws.receive_json()
-        assert request["type"] == "exec"
-        assert request["command"] == "echo hello"
-        assert request["shell"] == "cmd"
-
-        ws.send_json(
-            {
-                "type": "result",
-                "request_id": request["request_id"],
-                "exit_code": 0,
-                "stdout": "hello\r\n",
-                "stderr": "",
-                "duration_ms": 12,
-            }
-        )
-        thread.join(timeout=5)
-
-    resp = result_box["resp"]
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["target_id"] == "pc-home"
-    assert data["exit_code"] == 0
-    assert data["stdout"] == "hello\r\n"
+    assert response.status_code == 403
 
 
-def test_execute_defaults_to_cmd(client):
-    _register(client)
-    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
-        registered = ws.receive_json()
-        assert registered["type"] == "registered"
-        assert registered["id"] == "pc-home"
-
-        result_box = {}
-
-        def post_execute():
-            result_box["resp"] = client.post(
-                "/api/remote-command/execute",
-                json={
-                    "target_id": "pc-home",
-                    "command": "echo hello",
-                    "timeout": 5,
-                },
-            )
-
-        thread = threading.Thread(target=post_execute)
-        thread.start()
-
-        request = ws.receive_json()
-        assert request["shell"] == "cmd"
-
-        ws.send_json(
-            {
-                "type": "result",
-                "request_id": request["request_id"],
-                "exit_code": 0,
-                "stdout": "hello\r\n",
-                "stderr": "",
-            }
-        )
-        thread.join(timeout=5)
-
-    assert result_box["resp"].status_code == 200
+@pytest.mark.parametrize("method,path,payload", [
+    ("POST", "/api/remote-command/invites", {}),
+    ("GET", "/api/remote-command/targets", None),
+    ("GET", "/api/remote-command/targets/unknown", None),
+    ("POST", "/api/remote-command/execute", {"target_id": "unknown", "command": "echo test"}),
+])
+def test_operator_required_for_management(client, operator, method, path, payload):
+    assert client.request(method, path, json=payload).status_code == 401
+    assert client.request(
+        method, path, json=payload, headers={"Authorization": "Bearer incorrect"},
+    ).status_code == 401
 
 
-def test_status_tracks_offline_after_window_closed(client):
-    registered_target = _register(client).json()
-    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
-        assert ws.receive_json()["type"] == "registered"
-        ws.send_json(
-            {
-                "type": "hello",
-                "hostname": "workstation",
-                "platform": "Windows",
-                "shell": "cmd",
-            }
-        )
-        online = client.get("/api/remote-command/targets/pc-home").json()
-        assert online["state"] == "online"
-        assert online["online"] is True
-        assert online["hostname"] == "workstation"
-
-    offline = client.get("/api/remote-command/targets/pc-home").json()
-    assert offline["state"] == "offline_authorized"
-    assert offline["online"] is False
-    assert offline["registered"] is True
-    assert offline["expired"] is False
-    assert offline["expires_at"] == registered_target["expires_at"]
-    assert offline["hostname"] == "workstation"
-    assert offline["disconnected_at"]
-
-    resp = client.post(
-        "/api/remote-command/execute",
-        json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
-    )
-
-    assert resp.status_code == 409
-    assert resp.json() == {"detail": "target_offline"}
-
-
-def test_execute_rejects_expired_target(client):
-    _register(client)
-    relay = client.app.state.remote_command_relay
-    relay._grants["pc-home"].expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-
-    resp = client.post(
-        "/api/remote-command/execute",
-        json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
-    )
-
-    assert resp.status_code == 410
-    assert resp.json() == {"detail": "target_expired"}
-
-
-def test_execute_requires_operator_token_when_configured(client, monkeypatch):
-    monkeypatch.setenv("REMOTE_COMMAND_OPERATOR_TOKEN", "secret-token")
-
-    resp = client.post(
-        "/api/remote-command/execute",
-        json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
-    )
-
-    assert resp.status_code == 401
-    assert resp.json() == {"detail": "remote_command_operator_token_required"}
-
-
-def test_execute_does_not_require_operator_token_when_unconfigured(client, monkeypatch):
+def test_operator_missing_fails_closed(client, monkeypatch, tmp_path):
     monkeypatch.delenv("REMOTE_COMMAND_OPERATOR_TOKEN", raising=False)
-    _register(client)
-    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
-        assert ws.receive_json()["type"] == "registered"
+    monkeypatch.setenv("REMOTE_COMMAND_OPERATOR_TOKEN_FILE", str(tmp_path / "absent"))
+    response = client.get("/api/remote-command/targets")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "remote_command_operator_not_configured"}
 
-        result_box = {}
 
-        def post_execute():
-            result_box["resp"] = client.post(
-                "/api/remote-command/execute",
-                json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
+def test_operator_can_be_read_from_file(client, monkeypatch, tmp_path):
+    monkeypatch.delenv("REMOTE_COMMAND_OPERATOR_TOKEN", raising=False)
+    path = tmp_path / "operator.token"
+    path.write_text("test-file-token\n")
+    monkeypatch.setenv("REMOTE_COMMAND_OPERATOR_TOKEN_FILE", str(path))
+    assert client.get(
+        "/api/remote-command/targets", headers={"Authorization": "Bearer test-file-token"},
+    ).status_code == 200
+    # A subsequent request resolves the current canonical file, not a cached token.
+    path.write_text("replacement-token")
+    assert client.get(
+        "/api/remote-command/targets", headers={"Authorization": "Bearer test-file-token"},
+    ).status_code == 401
+
+
+def test_websocket_requires_its_own_connection_token(client, operator):
+    target = register(client, operator)
+    other = register(client, operator)
+    for headers in ({}, operator, {"Authorization": f"Bearer {other['connection_token']}"}):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(target["websocket_path"], headers=headers):
+                pass
+        assert exc.value.code == 1008
+
+
+def test_v12_execute_round_trip_and_duplicate_connection(client, operator):
+    target = register(client, operator)
+    headers = {"Authorization": f"Bearer {target['connection_token']}"}
+    with client.websocket_connect(target["websocket_path"], headers=headers) as ws:
+        assert ws.receive_json()["id"] == target["id"]
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(target["websocket_path"], headers=headers):
+                pass
+        result = {}
+
+        def execute():
+            result["response"] = client.post(
+                "/api/remote-command/execute", headers=operator,
+                json={"target_id": target["id"], "command": "echo hello", "timeout": 2},
             )
 
-        thread = threading.Thread(target=post_execute)
+        thread = threading.Thread(target=execute)
         thread.start()
-        request = ws.receive_json()
-        ws.send_json(
-            {
-                "type": "result",
-                "request_id": request["request_id"],
-                "exit_code": 0,
-                "stdout": "hello\r\n",
-                "stderr": "",
-            }
-        )
+        message = ws.receive_json()
+        assert message["command"] == "echo hello"
+        ws.send_json({"type": "result", "request_id": message["request_id"],
+                      "exit_code": 0, "stdout": "hello", "stderr": ""})
         thread.join(timeout=5)
-
-    assert result_box["resp"].status_code == 200
-
-
-def test_execute_accepts_operator_token_when_configured(client, monkeypatch):
-    monkeypatch.setenv("REMOTE_COMMAND_OPERATOR_TOKEN", "secret-token")
-    _register(client)
-    with client.websocket_connect("/ws/remote-command/target?id=pc-home") as ws:
-        assert ws.receive_json()["type"] == "registered"
-
-        result_box = {}
-
-        def post_execute():
-            result_box["resp"] = client.post(
-                "/api/remote-command/execute",
-                headers={"Authorization": "Bearer secret-token"},
-                json={"target_id": "pc-home", "command": "echo hello", "timeout": 5},
-            )
-
-        thread = threading.Thread(target=post_execute)
-        thread.start()
-        request = ws.receive_json()
-        ws.send_json(
-            {
-                "type": "result",
-                "request_id": request["request_id"],
-                "exit_code": 0,
-                "stdout": "hello\r\n",
-                "stderr": "",
-            }
-        )
-        thread.join(timeout=5)
-
-    assert result_box["resp"].status_code == 200
+        assert not thread.is_alive()
+        assert result["response"].status_code == 200
+        assert result["response"].json()["stdout"] == "hello"
 
 
-def test_clear_all_removes_grants():
+def test_v11_and_v12_grants_are_isolated(client, operator):
+    modern = register(client, operator)
+    legacy = client.post(
+        "/legacy-v11/api/remote-command/targets/register",
+        json={"target_id": "legacy-target"},
+    )
+    assert legacy.status_code == 200
+    old_targets = client.get("/legacy-v11/api/remote-command/targets").json()["targets"]
+    new_targets = client.get("/api/remote-command/targets", headers=operator).json()["targets"]
+    assert [t["id"] for t in old_targets] == ["legacy-target"]
+    assert [t["id"] for t in new_targets] == [modern["id"]]
+    assert remote_command_v11.app.state.remote_command_relay is not client.app.state.remote_command_relay
+
+
+def test_oversized_message_closes_websocket(client, operator):
+    target = register(client, operator)
+    with client.websocket_connect(
+        target["websocket_path"], headers={"Authorization": f"Bearer {target['connection_token']}"},
+    ) as ws:
+        ws.receive_json()
+        ws.send_text("x" * 262145)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1009
+
+
+def test_expired_connection_is_closed(client, operator):
+    target = register(client, operator)
+    client.app.state.remote_command_relay._grants[target["id"]].expires_at = (
+        datetime.now(timezone.utc) + timedelta(milliseconds=100)
+    )
+    with client.websocket_connect(
+        target["websocket_path"], headers={"Authorization": f"Bearer {target['connection_token']}"},
+    ) as ws:
+        ws.receive_json()
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1000
+
+
+def test_result_and_disconnect_only_affect_own_target():
+    class Socket:
+        def __init__(self):
+            self.sent = asyncio.Queue()
+
+        async def send_json(self, payload):
+            await self.sent.put(payload)
+
     async def scenario():
         relay = RemoteCommandRelay()
-        await relay.register_target_id("pc-home", expires_in_minutes=180)
-
-        stats = await relay.clear_all(reason="test_reset")
-
-        assert stats == {"grants": 1, "sessions": 0, "pending": 0}
-        assert relay.target_status("pc-home") == {
-            "id": "pc-home",
-            "online": False,
-            "state": "unregistered",
-            "registered": False,
-            "expired": False,
-        }
+        first, second = Socket(), Socket()
+        for name, ws in (("first", first), ("second", second)):
+            await relay.register_target_id(name)
+            await relay.attach(ws, name)
+        task = asyncio.create_task(relay.execute(
+            target_id="first", command="echo test", shell="sh", timeout=1,
+        ))
+        message = await first.sent.get()
+        with pytest.raises(RemoteCommandError) as exc:
+            await relay.execute(target_id="first", command="echo second", shell="sh", timeout=1)
+        assert exc.value.status_code == 429
+        await relay.handle_message({"type": "result", "target_id": "second",
+                                    "request_id": message["request_id"], "stdout": "forged"})
+        await relay.detach(second)
+        assert not task.done()
+        await relay.handle_message({"type": "result", "target_id": "first",
+                                    "request_id": message["request_id"], "stdout": "correct"})
+        result = await task
+        assert result["stdout"] == "correct"
 
     asyncio.run(scenario())
-
-
-def test_remote_command_reset_runs_at_next_beijing_4am():
-    now = datetime(2026, 7, 25, 3, 30, tzinfo=timezone(timedelta(hours=8)))
-    assert _seconds_until_next_remote_command_reset(now) == 30 * 60
-
-    now = datetime(2026, 7, 25, 4, 0, tzinfo=timezone(timedelta(hours=8)))
-    assert _seconds_until_next_remote_command_reset(now) == 24 * 60 * 60

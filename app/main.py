@@ -25,7 +25,7 @@ import importlib
 
 importlib.import_module("app.models_deid")  # register deid tables with Base.metadata
 from app.migrate import run_migrations
-from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid, upload, drop, remote_command
+from app.api import blog, register, stats, world, ws_client, ws_server, ws_worker, share, deid, upload, drop, remote_command, remote_command_v11
 from app.crawfish.social import friends, homepage, messages
 from app.deid.worker.router import WorkerRouter
 from app.deid.scan_queue import ScanQueue
@@ -130,6 +130,7 @@ async def lifespan(app: FastAPI):
     from app.remote_command import RemoteCommandRelay
 
     app.state.remote_command_relay = RemoteCommandRelay()
+    remote_command_v11.app.state.remote_command_relay = RemoteCommandRelay()
     app.state.worker_relay = RemoteWorkerRelay()
     app.state.scan_queue = ScanQueue(app=app)
     await bootstrap_worker_relay(app.state.worker_relay)
@@ -192,8 +193,7 @@ async def _remote_command_daily_reset_loop(app: FastAPI) -> None:
 
     while True:
         await asyncio.sleep(_seconds_until_next_remote_command_reset())
-        relay = getattr(app.state, "remote_command_relay", None)
-        if relay:
+        for relay in (app.state.remote_command_relay, remote_command_v11.app.state.remote_command_relay):
             stats = await relay.clear_all(reason="daily_04_reset")
             _root_logger.warning("remote command daily reset cleared %s", stats)
 
@@ -306,6 +306,7 @@ app.include_router(deid.router)
 app.include_router(ws_worker.router)
 app.include_router(remote_command.router)
 app.include_router(remote_command.ws_router)
+app.mount("/legacy-v11", remote_command_v11.app)
 app.include_router(upload.router)
 app.include_router(friends.router)
 app.include_router(homepage.router)

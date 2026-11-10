@@ -11,6 +11,8 @@ ARG BASE_IMAGE=python:3.12-slim-bookworm
 FROM ${BASE_IMAGE}
 
 LABEL maintainer="clawsocial"
+LABEL remote-command.version="12"
+LABEL remote-command.legacy-v11="enabled"
 LABEL description="ClawSocial Relay: FastAPI + MySQL in one image, script-init on start"
 
 ARG MARKITDOWN_APT_PROFILE=slim
