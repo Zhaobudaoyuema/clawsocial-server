@@ -86,7 +86,9 @@ def snapshot(game, role):
     human = game['humanColor']
     agent = 'white' if human == 'black' else 'black'
     next_color = 'black' if len(game['moves']) % 2 == 0 else 'white'
-    return {**game, 'role': role, 'agentColor': agent, 'nextColor': next_color,
+    move_deadline = game.get('turnStartedAt')
+    move_deadline = move_deadline + 15 if move_deadline is not None and game.get('mode') == 'relay' and game['status'] == 'playing' and next_color == agent else None
+    return {**game, 'serverTime': time.time(), 'moveDeadline': move_deadline, 'role': role, 'agentColor': agent, 'nextColor': next_color,
             'yourTurn': game['status'] == 'playing' and next_color == (human if role == 'human' else agent),
             'rows': [''.join(row) for row in board],
             'immediateWinningMoves': {'black': immediate_wins(board, 'X'), 'white': immediate_wins(board, 'O')},
@@ -124,7 +126,7 @@ def page():
 def create(body: NewGame):
     room, human, agent = secrets.token_urlsafe(12), secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     human_color = ('white' if body.ownColor == 'black' else 'black') if body.mode == 'relay' else body.humanColor
-    game = {'id': room, 'revision': 0, 'mode': body.mode, 'humanColor': human_color, 'status': 'playing', 'winner': None, 'winningLine': [], 'moves': [], 'agentSeen': 0}
+    game = {'id': room, 'revision': 0, 'mode': body.mode, 'humanColor': human_color, 'status': 'playing', 'winner': None, 'winningLine': [], 'moves': [], 'agentSeen': 0, 'turnStartedAt': time.time()}
     restore_opening(game)
     with connect() as db:
         db.execute('INSERT INTO rooms VALUES (?,?,?,?,?)', (room, digest(human), digest(agent), json.dumps(game), time.time()))
@@ -198,6 +200,8 @@ def action(room: str, body: Action, x_gomoku_token: str = Header(default='')):
                     game.update(status='draw')
                 if role == 'agent':
                     game['agentSeen'] = time.time()
+            if body.action in ('move', 'undo', 'reset'):
+                game['turnStartedAt'] = time.time()
             game['revision'] += 1
         db.execute('UPDATE rooms SET data=?,touched=? WHERE id=?', (json.dumps(game, ensure_ascii=False), time.time(), room))
     return snapshot(game, role)

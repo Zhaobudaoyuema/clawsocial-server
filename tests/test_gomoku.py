@@ -167,3 +167,46 @@ def test_wait_turn_wakes_when_opponent_records_move(relay_client):
         assert play(c, r, p, 'H8', 0).status_code == 200
         g = waiting.result(timeout=3).json()
     assert g['revision'] == 1 and g['yourTurn'] and 'timeout' not in g
+
+
+def test_relay_deadline_survives_reads_and_heartbeat(relay_client, monkeypatch):
+    clock = {'now': 1000.0}
+    monkeypatch.setattr(gomoku.time, 'time', lambda: clock['now'])
+    c = relay_client
+    r = c.post('/api/gomoku/rooms', json={'mode': 'relay', 'ownColor': 'white'}).json()
+    p = '/api/gomoku/rooms/' + r['id']
+    a = {'X-Gomoku-Token': r['agentToken']}
+    assert c.get(p, headers=a).json()['moveDeadline'] is None
+    clock['now'] = 1010.0
+    g = play(c, r, p, 'A1', 0).json()
+    assert (g['turnStartedAt'], g['moveDeadline'], g['serverTime']) == (1010.0, 1025.0, 1010.0)
+    clock['now'] = 1020.0
+    g = c.post(p + '/actions', headers=a, json={'action': 'heartbeat', 'expectedRevision': 1}).json()
+    assert (g['moveDeadline'], g['serverTime'], g['revision']) == (1025.0, 1020.0, 1)
+    assert c.get(p, headers=a).json()['moveDeadline'] == 1025.0
+    clock['now'] = 1026.0
+    # A timeout is a visible warning, not automatic forfeiture or a random move.
+    assert c.get(p, headers=a).json()['moveDeadline'] == 1025.0
+    g = c.post(p + '/actions', headers=a, json={'move': 'O15', 'expectedRevision': 1}).json()
+    assert g['moveDeadline'] is None and g['status'] == 'playing'
+    clock['now'] = 1030.0
+    g = play(c, r, p, 'A2', 2).json()
+    assert g['moveDeadline'] == 1045.0
+
+
+def test_relay_deadline_clears_on_undo_and_reset(relay_client):
+    c = relay_client
+    r = c.post('/api/gomoku/rooms', json={'mode': 'relay', 'ownColor': 'black'}).json()
+    p = '/api/gomoku/rooms/' + r['id']
+    h = {'X-Gomoku-Token': r['humanToken']}
+    assert c.get(p, headers=h).json()['moveDeadline'] is None
+    assert play(c, r, p, 'A15', 0).json()['moveDeadline'] is not None
+    for action, revision in [('undo', 1), ('reset', 2)]:
+        g = c.post(p + '/actions', headers=h, json={'action': action, 'expectedRevision': revision}).json()
+        assert g['moveDeadline'] is None and len(g['moves']) == 1
+
+
+def test_existing_rooms_without_timer_remain_readable():
+    g = {'id': 'old', 'humanColor': 'black', 'status': 'playing', 'winner': None,
+         'winningLine': [], 'moves': [], 'revision': 0}
+    assert gomoku.snapshot(g, 'agent')['moveDeadline'] is None
