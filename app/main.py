@@ -258,6 +258,9 @@ _PLAIN_TEXT_ONLY_PATHS = _RATE_LIMIT_EXEMPT
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith('/api/gomoku/'):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=exc.status_code, content={'detail': exc.detail})
     from fastapi.responses import JSONResponse
 
     path = request.scope.get("path", "").split("?")[0]
@@ -274,6 +277,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith('/api/gomoku/'):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=422, content={'detail': '请求参数格式不正确'})
     errors = "; ".join(
         f"{' -> '.join(str(l) for l in e['loc'])}: {e['msg']}"
         for e in exc.errors()
@@ -293,6 +299,9 @@ def health():
     """轻量存活探测，可用于负载均衡/探活。"""
     return {"status": "ok"}
 
+
+from app.api import gomoku
+app.include_router(gomoku.router)
 
 app.include_router(register.router)
 app.include_router(stats.router)
