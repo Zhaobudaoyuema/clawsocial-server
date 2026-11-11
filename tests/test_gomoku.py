@@ -82,3 +82,88 @@ def test_terminal_human_move_can_be_reviewed(room):
 def test_integrated_app_preserves_error_status(client):
     assert client.get('/api/gomoku/rooms/missing').status_code==404
     assert client.post('/api/gomoku/rooms',json={'humanColor':'invalid'}).status_code==422
+
+
+@pytest.fixture
+def relay_client(tmp_path, monkeypatch):
+    monkeypatch.setenv('GOMOKU_DB', str(tmp_path / 'relay.sqlite'))
+    app = FastAPI()
+    app.include_router(gomoku.router)
+    with TestClient(app) as client:
+        yield client
+
+
+def test_relay_black_center_and_roles(relay_client):
+    c = relay_client
+    r = c.post('/api/gomoku/rooms', json={'mode': 'relay', 'ownColor': 'black'}).json()
+    p = '/api/gomoku/rooms/' + r['id']
+    h = {'X-Gomoku-Token': r['humanToken']}
+    a = {'X-Gomoku-Token': r['agentToken']}
+    g = c.get(p, headers=h).json()
+    assert (g['humanColor'], g['agentColor'], g['nextColor'], g['yourTurn']) == ('white', 'black', 'white', True)
+    assert [(m['color'], m['at']) for m in g['moves']] == [('black', 'H8')]
+    assert play(c, r, p, 'I9', 0, 'agent', explanation='').status_code == 409
+    assert play(c, r, p, 'I8', 0).status_code == 200
+    response = c.post(p + '/actions', headers=a, json={'move': 'I9', 'expectedRevision': 1})
+    assert response.status_code == 200
+    g = response.json()
+    assert [(m['color'], m['at']) for m in g['moves']] == [('black', 'H8'), ('white', 'I8'), ('black', 'I9')]
+    assert g['moves'][-1]['explanation'] == ''
+    assert c.post(p + '/actions', headers=a, json={'move': 'J9', 'expectedRevision': 1}).status_code == 409
+    assert c.post(p + '/actions', headers=a, json={'move': 'J9', 'expectedRevision': 2}).status_code == 409
+
+
+def test_relay_white_waits_for_recorded_opponent(relay_client):
+    c = relay_client
+    r = c.post('/api/gomoku/rooms', json={'mode': 'relay', 'ownColor': 'white'}).json()
+    p = '/api/gomoku/rooms/' + r['id']
+    a = {'X-Gomoku-Token': r['agentToken']}
+    g = c.get(p, headers=a).json()
+    assert (g['moves'], g['yourTurn'], g['humanColor'], g['agentColor']) == ([], False, 'black', 'white')
+    assert play(c, r, p, 'H8', 0).status_code == 200
+    assert c.post(p + '/actions', headers=a, json={'move': 'I8', 'expectedRevision': 1}).status_code == 200
+
+
+def test_relay_undo_and_reset_keep_our_black_opening(relay_client):
+    c = relay_client
+    r = c.post('/api/gomoku/rooms', json={'mode': 'relay', 'ownColor': 'black'}).json()
+    p = '/api/gomoku/rooms/' + r['id']
+    h = {'X-Gomoku-Token': r['humanToken']}
+    play(c, r, p, 'I8', 0)
+    play(c, r, p, 'I9', 1, 'agent', explanation='')
+    for action, revision in [('undo', 2), ('reset', 3), ('undo', 4)]:
+        g = c.post(p + '/actions', headers=h, json={'action': action, 'expectedRevision': revision}).json()
+        assert [(m['color'], m['at']) for m in g['moves']] == [('black', 'H8')]
+        assert g['yourTurn'] and g['revision'] == revision + 1
+
+
+def test_wait_turn_auth_change_and_timeout(relay_client):
+    c = relay_client
+    r = c.post('/api/gomoku/rooms', json={'mode': 'relay', 'ownColor': 'white'}).json()
+    p = '/api/gomoku/rooms/' + r['id']
+    a = {'X-Gomoku-Token': r['agentToken']}
+    assert c.get(p + '/turn?afterRevision=0&timeout=1').status_code == 404
+    assert c.get(p + '/turn?afterRevision=0&timeout=16', headers=a).status_code == 422
+    g = c.get(p + '/turn?afterRevision=-1&timeout=1', headers=a).json()
+    assert g['revision'] == 0 and not g['yourTurn'] and 'timeout' not in g
+    g = c.get(p + '/turn?afterRevision=0&timeout=1', headers=a).json()
+    assert g['timeout'] and g['revision'] == 0
+    play(c, r, p, 'H8', 0)
+    g = c.get(p + '/turn?afterRevision=0&timeout=1', headers=a).json()
+    assert g['yourTurn'] and g['revision'] == 1 and 'timeout' not in g
+
+
+def test_wait_turn_wakes_when_opponent_records_move(relay_client):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    c = relay_client
+    r = c.post('/api/gomoku/rooms', json={'mode': 'relay', 'ownColor': 'white'}).json()
+    p = '/api/gomoku/rooms/' + r['id']
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = pool.submit(c.get, p + '/turn?afterRevision=0&timeout=2',
+                              headers={'X-Gomoku-Token': r['agentToken']})
+        time.sleep(0.1)
+        assert play(c, r, p, 'H8', 0).status_code == 200
+        g = waiting.result(timeout=3).json()
+    assert g['revision'] == 1 and g['yourTurn'] and 'timeout' not in g

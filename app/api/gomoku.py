@@ -1,4 +1,5 @@
 """Shared, capability-authenticated Gomoku rooms; no model or SSH credentials."""
+import asyncio
 import hashlib
 import json
 import os
@@ -92,8 +93,16 @@ def snapshot(game, role):
             'agentOnline': time.time() - game.get('agentSeen', 0) < 35}
 
 
+def restore_opening(game):
+    if game.get('mode') == 'relay' and game['humanColor'] == 'white' and not game['moves']:
+        game['moves'].append({'number': 1, 'color': 'black', 'at': 'H8',
+                              'review': '', 'explanation': '', 'highlights': []})
+
+
 class NewGame(BaseModel):
     humanColor: Literal['black', 'white'] = 'black'
+    mode: Literal['match', 'relay'] = 'match'
+    ownColor: Literal['black', 'white'] = 'black'
 
 
 class Action(BaseModel):
@@ -114,7 +123,9 @@ def page():
 @router.post('/api/gomoku/rooms')
 def create(body: NewGame):
     room, human, agent = secrets.token_urlsafe(12), secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    game = {'id': room, 'revision': 0, 'humanColor': body.humanColor, 'status': 'playing', 'winner': None, 'winningLine': [], 'moves': [], 'agentSeen': 0}
+    human_color = ('white' if body.ownColor == 'black' else 'black') if body.mode == 'relay' else body.humanColor
+    game = {'id': room, 'revision': 0, 'mode': body.mode, 'humanColor': human_color, 'status': 'playing', 'winner': None, 'winningLine': [], 'moves': [], 'agentSeen': 0}
+    restore_opening(game)
     with connect() as db:
         db.execute('INSERT INTO rooms VALUES (?,?,?,?,?)', (room, digest(human), digest(agent), json.dumps(game), time.time()))
     return {'id': room, 'humanToken': human, 'agentToken': agent}
@@ -147,6 +158,7 @@ def action(room: str, body: Action, x_gomoku_token: str = Header(default='')):
                     game['moves'].pop()
                     if game['moves'] and ('black' if len(game['moves']) % 2 == 0 else 'white') != game['humanColor']:
                         game['moves'].pop()
+                restore_opening(game)
                 game.update(status='playing', winner=None, winningLine=[])
             elif body.action == 'review':
                 if role != 'agent' or not game['moves'] or game['moves'][-1]['color'] != game['humanColor']:
@@ -172,7 +184,7 @@ def action(room: str, body: Action, x_gomoku_token: str = Header(default='')):
                     raise HTTPException(409, '这个位置已有棋子')
                 for h in body.highlights:
                     parse(h)
-                if role == 'agent' and not body.explanation.strip():
+                if role == 'agent' and game.get('mode', 'match') == 'match' and not body.explanation.strip():
                     raise HTTPException(422, '请为这一手提供简短讲解')
                 game['moves'].append({'number': len(game['moves']) + 1, 'color': color, 'at': body.move,
                                       'review': body.humanMoveReview if role == 'agent' else '',
@@ -188,4 +200,27 @@ def action(room: str, body: Action, x_gomoku_token: str = Header(default='')):
                     game['agentSeen'] = time.time()
             game['revision'] += 1
         db.execute('UPDATE rooms SET data=?,touched=? WHERE id=?', (json.dumps(game, ensure_ascii=False), time.time(), room))
+    return snapshot(game, role)
+
+
+@router.get('/api/gomoku/rooms/{room}/turn')
+async def wait_turn(room: str, afterRevision: int = -1, timeout: int = 15,
+                    x_gomoku_token: str = Header(default='')):
+    # Bound each native tool call below the client's 20-second execution limit.
+    if not 1 <= timeout <= 15:
+        raise HTTPException(422, '等待时间应为 1–15 秒')
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        game, role = load(db, room, x_gomoku_token)
+        if role == 'agent':
+            game['agentSeen'] = time.time()
+            db.execute('UPDATE rooms SET data=? WHERE id=?', (json.dumps(game, ensure_ascii=False), room))
+    deadline = time.monotonic() + timeout
+    while game['revision'] == afterRevision and game['status'] == 'playing':
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {**snapshot(game, role), 'timeout': True}
+        await asyncio.sleep(min(0.2, remaining))
+        with connect() as db:
+            game, role = load(db, room, x_gomoku_token)
     return snapshot(game, role)
