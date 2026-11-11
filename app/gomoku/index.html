@@ -83,6 +83,7 @@ async function registerTools(){
  ];
  try{for(const tool of tools)await mc.registerTool(tool);$('capability').textContent='✓ Codex 读盘与落子工具就绪';$('capability').classList.add('ready')}catch(e){$('capability').textContent='工具注册失败：'+e.message}
 }
+addEventListener('hashchange',()=>{const p=new URLSearchParams(location.hash.slice(1));if(p.has('room')&&p.has('token')&&(!room||p.get('room')!==room.id||p.get('token')!==room.token))location.reload()});
 loadLink();
 if(room){agentToken=sessionStorage.getItem('gomoku-invite:'+room.id)||'';refresh().catch(e=>toast(e.message))}
 registerTools();
