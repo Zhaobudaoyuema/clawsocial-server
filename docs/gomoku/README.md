@@ -1,6 +1,6 @@
 # 五子棋快速代下
 
-正式入口 https://clawsocial.world/gomoku。用户已确认腾讯小程序为 15×15，区别是显示大小；保留 A–O / 1–15 坐标、中心 H8。页面撤掉讲解侧栏，棋盘独占主要宽度，桌面棋盘框最大 1040px，手机减少边距。
+正式入口 https://clawsocial.world/gomoku。用户已确认腾讯小程序为 15×15，坐标与腾讯截图一致：A1 左下、O15 右上，字母位于底边，数字向上递增，中心 H8。页面撤掉讲解侧栏，棋盘独占主要宽度，棋盘框最大 560px，并按视口高度减去 330px 限制大小，手机同时受可用宽度限制；顶部与操作区收紧间距，使棋盘与操作按钮在一屏内显示。
 
 ## 使用方式
 
@@ -21,11 +21,15 @@ SQLite 默认 `/app/logs/gomoku/rooms.sqlite3`，随现有部署程序迁移 log
 
 仅注册三个原生 WebMCP 工具：
 
-- get_turn：一次 heartbeat POST 获取最新完整棋盘，明确 Codex 是替用户下棋，不是用户的对手。
-- play_turn：仅传 move、expectedRevision；一次 POST 落子并返回完整更新状态，不要额外刷新/读页面/截图/播报。
-- wait_for_turn：一次 GET `/api/gomoku/rooms/{room}/turn?afterRevision=...&timeout=15`。服务端最多等待 15 秒、每 200ms 检查一次变化，有变化直接返回完整棋盘；超时后继续等待。低于实测客户端约 20 秒的工具执行限制，避免旧版等待 25 秒导致工具连接失效。
+- get_turn：一次 heartbeat POST 获取最新黑白坐标列表，明确 Codex 是替用户下棋，不是用户的对手。固定棋盘规则放在工具描述中。
+- play_turn：仅传 move、expectedRevision；一次 POST 落子，工具只返回 revision / played 确认（终局追加 status / winner），不要额外刷新/读页面/截图/播报。
+- wait_for_turn：一次 GET `/api/gomoku/rooms/{room}/turn?afterRevision=...&timeout=15`。服务端最多等待 15 秒、每 200ms 检查一次变化，有变化直接返回黑白坐标列表；超时仅返回 revision / timeout，之后继续等待。低于实测客户端约 20 秒的工具执行限制，避免旧版等待 25 秒导致工具连接失效。
 
-录入页面每 400ms 同步一次，Codex 连接页不额外轮询。工具上下文用 15 行紧凑棋盘，不重复完整棋谱或教学文本。网络响应优化不保证模型思考瞬时完成；Codex 必须保持当前对弈任务运行，页面不自行调用模型，也不会在聊天结束后自动唤醒 Codex。
+录入页面每 400ms 同步一次，Codex 连接页不额外轮询。工具上下文用空格分隔的 black / white 坐标列表，未列出的格点为空；只在有一步获胜点时追加 win / block，终局追加 status / winner。示例：`{"revision":3,"you":"white","yourTurn":true,"black":"A1 K15","white":"O15","secondsLeft":12}`。落子后直接 wait_for_turn，不重复 get_turn。网络响应优化不保证模型思考瞬时完成；Codex 必须保持当前对弈任务运行，页面不自行调用模型，也不会在聊天结束后自动唤醒 Codex。
+
+## 15 秒提示
+
+服务端在成功落子、撤销或重开时保存 turnStartedAt，moveDeadline 按此时间加 15 秒派生；只在 relay 的 Codex 回合显示。读取、heartbeat、页面轮询及刷新均不重置计时。页面用 serverTime 校准时钟，每 100ms 更新显示，剩余 5 秒变红，归零提示“已超时 · 请立即落子”；不会自动判负或代落随机棋。旧房间缺少时间戳时先不显示，下次落子后开始。该提示不能保证模型在 15 秒内应答。
 
 ## HTTPS 与部署
 
@@ -43,3 +47,5 @@ SQLite 默认 `/app/logs/gomoku/rooms.sqlite3`，随现有部署程序迁移 log
 本地回归：`.venv/bin/python -m pytest tests/test_api.py tests/test_gomoku.py tests/test_remote_command.py tests/test_remote_command_v11.py`。
 
 原生 Codex 内置浏览器验收：黑棋自动 H8 → 用户录入白棋 I8 → agent get_turn / play_turn（无讲解）→ 原页面显示我方 I9；白棋空盘 → 用户录入黑棋 H8 → agent 白棋应手。wait_for_turn 超时在约 15 秒正常返回，工具句柄仍可用；输入后提前返回。接口注入测试不能替代原生验收。
+
+本轮本地验收：92 项回归通过；原生 WebMCP 读盘返回坐标列表，play_turn 返回精简确认，A1 左下、O15 右上及鼠标 K15 录入正确；刷新倒计时继续递减。
