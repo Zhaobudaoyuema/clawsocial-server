@@ -108,6 +108,7 @@ async def serve_target(ws, target_id, session, relay):
     await ws.send_json(
         {
             "type": "registered",
+            "result_chunks": 1,
             "id": target_id,
             "expires_at": session.expires_at.isoformat(),
         }
@@ -115,13 +116,20 @@ async def serve_target(ws, target_id, session, relay):
     try:
         while True:
             raw = await asyncio.wait_for(ws.receive_text(), timeout=max(0.01, (session.expires_at - datetime.now(timezone.utc)).total_seconds()))
-            if len(raw.encode("utf-8")) > 262144:
-                await ws.close(code=1009, reason="message too large")
-                break
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
+                if len(raw.encode("utf-8")) > 262144:
+                    await ws.close(code=1009, reason="message too large")
+                    break
                 continue
+            # Legacy agents send a single result; permit it up to the transport
+            # limit. New agents keep all chunk frames below the original limit.
+            if len(raw.encode("utf-8")) > 262144 and not (
+                isinstance(msg, dict) and msg.get("type") == "result"
+            ):
+                await ws.close(code=1009, reason="message too large")
+                break
             if isinstance(msg, dict):
                 msg["target_id"] = target_id
                 await relay.handle_message(msg)

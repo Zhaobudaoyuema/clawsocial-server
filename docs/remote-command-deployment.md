@@ -36,3 +36,38 @@
 Dockerfile 标记 `remote-command.version=12`、`remote-command.legacy-v11=enabled`，
 与现有服务器部署检查一致。生产部署应保留 MySQL 数据卷和只读操作员 token 文件挂载。
 本次代码同步不包含自动部署回调服务，也不更改 Nginx 配置。
+
+## 大输出分片（2026-11-13）
+
+服务端 WebSocket `registered` 消息新增 `result_chunks: 1`。Agent 仅在该能力存在时，
+将超过 256 KiB JSON 帧的命令输出拆为 `result_chunk`：`request_id`、从 0 递增的
+`sequence`、`stream`（stdout/stderr）、`data`。每片最多 16384 个 Unicode 字符，
+包括 JSON 转义在内仍低于 256 KiB。最后发送原 `result`（退出码及耗时保留），
+stdout/stderr 留空并携带 `chunk_count`。只有收到数量匹配的结束帧才返回完整结果。
+HTTP 执行接口的响应格式不变；分片不代表命令重跑。
+
+分片暂存仅属于原待处理请求，按原授权目标校验；乱序、重复或结束帧不一致使本次
+命令返回 502，超时、取消、断开时释放。单命令 stdout/stderr 合计最多 32 MiB，
+最多 4096 片，超限返回明确错误且不关闭目标连接。不返回部分输出冒充成功。
+旧版单包 result 不再受应用层 256 KiB 门限限制，仍受 Uvicorn 原生帧上限约束
+（默认 16 MiB）；大于该值须升级 Agent。新 Agent 接入旧服务端时，超限结果会报告
+需要升级服务端并保留连接，不自动重跑已执行命令。
+
+macOS 公网 v9 的来源为已发布 macOS v8，保持其执行策略、异步执行、心跳和 shell
+回退行为，源码为 `scripts/remote_command_public_agent.py`。它与原受限脚本
+`scripts/remote_command_target_agent.py` 共用 `remote_command_output.py` 分片实现；
+原受限脚本的执行策略不变。打包复用经过 SHA-256 校验的 v8 依赖：
+
+```bash
+python3 scripts/build_remote_public_agent.py /tmp/remote-command-target-agent-public-v9.pyz
+```
+
+新的 macOS 公网临时 Agent（180 分钟，需保持终端开启）：
+
+```bash
+curl -fsSL 'https://ns.chat.360.cn/zhaomi-so/client-up/d1aa54dd3ab0133a8de4aeef462713e7e4936dfb/start-remote-command-public-macos-v9.sh' | REMOTE_COMMAND_BASE_URL=http://clawsocial.world bash -s -- quick
+```
+
+包：`https://ns.chat.360.cn/zhaomi-so/client-up/269d8132e68b10a27c9c0a809f68781e4e6b6171/remote-command-target-agent-public-v9.pyz`。
+SHA-256：`b988b4ead27737ecbee62a3c45aff47599af0a81cc0cb4b8676c7b3527f351cf`。
+旧 CDN 链接不可变，正在运行的旧 Agent 不会自动获得分片能力；使用新入口重新启动。

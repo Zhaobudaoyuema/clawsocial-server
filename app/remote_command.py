@@ -88,13 +88,57 @@ class RemoteCommandSession:
         }
 
 
+# Bounds aggregate command output, not individual WebSocket frames.
+MAX_RESULT_BYTES = 32 * 1024 * 1024
+MAX_RESULT_CHUNKS = 4096
+
+
+@dataclass
+class PendingCommand:
+    target_id: str
+    future: asyncio.Future
+    chunks: dict[str, list[str]] = field(default_factory=lambda: {"stdout": [], "stderr": []})
+    sequence: int = 0
+    size: int = 0
+
+    def receive(self, raw: dict[str, Any]) -> None:
+        if self.future.done():
+            return
+        if raw.get("type") == "result_chunk":
+            stream, data = raw.get("stream"), raw.get("data")
+            if (stream not in ("stdout", "stderr") or not isinstance(data, str)
+                    or type(raw.get("sequence")) is not int or raw["sequence"] != self.sequence
+                    or not data or self.sequence >= MAX_RESULT_CHUNKS):
+                self.future.set_exception(RemoteCommandError(502, "invalid_result_chunk"))
+                return
+            self.size += len(data.encode("utf-8"))
+            if self.size > MAX_RESULT_BYTES:
+                self.future.set_exception(RemoteCommandError(413, "command_output_too_large"))
+                self.chunks.clear()
+                return
+            self.chunks[stream].append(data)
+            self.sequence += 1
+            return
+        if self.sequence or "chunk_count" in raw:
+            if (type(raw.get("chunk_count")) is not int or raw["chunk_count"] != self.sequence
+                    or raw.get("stdout") or raw.get("stderr")):
+                self.future.set_exception(RemoteCommandError(502, "incomplete_result_chunks"))
+                return
+            raw = {**raw, **{stream: "".join(parts) for stream, parts in self.chunks.items()}}
+        elif sum(len(str(raw.get(stream) or "").encode("utf-8"))
+                 for stream in ("stdout", "stderr")) > MAX_RESULT_BYTES:
+            self.future.set_exception(RemoteCommandError(413, "command_output_too_large"))
+            return
+        self.future.set_result(raw)
+
+
 class RemoteCommandRelay:
     """Tracks controlled machines and routes command requests to them."""
 
     def __init__(self) -> None:
         self._grants: dict[str, RemoteCommandGrant] = {}
         self._sessions: dict[str, RemoteCommandSession] = {}
-        self._pending: dict[str, tuple[str, asyncio.Future]] = {}
+        self._pending: dict[str, PendingCommand] = {}
         self._lock = asyncio.Lock()
 
     def issue_connection_token(self, target_id: str) -> str:
@@ -173,15 +217,15 @@ class RemoteCommandRelay:
                     grant.disconnected_at = now
                     grant.last_seen_at = now
                 self._sessions.pop(target_id, None)
-            for owner, fut in self._pending.values():
-                if owner in disconnected_ids and not fut.done():
-                    fut.set_exception(RemoteCommandError(503, "target_disconnected"))
+            for pending in self._pending.values():
+                if pending.target_id in disconnected_ids and not pending.future.done():
+                    pending.future.set_exception(RemoteCommandError(503, "target_disconnected"))
 
     async def clear_all(self, *, reason: str = "remote_command_reset") -> dict[str, int]:
         """Drop all grants, sessions, and pending command requests."""
         async with self._lock:
             sessions = list(self._sessions.values())
-            pending = [fut for _, fut in self._pending.values()]
+            pending = [pending.future for pending in self._pending.values()]
             grant_count = len(self._grants)
             session_count = len(sessions)
             pending_count = len(pending)
@@ -208,13 +252,11 @@ class RemoteCommandRelay:
         if msg_type == "hello":
             await self._update_metadata(raw)
             return
-        if msg_type == "result":
+        if msg_type in ("result", "result_chunk"):
             req_id = str(raw.get("request_id") or "")
             pending = self._pending.get(req_id)
-            if pending:
-                owner, fut = pending
-                if owner == raw.get("target_id") and not fut.done():
-                    fut.set_result(raw)
+            if pending and pending.target_id == raw.get("target_id"):
+                pending.receive(raw)
 
     async def _update_metadata(self, raw: dict[str, Any]) -> None:
         target_id = str(raw.get("target_id") or "")
@@ -291,9 +333,9 @@ class RemoteCommandRelay:
         request_id = f"cmd-{uuid.uuid4().hex[:12]}"
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
-        if len(self._pending) >= 32 or any(owner == target_id for owner, _ in self._pending.values()):
+        if len(self._pending) >= 32 or any(p.target_id == target_id for p in self._pending.values()):
             raise RemoteCommandError(429, "target_busy_or_server_limit")
-        self._pending[request_id] = (target_id, fut)
+        self._pending[request_id] = PendingCommand(target_id, fut)
         try:
             await session.ws.send_json(
                 {

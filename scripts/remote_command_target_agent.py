@@ -22,6 +22,11 @@ from urllib.request import Request, urlopen
 
 import websockets
 
+if __package__:
+    from .remote_command_output import send_result
+else:
+    from remote_command_output import send_result
+
 
 DEFAULT_BASE_URL = "http://clawsocial.world"
 DEFAULT_EXPIRES_IN_MINUTES = 180
@@ -176,6 +181,7 @@ class TargetAgent:
 
         async with websockets.connect(self.ws_url()) as websocket:
             registered_message = await websocket.recv()
+            chunks_supported = json.loads(registered_message).get("result_chunks") == 1
             print(f"已连接服务端: {registered_message}", flush=True)
             await websocket.send(
                 json.dumps(
@@ -204,8 +210,8 @@ class TargetAgent:
                     message.get("shell"),
                     min(float(message.get("timeout") or 60), self.remaining_seconds()),
                 )
-                result.update({"type": "result", "request_id": message["request_id"]})
-                await websocket.send(json.dumps(result, ensure_ascii=False))
+                await send_result(websocket, message["request_id"], result,
+                                  chunks_supported=chunks_supported)
 
             await websocket.close(code=1000, reason="local authorization expired")
             print("授权已到期，本地 agent 已断开。", flush=True)

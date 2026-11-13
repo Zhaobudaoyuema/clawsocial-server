@@ -70,6 +70,7 @@ def test_execute_round_trip(client):
         registered = ws.receive_json()
         assert registered == {
             "type": "registered",
+            "result_chunks": 1,
             "id": "pc-home",
             "expires_at": registered_target["expires_at"],
         }
