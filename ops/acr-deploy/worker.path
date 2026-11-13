@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch durable ClawSocial deployment queue
+
+[Path]
+PathExistsGlob=/var/lib/clawsocial-deploy/queue/*.json
+Unit=clawsocial-deploy-worker.service
+
+[Install]
+WantedBy=multi-user.target

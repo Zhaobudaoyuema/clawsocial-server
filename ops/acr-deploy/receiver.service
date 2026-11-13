@@ -1,0 +1,22 @@
+[Unit]
+Description=ClawSocial ACR webhook receiver
+After=network.target
+
+[Service]
+User=clawsocial-deploy
+Group=clawsocial-deploy
+ExecStart=/usr/bin/python3 /opt/clawsocial-deploy/deploy.py serve
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/clawsocial-deploy/queue
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

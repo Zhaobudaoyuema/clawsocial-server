@@ -1,0 +1,10 @@
+{
+  "repository": "crpi-3cq24iswf1g1kspv.cn-beijing.personal.cr.aliyuncs.com/my_openwechat_claw/clawsocial-server",
+  "tag": "v3",
+  "region": "cn-beijing",
+  "container": "clawsocial",
+  "required_labels": {
+    "remote-command.version": "12",
+    "remote-command.legacy-v11": "enabled"
+  }
+}
